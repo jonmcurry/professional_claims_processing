@@ -5,7 +5,8 @@ from ..config.config import AppConfig
 from ..db.postgres import PostgresDatabase
 from ..db.sql_server import SQLServerDatabase
 from ..models.filter_model import FilterModel
-from ..rules.engine import RulesEngine, Rule
+from ..rules.engine import Rule
+from ..rules.durable_engine import DurableRulesEngine
 from ..validation.validator import ClaimValidator
 from ..utils.cache import InMemoryCache
 from ..utils.logging import setup_logging, RequestContextFilter
@@ -18,7 +19,7 @@ class ClaimsPipeline:
         self.pg = PostgresDatabase(cfg.postgres)
         self.sql = SQLServerDatabase(cfg.sqlserver)
         self.model: FilterModel | None = None
-        self.rules_engine: RulesEngine | None = None
+        self.rules_engine: DurableRulesEngine | None = None
         self.validator: ClaimValidator | None = None
         self.cache = InMemoryCache()
 
@@ -26,7 +27,7 @@ class ClaimsPipeline:
         await asyncio.gather(self.pg.connect(), self.sql.connect())
         # Connection pool warming
         self.model = FilterModel("model.joblib")
-        self.rules_engine = RulesEngine([])
+        self.rules_engine = DurableRulesEngine([])
         self.validator = ClaimValidator(set(), set())
 
     async def process_batch(self) -> None:
