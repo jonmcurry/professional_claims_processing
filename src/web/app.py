@@ -55,11 +55,13 @@ def create_app(
             status_code=500, content={"detail": "Internal Server Error"}
         )
 
+    ROLE_LEVEL = {"auditor": 1, "user": 1, "admin": 2}
+
     def _check_role(required: str, role: str | None) -> None:
         if role is None:
             return
         current = role or "user"
-        if required and current != required:
+        if ROLE_LEVEL.get(current, -1) < ROLE_LEVEL.get(required, 0):
             raise HTTPException(status_code=403, detail="Forbidden")
 
     @app.middleware("http")
@@ -121,10 +123,11 @@ def create_app(
 
     @app.get("/api/failed_claims")
     async def api_failed_claims(
-        x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+        request: Request, x_api_key: str = Header(...), x_user_role: str | None = Header(None)
     ):
+        role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
-        _check_role("user", x_user_role)
+        _check_role("user", role)
         rows = await sql.fetch(
             "SELECT TOP 100 * FROM failed_claims ORDER BY failed_at DESC"
         )
@@ -132,10 +135,11 @@ def create_app(
 
     @app.get("/failed_claims", response_class=HTMLResponse)
     async def failed_claims_page(
-        x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+        request: Request, x_api_key: str = Header(...), x_user_role: str | None = Header(None)
     ):
+        role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
-        _check_role("user", x_user_role)
+        _check_role("user", role)
         rows = await sql.fetch(
             "SELECT TOP 100 * FROM failed_claims ORDER BY failed_at DESC"
         )
@@ -159,35 +163,39 @@ def create_app(
 
     @app.get("/status")
     async def status(
-        x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+        request: Request, x_api_key: str = Header(...), x_user_role: str | None = Header(None)
     ):
+        role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
-        _check_role("user", x_user_role)
+        _check_role("user", role)
         return processing_status
 
     @app.get("/batch_status")
     async def get_batch_status(
-        x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+        request: Request, x_api_key: str = Header(...), x_user_role: str | None = Header(None)
     ):
+        role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
-        _check_role("user", x_user_role)
+        _check_role("user", role)
         return batch_status
 
     @app.get("/health")
     async def health(
-        x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+        request: Request, x_api_key: str = Header(...), x_user_role: str | None = Header(None)
     ):
+        role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
-        _check_role("user", x_user_role)
+        _check_role("user", role)
         ok = await sql.health_check()
         return {"sqlserver": ok}
 
     @app.get("/readiness")
     async def readiness(
-        x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+        request: Request, x_api_key: str = Header(...), x_user_role: str | None = Header(None)
     ):
+        role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
-        _check_role("user", x_user_role)
+        _check_role("user", role)
         pg_ok = await pg.health_check()
         sql_ok = await sql.health_check()
         return {"postgres": pg_ok, "sqlserver": sql_ok}
@@ -198,27 +206,30 @@ def create_app(
 
     @app.get("/metrics")
     async def get_metrics(
-        x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+        request: Request, x_api_key: str = Header(...), x_user_role: str | None = Header(None)
     ):
+        role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
-        _check_role("admin", x_user_role)
+        _check_role("admin", role)
         return metrics.as_dict()
 
     @app.get("/profiling/start")
     async def profiling_start(
-        x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+        request: Request, x_api_key: str = Header(...), x_user_role: str | None = Header(None)
     ):
+        role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
-        _check_role("admin", x_user_role)
+        _check_role("admin", role)
         start_profiling()
         return {"profiling": "started"}
 
     @app.get("/profiling/stop")
     async def profiling_stop(
-        x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+        request: Request, x_api_key: str = Header(...), x_user_role: str | None = Header(None)
     ):
+        role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
-        _check_role("admin", x_user_role)
+        _check_role("admin", role)
         stats = stop_profiling()
         return {"profiling": "stopped", "stats": stats}
 

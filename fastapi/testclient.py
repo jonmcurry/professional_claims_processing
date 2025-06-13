@@ -1,5 +1,5 @@
 import asyncio
-from . import HTMLResponse, Request
+from . import HTMLResponse, Request, HTTPException
 
 class Response:
     def __init__(self, status_code=200, json=None, content=None, headers=None):
@@ -34,11 +34,18 @@ class TestClient:
         kwargs = {}
         if headers and "X-API-Key" in headers:
             kwargs["x_api_key"] = headers["X-API-Key"]
+        if headers and "X-User-Role" in headers:
+            kwargs["x_user_role"] = headers["X-User-Role"]
         request = Request(headers)
-        if asyncio.iscoroutinefunction(func):
-            result = self.loop.run_until_complete(func(**kwargs))
-        else:
-            result = func(**kwargs)
+        if "request" in func.__code__.co_varnames:
+            kwargs["request"] = request
+        try:
+            if asyncio.iscoroutinefunction(func):
+                result = self.loop.run_until_complete(func(**kwargs))
+            else:
+                result = func(**kwargs)
+        except HTTPException as exc:
+            result = Response(status_code=exc.status_code, json={"detail": exc.detail})
         if isinstance(result, HTMLResponse):
             response = Response(content=str(result), headers={})
         elif isinstance(result, Response):

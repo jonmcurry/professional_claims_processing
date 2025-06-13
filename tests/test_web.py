@@ -73,6 +73,16 @@ def test_metrics_endpoint(client):
     assert data["claims_processed"] == 3
 
 
+def test_auditor_role_allowed_on_user_endpoints(client):
+    resp = client.get("/status", headers={"X-API-Key": "test", "X-User-Role": "auditor"})
+    assert resp.status_code == 200
+
+
+def test_auditor_role_denied_on_admin_endpoint(client):
+    resp = client.get("/metrics", headers={"X-API-Key": "test", "X-User-Role": "auditor"})
+    assert resp.status_code == 403
+
+
 def test_rate_limit(client):
     resp1 = client.get("/liveness")
     assert resp1.status_code == 200
