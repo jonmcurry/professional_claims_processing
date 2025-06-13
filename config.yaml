@@ -17,3 +17,6 @@ processing:
 security:
   api_key: changeme
   encryption_key: changeme
+cache:
+  redis_url: null
+  warm_rvu_codes: []

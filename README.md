@@ -24,6 +24,10 @@ pip install -r requirements.txt
 
 Update `config.yaml` with your connection details.
 
+The `cache` section can enable Redis for distributed RVU caching. Set `redis_url`
+to your server and list common `warm_rvu_codes` to pre-populate the cache during
+startup.
+
 ## ML Model
 The processing pipeline loads a scikit-learn model from `model.joblib` located in the project root. Train your own model or obtain the file from the maintainers and place it in this location before running the pipeline.
 
