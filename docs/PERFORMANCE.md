@@ -20,3 +20,10 @@ runtime. Execute it after processing to view the summary:
 ```bash
 python -m src.analysis.query_stats
 ```
+
+## Performance Tuning
+- **Batch Size**: The `processing.batch_size` setting controls how many claims are processed at once. Increase this value cautiously to avoid exhausting database connections.
+- **Concurrency**: Run multiple worker processes to take advantage of multi-core servers. Monitor CPU usage to find the optimal number of workers.
+- **Caching**: Enable Redis caching in `config.yaml` to reduce duplicate RVU lookups.
+- **Database Indexes**: Ensure indexes exist on frequently queried columns such as `claims.claim_id` and `failed_claims.failed_at`.
+- **Model Loading**: Place the ML model on local disk for faster startup and prediction latency.
