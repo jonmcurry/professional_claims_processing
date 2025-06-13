@@ -1,9 +1,10 @@
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from ..config.config import load_config
 from ..db.sql_server import SQLServerDatabase
 from .status import processing_status
 from typing import Optional
+from ..utils.tracing import start_trace, trace_id_var
 
 
 def create_app(sql_db: Optional[SQLServerDatabase] = None, api_key: str | None = None) -> FastAPI:
@@ -11,6 +12,13 @@ def create_app(sql_db: Optional[SQLServerDatabase] = None, api_key: str | None =
     cfg = load_config()
     sql = sql_db or SQLServerDatabase(cfg.sqlserver)
     required_key = api_key or cfg.security.api_key
+
+    @app.middleware("http")
+    async def trace_middleware(request: Request, call_next):
+        start_trace(request.headers.get("X-Request-ID"))
+        response = await call_next(request)
+        response.headers["X-Trace-ID"] = trace_id_var.get("")
+        return response
 
     def _check_key(x_api_key: str) -> None:
         if required_key and x_api_key != required_key:

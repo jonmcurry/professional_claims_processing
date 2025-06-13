@@ -1,18 +1,17 @@
 import asyncio
 import json
-import uuid
-from typing import List, Dict, Any
+from typing import Dict, Any
 
 from ..config.config import AppConfig
 from ..security.compliance import encrypt_text, mask_claim_data
 from ..db.postgres import PostgresDatabase
 from ..db.sql_server import SQLServerDatabase
 from ..models.filter_model import FilterModel
-from ..rules.engine import Rule
 from ..rules.durable_engine import DurableRulesEngine
 from ..validation.validator import ClaimValidator
 from ..utils.cache import DistributedCache, InMemoryCache, RvuCache
 from ..utils.logging import setup_logging, RequestContextFilter
+from ..utils.tracing import start_trace, start_span
 from ..utils.audit import record_audit_event
 from .repair import ClaimRepairSuggester
 from ..web.status import processing_status
@@ -58,8 +57,7 @@ class ClaimsPipeline:
         if not self.request_filter:
             self.request_filter = RequestContextFilter()
             self.logger.addFilter(self.request_filter)
-        else:
-            self.request_filter.request_id = str(uuid.uuid4())
+        start_trace()
 
         processing_status["processed"] = 0
         processing_status["failed"] = 0
@@ -78,45 +76,46 @@ class ClaimsPipeline:
 
     async def process_claim(self, claim: Dict[str, Any]) -> tuple[str, str] | None:
         assert self.rules_engine and self.validator and self.model
-        validation_errors = self.validator.validate(claim)
-        rule_errors = self.rules_engine.evaluate(claim)
-        if validation_errors or rule_errors:
-            processing_status["failed"] += 1
-            suggestions = self.repair_suggester.suggest(validation_errors + rule_errors)
-            await self.record_failed_claim(claim, "validation", suggestions)
-            self.logger.error(
-                f"Claim {claim['claim_id']} failed validation",
+        with start_span():
+            validation_errors = self.validator.validate(claim)
+            rule_errors = self.rules_engine.evaluate(claim)
+            if validation_errors or rule_errors:
+                processing_status["failed"] += 1
+                suggestions = self.repair_suggester.suggest(validation_errors + rule_errors)
+                await self.record_failed_claim(claim, "validation", suggestions)
+                self.logger.error(
+                    f"Claim {claim['claim_id']} failed validation",
+                    extra={
+                        "event": "claim_failed",
+                        "claim_id": claim.get("claim_id"),
+                        "reason": "validation",
+                        "claim": mask_claim_data(claim),
+                    },
+                )
+                return None
+            prediction = self.model.predict(claim)
+            claim["filter_number"] = prediction
+            if self.rvu_cache:
+                rvu = await self.rvu_cache.get(claim.get("procedure_code", ""))
+                if rvu:
+                    claim["rvu_value"] = rvu.get("total_rvu")
+            self.logger.info(
+                f"Processed claim {claim['claim_id']}",
                 extra={
-                    "event": "claim_failed",
+                    "event": "claim_processed",
                     "claim_id": claim.get("claim_id"),
-                    "reason": "validation",
+                    "prediction": prediction,
                     "claim": mask_claim_data(claim),
                 },
             )
-            return None
-        prediction = self.model.predict(claim)
-        claim["filter_number"] = prediction
-        if self.rvu_cache:
-            rvu = await self.rvu_cache.get(claim.get("procedure_code", ""))
-            if rvu:
-                claim["rvu_value"] = rvu.get("total_rvu")
-        self.logger.info(
-            f"Processed claim {claim['claim_id']}",
-            extra={
-                "event": "claim_processed",
-                "claim_id": claim.get("claim_id"),
-                "prediction": prediction,
-                "claim": mask_claim_data(claim),
-            },
-        )
-        await record_audit_event(
-            self.sql,
-            "claims",
-            claim["claim_id"],
-            "insert",
-            new_values=claim,
-        )
-        return (claim["patient_account_number"], claim["facility_id"])
+            await record_audit_event(
+                self.sql,
+                "claims",
+                claim["claim_id"],
+                "insert",
+                new_values=claim,
+            )
+            return (claim["patient_account_number"], claim["facility_id"])
 
     async def record_failed_claim(
         self, claim: Dict[str, Any], reason: str, suggestions: str
