@@ -14,6 +14,7 @@ from ..utils.cache import DistributedCache, InMemoryCache, RvuCache
 from ..utils.retries import retry_async
 from ..utils.logging import setup_logging, RequestContextFilter
 from ..utils.tracing import start_trace, start_span
+from ..utils.errors import ErrorCategory, categorize_exception
 from ..utils.audit import record_audit_event
 from .repair import ClaimRepairSuggester
 from ..services.claim_service import ClaimService
@@ -76,7 +77,9 @@ class ClaimsPipeline:
         try:
             await self.service.record_checkpoint(claim_id, stage)
         except Exception:
-            self.logger.debug("checkpoint failed", extra={"claim_id": claim_id, "stage": stage})
+            self.logger.debug(
+                "checkpoint failed", extra={"claim_id": claim_id, "stage": stage}
+            )
 
     async def process_batch(self) -> None:
         if not self.request_filter:
@@ -84,6 +87,8 @@ class ClaimsPipeline:
             self.logger.addFilter(self.request_filter)
         start_trace()
         start_time = time.perf_counter()
+
+        await self.service.reprocess_dead_letter()
 
         processing_status["processed"] = 0
         processing_status["failed"] = 0
@@ -95,9 +100,23 @@ class ClaimsPipeline:
         results = await asyncio.gather(*tasks)
         valid = [r for r in results if r]
         if valid:
-            await self.service.insert_claims(valid)
-            processing_status["processed"] += len(valid)
-            metrics.inc("claims_processed", len(valid))
+            try:
+                await self.service.insert_claims(valid)
+                processing_status["processed"] += len(valid)
+                metrics.inc("claims_processed", len(valid))
+            except Exception as exc:
+                category = categorize_exception(exc)
+                for acct, facility in valid:
+                    await self.service.enqueue_dead_letter(
+                        {"patient_account_number": acct, "facility_id": facility},
+                        str(exc),
+                    )
+                self.logger.error(
+                    "Batch insert failed",
+                    exc_info=exc,
+                    extra={"category": category.value},
+                )
+                metrics.inc("claims_failed", len(valid))
 
         duration = time.perf_counter() - start_time
         self.logger.info(
@@ -116,7 +135,9 @@ class ClaimsPipeline:
             self.request_filter = RequestContextFilter()
             self.logger.addFilter(self.request_filter)
         start_trace()
-        async for claim in self.service.stream_claims(self.calculate_batch_size(), priority=True):
+        async for claim in self.service.stream_claims(
+            self.calculate_batch_size(), priority=True
+        ):
             await self.process_claim(claim)
 
     @retry_async()
@@ -130,8 +151,15 @@ class ClaimsPipeline:
             if validation_errors or rule_errors:
                 processing_status["failed"] += 1
                 metrics.inc("claims_failed")
-                suggestions = self.repair_suggester.suggest(validation_errors + rule_errors)
-                await self.service.record_failed_claim(claim, "validation", suggestions)
+                suggestions = self.repair_suggester.suggest(
+                    validation_errors + rule_errors
+                )
+                await self.service.record_failed_claim(
+                    claim,
+                    "validation",
+                    suggestions,
+                    category=ErrorCategory.VALIDATION.value,
+                )
                 await self._checkpoint(claim.get("claim_id", ""), "failed")
                 self.logger.error(
                     f"Claim {claim['claim_id']} failed validation",
@@ -168,4 +196,3 @@ class ClaimsPipeline:
             )
             await self._checkpoint(claim.get("claim_id", ""), "completed")
             return (claim["patient_account_number"], claim["facility_id"])
-

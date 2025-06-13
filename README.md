@@ -96,3 +96,10 @@ This project includes basic security features to protect sensitive claim data.
 - **Encryption**: The `encryption_key` from the security section of `config.yaml` is used to
   encrypt sensitive payloads before persisting them.
 
+## Error Handling
+The system now features a global exception handler for the FastAPI application.
+Errors are categorized and recorded in the `failure_category` field for easier
+analysis. Failed operations are routed to a dead letter queue with automatic
+reprocessing attempts. Database inserts employ compensation transactions to
+remove partially inserted records when an error occurs.
+
