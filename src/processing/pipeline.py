@@ -10,7 +10,7 @@ from ..models.filter_model import FilterModel
 from ..rules.engine import Rule
 from ..rules.durable_engine import DurableRulesEngine
 from ..validation.validator import ClaimValidator
-from ..utils.cache import InMemoryCache, RvuCache
+from ..utils.cache import DistributedCache, InMemoryCache, RvuCache
 from ..utils.logging import setup_logging, RequestContextFilter
 from .repair import ClaimRepairSuggester
 from ..web.status import processing_status
@@ -28,15 +28,13 @@ class ClaimsPipeline:
         self.validator: ClaimValidator | None = None
         self.cache = InMemoryCache()
         self.rvu_cache: RvuCache | None = None
+        self.distributed_cache: DistributedCache | None = None
         self.repair_suggester = ClaimRepairSuggester()
 
     async def startup(self) -> None:
         await asyncio.gather(self.pg.connect(), self.sql.connect())
         # Connection pool warming
-        await asyncio.gather(
-            self.pg.fetch("SELECT 1"),
-            self.sql.execute("SELECT 1")
-        )
+        await asyncio.gather(self.pg.fetch("SELECT 1"), self.sql.execute("SELECT 1"))
         # Prepare frequently used statements
         await self.sql.prepare(
             "INSERT INTO claims (patient_account_number, facility_id) VALUES (?, ?)"
@@ -47,7 +45,11 @@ class ClaimsPipeline:
         self.model = FilterModel("model.joblib")
         self.rules_engine = DurableRulesEngine([])
         self.validator = ClaimValidator(set(), set())
-        self.rvu_cache = RvuCache(self.pg)
+        if self.cfg.cache.redis_url:
+            self.distributed_cache = DistributedCache(self.cfg.cache.redis_url)
+        self.rvu_cache = RvuCache(self.pg, distributed=self.distributed_cache)
+        if self.cfg.cache.warm_rvu_codes:
+            await self.rvu_cache.warm_cache(self.cfg.cache.warm_rvu_codes)
 
     async def process_batch(self) -> None:
         request_filter = RequestContextFilter()
@@ -93,7 +95,9 @@ class ClaimsPipeline:
         )
         return (claim["patient_account_number"], claim["facility_id"])
 
-    async def record_failed_claim(self, claim: Dict[str, Any], reason: str, suggestions: str) -> None:
+    async def record_failed_claim(
+        self, claim: Dict[str, Any], reason: str, suggestions: str
+    ) -> None:
         await self.sql.execute(
             "INSERT INTO failed_claims (claim_id, facility_id, patient_account_number, failure_reason, processing_stage, failed_at, original_data, repair_suggestions)"
             " VALUES (?, ?, ?, ?, ?, GETDATE(), ?, ?)",
@@ -102,7 +106,10 @@ class ClaimsPipeline:
             claim.get("patient_account_number"),
             reason,
             "validation",
-            encrypt_text(json.dumps(claim), self.encryption_key) if self.encryption_key else json.dumps(claim),
+            (
+                encrypt_text(json.dumps(claim), self.encryption_key)
+                if self.encryption_key
+                else json.dumps(claim)
+            ),
             suggestions,
         )
-
