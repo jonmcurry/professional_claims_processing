@@ -103,3 +103,9 @@ analysis. Failed operations are routed to a dead letter queue with automatic
 reprocessing attempts. Database inserts employ compensation transactions to
 remove partially inserted records when an error occurs.
 
+## Claim Processing Enhancements
+The system now supports claim amendments using the `amend_claim` method and a
+priority queue for high‑value claims. Batch progress information is exposed from
+the `/batch_status` endpoint, and `process_partial_claim` allows partial claim
+updates without reprocessing the full record.
+

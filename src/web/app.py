@@ -3,7 +3,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.testclient import Response
 from ..config.config import load_config
 from ..db.sql_server import SQLServerDatabase
-from .status import processing_status
+from .status import processing_status, batch_status
 from typing import Optional, Any
 from .rate_limit import RateLimiter
 from ..utils.tracing import (
@@ -152,6 +152,14 @@ def create_app(
         _check_key(x_api_key)
         _check_role("user", x_user_role)
         return processing_status
+
+    @app.get("/batch_status")
+    async def get_batch_status(
+        x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+    ):
+        _check_key(x_api_key)
+        _check_role("user", x_user_role)
+        return batch_status
 
     @app.get("/health")
     async def health(

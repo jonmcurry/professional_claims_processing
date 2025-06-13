@@ -8,6 +8,7 @@ from ..security.compliance import (
     decrypt_text,
 )
 from ..utils.audit import record_audit_event
+from ..utils.priority_queue import PriorityClaimQueue
 
 
 class ClaimService:
@@ -22,6 +23,7 @@ class ClaimService:
         self.pg = pg
         self.sql = sql
         self.encryption_key = encryption_key or ""
+        self.priority_queue = PriorityClaimQueue()
 
     async def fetch_claims(
         self, batch_size: int, offset: int = 0, priority: bool = False
@@ -29,7 +31,16 @@ class ClaimService:
         """Fetch a batch of claims optionally ordered by priority."""
         order_clause = "ORDER BY priority DESC" if priority else ""
         query = f"SELECT * FROM claims {order_clause} LIMIT $1 OFFSET $2"
-        return await self.pg.fetch(query, batch_size, offset)
+        rows = await self.pg.fetch(query, batch_size, offset)
+        for row in rows:
+            pr = int(row.get("priority", 0) or 0)
+            self.priority_queue.push(row, pr)
+        results: List[Dict[str, Any]] = []
+        while len(results) < batch_size and len(self.priority_queue) > 0:
+            claim = self.priority_queue.pop()
+            if claim:
+                results.append(claim)
+        return results
 
     async def insert_claims(self, rows: Iterable[Iterable[Any]]) -> None:
         processed = []
@@ -148,3 +159,24 @@ class ClaimService:
                 )
             except Exception:
                 continue
+
+    async def amend_claim(self, claim_id: str, updates: Dict[str, Any]) -> None:
+        """Update an existing claim with new values."""
+        if not updates:
+            return
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        params = list(updates.values())
+        params.append(claim_id)
+        await self.sql.execute(
+            f"UPDATE claims SET {set_clause} WHERE claim_id = ?",
+            *params,
+        )
+        await record_audit_event(
+            self.sql,
+            "claims",
+            claim_id,
+            "update",
+            new_values=updates,
+        )
+
+
