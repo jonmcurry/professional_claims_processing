@@ -18,7 +18,7 @@ from ..utils.errors import ErrorCategory, categorize_exception
 from ..utils.audit import record_audit_event
 from .repair import ClaimRepairSuggester
 from ..services.claim_service import ClaimService
-from ..web.status import processing_status
+from ..web.status import processing_status, batch_status
 from ..monitoring.metrics import metrics
 
 
@@ -87,6 +87,9 @@ class ClaimsPipeline:
             self.logger.addFilter(self.request_filter)
         start_trace()
         start_time = time.perf_counter()
+        batch_status["batch_id"] = str(int(start_time * 1000))
+        batch_status["start_time"] = start_time
+        batch_status["end_time"] = None
 
         await self.service.reprocess_dead_letter()
 
@@ -96,6 +99,7 @@ class ClaimsPipeline:
         metrics.set("claims_failed", 0)
         batch_size = self.calculate_batch_size()
         claims = await self.service.fetch_claims(batch_size, priority=True)
+        batch_status["total"] = len(claims)
         tasks = [self.process_claim(claim) for claim in claims]
         results = await asyncio.gather(*tasks)
         valid = [r for r in results if r]
@@ -119,6 +123,7 @@ class ClaimsPipeline:
                 metrics.inc("claims_failed", len(valid))
 
         duration = time.perf_counter() - start_time
+        batch_status["end_time"] = time.perf_counter()
         self.logger.info(
             "Batch complete",
             extra={
@@ -196,3 +201,7 @@ class ClaimsPipeline:
             )
             await self._checkpoint(claim.get("claim_id", ""), "completed")
             return (claim["patient_account_number"], claim["facility_id"])
+
+    async def process_partial_claim(self, claim_id: str, updates: Dict[str, Any]) -> None:
+        """Process an amendment/correction for an existing claim."""
+        await self.service.amend_claim(claim_id, updates)

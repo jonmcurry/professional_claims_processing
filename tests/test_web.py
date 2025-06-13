@@ -1,7 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 from src.web.app import create_app
-from src.web.status import processing_status
+from src.web.status import processing_status, batch_status
 from src.monitoring.metrics import metrics
 
 class DummyDB:
@@ -43,6 +43,15 @@ def test_status_endpoint(client):
     assert resp.json() == {"processed": 5, "failed": 2}
 
 
+def test_batch_status_endpoint(client):
+    batch_status["batch_id"] = "1"
+    batch_status["total"] = 10
+    resp = client.get("/batch_status", headers={"X-API-Key": "test"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["batch_id"] == "1"
+
+
 def test_health_endpoint(client):
     resp = client.get("/health", headers={"X-API-Key": "test"})
     assert resp.status_code == 200
@@ -69,3 +78,4 @@ def test_rate_limit(client):
     assert resp1.status_code == 200
     resp2 = client.get("/liveness")
     assert resp2.status_code == 429
+
