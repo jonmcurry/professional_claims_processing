@@ -1,0 +1,277 @@
+CREATE DATABASE smart_pro_claims;
+GO
+USE smart_pro_claims;
+GO
+
+CREATE TABLE audit_log (
+    table_name VARCHAR(100) NOT NULL,
+    record_id VARCHAR(50) NOT NULL,
+    operation VARCHAR(20) NOT NULL,
+    user_id VARCHAR(100) NULL,
+    session_id VARCHAR(100) NULL,
+    ip_address VARCHAR(45) NULL,
+    user_agent VARCHAR(500) NULL,
+    old_values NVARCHAR(MAX) NULL,
+    new_values NVARCHAR(MAX) NULL,
+    changed_columns NVARCHAR(500) NULL,
+    operation_timestamp DATETIME2(7) NULL,
+    reason VARCHAR(500) NULL,
+    approval_required BIT NULL,
+    approved_by VARCHAR(100) NULL,
+    approved_at DATETIME2(7) NULL
+);
+GO
+
+CREATE TABLE daily_processing_summary (
+    summary_date DATE NOT NULL,
+    facility_id VARCHAR(20) NULL,
+    total_claims_processed INT NULL,
+    total_claims_failed INT NULL,
+    total_line_items INT NULL,
+    total_charge_amount DECIMAL(15,2) NULL,
+    total_reimbursement_amount DECIMAL(15,2) NULL,
+    average_reimbursement_rate DECIMAL(5,4) NULL,
+    average_processing_time_seconds DECIMAL(8,2) NULL,
+    throughput_claims_per_hour DECIMAL(10,2) NULL,
+    error_rate_percentage DECIMAL(5,2) NULL,
+    ml_accuracy_percentage DECIMAL(5,2) NULL,
+    validation_pass_rate DECIMAL(5,2) NULL,
+    created_at DATETIME2(7) NULL
+);
+GO
+
+CREATE TABLE data_access_log (
+    access_timestamp DATETIME2(7) NULL,
+    user_id VARCHAR(100) NOT NULL,
+    user_role VARCHAR(50) NULL,
+    department VARCHAR(100) NULL,
+    table_name VARCHAR(100) NOT NULL,
+    record_id VARCHAR(50) NULL,
+    access_type VARCHAR(20) NULL,
+    data_classification VARCHAR(20) NULL,
+    business_justification VARCHAR(500) NULL,
+    patient_account_number VARCHAR(50) NULL,
+    facility_id VARCHAR(20) NULL,
+    ip_address VARCHAR(45) NULL,
+    application_name VARCHAR(100) NULL,
+    query_executed NVARCHAR(MAX) NULL
+);
+GO
+
+CREATE TABLE facility_organization (
+    org_id INT,
+    org_name VARCHAR(100),
+    installed_date DATETIME,
+    updated_by INT
+);
+GO
+
+CREATE TABLE facility_region (
+    region_id INT,
+    region_name VARCHAR(100)
+);
+GO
+
+CREATE TABLE facilities (
+    facility_id INT,
+    facility_name VARCHAR(100),
+    installed_date DATETIME,
+    beds INT,
+    city VARCHAR(24),
+    state CHAR(2),
+    updated_date DATETIME,
+    updated_by INT,
+    region_id INT,
+    fiscal_month INT
+);
+GO
+
+CREATE TABLE facility_financial_classes (
+    facility_id INT,
+    financial_class_id VARCHAR(10),
+    financial_class_name VARCHAR(100),
+    payer_id INT,
+    reimbursement_rate DECIMAL(5,4),
+    processing_priority VARCHAR(10),
+    auto_posting_enabled BIT,
+    active BIT,
+    effective_date DATE,
+    end_date DATE,
+    created_at DATETIME,
+    HCC CHAR(3)
+);
+GO
+
+CREATE TABLE facility_place_of_service (
+    facility_id INT,
+    place_of_service VARCHAR(2),
+    place_of_service_name VARCHAR(30),
+    origin INT
+);
+GO
+
+CREATE TABLE facility_departments (
+    department_code VARCHAR(10),
+    department_name VARCHAR(50),
+    facility_id INT,
+    active BIT,
+    created_at DATETIME,
+    updated_at DATETIME
+);
+GO
+
+CREATE TABLE facility_coders (
+    facility_id INT,
+    coder_id VARCHAR(50),
+    coder_last_name VARCHAR(50),
+    coder_first_name VARCHAR(50)
+);
+GO
+
+CREATE TABLE physicians (
+    rendering_provider_id VARCHAR(50),
+    last_name VARCHAR(50),
+    first_name VARCHAR(50)
+);
+GO
+
+CREATE TABLE failed_claims (
+    claim_id VARCHAR(50) NOT NULL,
+    batch_id VARCHAR(50) NULL,
+    facility_id VARCHAR(20) NULL,
+    patient_account_number VARCHAR(50) NULL,
+    original_data NVARCHAR(MAX) NULL,
+    failure_reason NVARCHAR(1000) NOT NULL,
+    failure_category VARCHAR(50) NOT NULL,
+    processing_stage VARCHAR(50) NOT NULL,
+    failed_at DATETIME2(7) NULL,
+    repair_suggestions NVARCHAR(MAX) NULL,
+    resolution_status VARCHAR(20) NULL,
+    assigned_to VARCHAR(100) NULL,
+    resolved_at DATETIME2(7) NULL,
+    resolution_notes NVARCHAR(2000) NULL,
+    resolution_action VARCHAR(50) NULL,
+    error_pattern_id VARCHAR(50) NULL,
+    priority_level VARCHAR(10) NULL,
+    impact_level VARCHAR(10) NULL,
+    potential_revenue_loss DECIMAL(12,2) NULL,
+    created_at DATETIME2(7) NULL,
+    updated_at DATETIME2(7) NULL,
+    coder_id VARCHAR(50)
+);
+GO
+
+CREATE TABLE failed_claims_patterns (
+    pattern_id VARCHAR(50) NOT NULL,
+    pattern_name VARCHAR(200) NOT NULL,
+    pattern_description NVARCHAR(1000) NULL,
+    failure_category VARCHAR(50) NULL,
+    severity_level VARCHAR(20) NULL,
+    frequency_score INT NULL,
+    pattern_rules NVARCHAR(MAX) NULL,
+    auto_repair_possible BIT NULL,
+    repair_template NVARCHAR(MAX) NULL,
+    occurrence_count INT NULL,
+    resolution_rate DECIMAL(5,4) NULL,
+    average_resolution_time_hours DECIMAL(8,2) NULL,
+    created_at DATETIME2(7) NULL,
+    updated_at DATETIME2(7) NULL
+);
+GO
+
+CREATE TABLE claims (
+    facility_id VARCHAR(20) NOT NULL,
+    patient_account_number VARCHAR(50) NOT NULL,
+    medical_record_number VARCHAR(50) NULL,
+    patient_name VARCHAR(100) NULL,
+    first_name VARCHAR(50) NULL,
+    last_name VARCHAR(50) NULL,
+    date_of_birth DATE NULL,
+    gender VARCHAR(1) NULL,
+    financial_class_id VARCHAR(10) NULL,
+    secondary_insurance VARCHAR(10) NULL,
+    active BIT NULL,
+    created_at DATETIME2(7) NULL,
+    updated_at DATETIME2(7) NULL
+);
+GO
+
+CREATE TABLE claims_diagnosis (
+    patient_account_number VARCHAR(50) NOT NULL,
+    diagnosis_sequence INT NOT NULL,
+    diagnosis_code VARCHAR(20) NOT NULL,
+    diagnosis_description VARCHAR(255) NULL,
+    diagnosis_type VARCHAR(10) NULL,
+    created_at DATETIMEOFFSET DEFAULT SYSDATETIMEOFFSET()
+);
+GO
+
+CREATE TABLE claims_line_items (
+    patient_account_number VARCHAR(50) NOT NULL,
+    line_number INT NOT NULL,
+    procedure_code VARCHAR(10) NOT NULL,
+    modifier1 VARCHAR(2) NULL,
+    modifier2 VARCHAR(2) NULL,
+    modifier3 VARCHAR(2) NULL,
+    modifier4 VARCHAR(2) NULL,
+    units INT NOT NULL DEFAULT 1,
+    charge_amount DECIMAL(10,2) NOT NULL,
+    service_from_date DATE NULL,
+    service_to_date DATE NULL,
+    diagnosis_pointer VARCHAR(4) NULL,
+    place_of_service VARCHAR(2) NULL,
+    revenue_code VARCHAR(4) NULL,
+    created_at DATETIMEOFFSET DEFAULT SYSDATETIMEOFFSET(),
+    rvu_value DECIMAL(8,4) NULL,
+    reimbursement_amount DECIMAL(10,2) NULL,
+    rendering_provider_id VARCHAR(50) NULL
+);
+GO
+
+CREATE TABLE performance_metrics (
+    metric_date DATETIME2(7) NULL,
+    metric_type VARCHAR(50) NOT NULL,
+    facility_id VARCHAR(20) NULL,
+    claims_per_second DECIMAL(10,4) NULL,
+    records_per_minute DECIMAL(10,2) NULL,
+    cpu_usage_percent DECIMAL(5,2) NULL,
+    memory_usage_mb INT NULL,
+    database_response_time_ms DECIMAL(8,2) NULL,
+    queue_depth INT NULL,
+    error_rate DECIMAL(5,4) NULL,
+    processing_accuracy DECIMAL(5,4) NULL,
+    revenue_per_claim DECIMAL(10,2) NULL,
+    additional_metrics NVARCHAR(MAX) NULL
+);
+GO
+
+CREATE TABLE rvu_data (
+    procedure_code VARCHAR(10) NOT NULL,
+    description VARCHAR(500) NULL,
+    category VARCHAR(50) NULL,
+    subcategory VARCHAR(50) NULL,
+    work_rvu DECIMAL(8,4) NULL,
+    practice_expense_rvu DECIMAL(8,4) NULL,
+    malpractice_rvu DECIMAL(8,4) NULL,
+    total_rvu DECIMAL(8,4) NULL,
+    conversion_factor DECIMAL(8,2) NULL,
+    non_facility_pe_rvu DECIMAL(8,4) NULL,
+    facility_pe_rvu DECIMAL(8,4) NULL,
+    effective_date DATE NULL,
+    end_date DATE NULL,
+    status VARCHAR(20) NULL,
+    global_period VARCHAR(10) NULL,
+    professional_component BIT NULL,
+    technical_component BIT NULL,
+    bilateral_surgery BIT NULL,
+    created_at DATETIME2(7) NULL,
+    updated_at DATETIME2(7) NULL
+);
+GO
+
+CREATE TABLE core_standard_payers (
+    payer_id INT,
+    payer_name VARCHAR(20),
+    payer_code CHAR(2)
+);
+GO
