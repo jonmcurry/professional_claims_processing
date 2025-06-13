@@ -1,9 +1,10 @@
 import asyncio
 import json
+import uuid
 from typing import List, Dict, Any
 
 from ..config.config import AppConfig
-from ..security.compliance import encrypt_text
+from ..security.compliance import encrypt_text, mask_claim_data
 from ..db.postgres import PostgresDatabase
 from ..db.sql_server import SQLServerDatabase
 from ..models.filter_model import FilterModel
@@ -12,6 +13,7 @@ from ..rules.durable_engine import DurableRulesEngine
 from ..validation.validator import ClaimValidator
 from ..utils.cache import DistributedCache, InMemoryCache, RvuCache
 from ..utils.logging import setup_logging, RequestContextFilter
+from ..utils.audit import record_audit_event
 from .repair import ClaimRepairSuggester
 from ..web.status import processing_status
 
@@ -20,6 +22,7 @@ class ClaimsPipeline:
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
         self.logger = setup_logging()
+        self.request_filter: RequestContextFilter | None = None
         self.pg = PostgresDatabase(cfg.postgres)
         self.sql = SQLServerDatabase(cfg.sqlserver)
         self.encryption_key = cfg.security.encryption_key
@@ -52,8 +55,11 @@ class ClaimsPipeline:
             await self.rvu_cache.warm_cache(self.cfg.cache.warm_rvu_codes)
 
     async def process_batch(self) -> None:
-        request_filter = RequestContextFilter()
-        self.logger.addFilter(request_filter)
+        if not self.request_filter:
+            self.request_filter = RequestContextFilter()
+            self.logger.addFilter(self.request_filter)
+        else:
+            self.request_filter.request_id = str(uuid.uuid4())
 
         processing_status["processed"] = 0
         processing_status["failed"] = 0
@@ -80,7 +86,12 @@ class ClaimsPipeline:
             await self.record_failed_claim(claim, "validation", suggestions)
             self.logger.error(
                 f"Claim {claim['claim_id']} failed validation",
-                extra={"request_id": claim.get("correlation_id")},
+                extra={
+                    "event": "claim_failed",
+                    "claim_id": claim.get("claim_id"),
+                    "reason": "validation",
+                    "claim": mask_claim_data(claim),
+                },
             )
             return None
         prediction = self.model.predict(claim)
@@ -91,7 +102,19 @@ class ClaimsPipeline:
                 claim["rvu_value"] = rvu.get("total_rvu")
         self.logger.info(
             f"Processed claim {claim['claim_id']}",
-            extra={"request_id": claim.get("correlation_id")},
+            extra={
+                "event": "claim_processed",
+                "claim_id": claim.get("claim_id"),
+                "prediction": prediction,
+                "claim": mask_claim_data(claim),
+            },
+        )
+        await record_audit_event(
+            self.sql,
+            "claims",
+            claim["claim_id"],
+            "insert",
+            new_values=claim,
         )
         return (claim["patient_account_number"], claim["facility_id"])
 
@@ -112,4 +135,12 @@ class ClaimsPipeline:
                 else json.dumps(claim)
             ),
             suggestions,
+        )
+        await record_audit_event(
+            self.sql,
+            "failed_claims",
+            claim.get("claim_id", ""),
+            "insert",
+            new_values=claim,
+            reason=reason,
         )
