@@ -1,0 +1,16 @@
+postgresql:
+  host: localhost
+  port: 5432
+  user: user
+  password: pass
+  database: staging_process
+sqlserver:
+  host: localhost
+  port: 1433
+  user: user
+  password: pass
+  database: smart_pro_claims
+processing:
+  batch_size: 1000
+  max_workers: 4
+  conversion_factor: 36.04

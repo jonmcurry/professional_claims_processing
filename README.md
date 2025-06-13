@@ -103,3 +103,14 @@ This project builds a high-performance claims processing system with an integrat
 
 
 The system is designed for performance, overall optimization and best coding practices, scalability, reliability, compliance with CMS 1500 standards, and robust analytics, with a focus on production-ready ML integration.
+
+## Usage
+
+Install required dependencies and run the processor:
+
+```bash
+pip install -r requirements.txt
+python -m src.processing.main
+```
+
+Adjust connection settings in `config.yaml` before running.
