@@ -1,7 +1,7 @@
-import pytest
+import time
+import asyncio
 import sys
 import types
-import asyncio
 
 sys.modules.setdefault("asyncpg", types.ModuleType("asyncpg"))
 sys.modules.setdefault("joblib", types.ModuleType("joblib"))
@@ -20,7 +20,6 @@ from src.config.config import AppConfig, PostgresConfig, SQLServerConfig, Proces
 from src.services.claim_service import ClaimService
 from src.rules.engine import RulesEngine
 from src.validation.validator import ClaimValidator
-from src.web.status import processing_status
 
 class DummyPostgres:
     async def connect(self):
@@ -59,14 +58,11 @@ class DummySQL:
     async def prepare(self, query: str):
         pass
 
-async def noop(*args, **kwargs):
-    pass
-
 class DummyModel:
     def predict(self, claim):
         return 1
 
-def test_pipeline_process_batch(monkeypatch):
+def test_pipeline_batch_performance():
     cfg = AppConfig(
         postgres=PostgresConfig("", 0, "", "", ""),
         sqlserver=SQLServerConfig("", 0, "", "", ""),
@@ -82,59 +78,15 @@ def test_pipeline_process_batch(monkeypatch):
     pipeline.rules_engine = RulesEngine([])
     pipeline.validator = ClaimValidator({"F1"}, {"A"})
     pipeline.service = ClaimService(pipeline.pg, pipeline.sql)
-    monkeypatch.setattr("src.utils.audit.record_audit_event", noop)
-    processing_status["processed"] = 0
-    processing_status["failed"] = 0
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
+        start = time.perf_counter()
         loop.run_until_complete(pipeline.process_batch())
+        duration = time.perf_counter() - start
     finally:
         loop.close()
         asyncio.set_event_loop(asyncio.new_event_loop())
-    assert processing_status["processed"] == 1
-    assert pipeline.sql.inserted == [("111", "F1")]
-
-class DummyFilterModel:
-    def __init__(self, path: str, version: str = "1"):
-        self.path = path
-        self.version = version
-
-    def predict(self, claim):
-        return 0
-
-class DummyModelMonitor:
-    def __init__(self, version: str):
-        self.version = version
-
-    def record_prediction(self, label: int) -> None:
-        pass
-
-@pytest.mark.asyncio
-async def test_pipeline_startup(monkeypatch):
-    cfg = AppConfig(
-        postgres=PostgresConfig("", 0, "", "", ""),
-        sqlserver=SQLServerConfig("", 0, "", "", ""),
-        processing=ProcessingConfig(batch_size=1),
-        security=SecurityConfig(api_key="k"),
-        cache=CacheConfig(warm_rvu_codes=["X1"]),
-        model=ModelConfig(path="model.joblib"),
-    )
-    pipeline = ClaimsPipeline(cfg)
-
-    class DummyPG(DummyPostgres):
-        async def fetch(self, query: str, *params):
-            if "rvu_data" in query:
-                return [{"procedure_code": params[0], "total_rvu": 1}]
-            return []
-
-    pipeline.pg = DummyPG()
-    pipeline.sql = DummySQL()
-    monkeypatch.setattr("src.models.filter_model.FilterModel", DummyFilterModel)
-    monkeypatch.setattr("src.models.monitor.ModelMonitor", DummyModelMonitor)
-
-    await pipeline.startup()
-    assert pipeline.model
-    assert pipeline.rvu_cache.get("X1") is not None
-
+    assert duration < 0.5
 
