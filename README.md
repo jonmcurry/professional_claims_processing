@@ -63,10 +63,18 @@ Tests use `pytest`.
 
 ```bash
 pip install pytest
-pytest
+PYTHONPATH=. pytest
 ```
 
 Add new tests under the `tests/` directory using files named `test_*.py`.
+
+## Benchmarks
+Simple performance benchmarks live in the `benchmarks/` directory.
+Run the pipeline benchmark script with:
+
+```bash
+python benchmarks/benchmark_pipeline.py
+```
 
 ## Contributing
 Contributions are welcome! Please open an issue to discuss any changes. Ensure tests pass before submitting a pull request and follow PEP 8 style conventions.
