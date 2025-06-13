@@ -14,3 +14,6 @@ processing:
   batch_size: 1000
   max_workers: 4
   conversion_factor: 36.04
+security:
+  api_key: changeme
+  encryption_key: changeme

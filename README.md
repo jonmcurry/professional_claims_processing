@@ -64,3 +64,13 @@ Add new tests under the `tests/` directory using files named `test_*.py`.
 Contributions are welcome! Please open an issue to discuss any changes. Ensure tests pass before submitting a pull request and follow PEP 8 style conventions.
 
 For detailed database schema information see [docs/SCHEMA.md](docs/SCHEMA.md).
+
+## Security and Compliance
+This project includes basic security features to protect sensitive claim data.
+
+- **PII/PHI Protection**: Failed claim records are stored with the raw data encrypted using
+  a key from `config.yaml`.
+- **Data Access Controls**: All web endpoints require an API key via the `X-API-Key` header.
+- **Encryption**: The `encryption_key` from the security section of `config.yaml` is used to
+  encrypt sensitive payloads before persisting them.
+
