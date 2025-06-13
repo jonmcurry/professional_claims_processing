@@ -1,1 +1,105 @@
-# professional_claims_processing
+Project Overview
+This project builds a high-performance claims processing system with an integrated machine learning (ML) model for filter prediction. The system:
+    Fetches claims from a PostgreSQL staging database.
+    Applies a rules engine and ML-based filter prediction to assign filter numbers.
+    Stores processing metrics in a PostgreSQL metrics database.
+    Transfers validated claims to a SQL Server production database with facility management.
+    Achieves a processing throughput of at least 100,000 records in 15 seconds (~6,667 records/second) through the rules engine, data validation, and inserting into the claims table in SQL.
+    Incorporates caching, asynchronous processing, connection pooling, bulk batch processing, and ML model optimization, for performance, speed, and production-readiness.
+    Targets 100% accuracy in filter prediction where feasible, with fallback to rule-based validation.
+    Leverages config.yaml for configuration
+    
+    Incorporates claims validation:
+        Facility ID needs to exist in the facility table
+        Patient Account Number needs to exist
+        Validate start and end date
+        Valid financial class is in the facility lookup table(s)
+        Valid date of birth
+        Validate service line item dates fall within the start and end date of a claim
+        If any of these validations fail, store the claim in failed claims and why they failed - this information needs to be viewed in a front end UI
+    
+    Performs reimbursement calculation on each claim line item: RVU * Units * Conversion Factor ($36.04)
+    Project directory structure needs to follow best practices
+    Class files need to be separated for easier maintenance, troubleshooting
+    Add async batch processing optimization: Add pipeline parallelization where stages overlap
+    Implement connection pool warming: Pre-create database connections during startup
+    Add in-memory caching for RVU data fetched from SQL Server to reduce database load
+    Consider database read replicas for heavy read operations during validation
+    Implement claim repair suggestions: AI-powered suggestions for fixing common errors
+    Enhanced categorization: More granular error categories for better UI filtering
+    Add comprehensive error handling: Standardized error types and recovery strategies
+    Implement proper logging correlation: Request IDs across all components
+    Add audit logging: Track all data modifications and access
+    PII/PHI protection: Proper handling of sensitive healthcare data
+    Add database connection health checks with automatic reconnection
+    Implement read/write splitting for better performance
+    Add database query optimization and indexing strategies
+    
+    Failed Claims UI:
+        Since you're storing summaries in SQL Server for UI performance, add real-time sync status indicators
+        Implement claim resolution workflows with approval processes
+        Add analytics dashboard for failure pattern analysis
+
+    Postgresql schema:
+        create a database named: staging_process
+            create tables:
+                business_rules:
+                    columns:     rule_name character varying(200) COLLATE pg_catalog."default" NOT NULL,rule_type character varying(50) COLLATE pg_catalog."default" NOT NULL,rule_logic jsonb NOT NULL,severity_level character varying(20) COLLATE pg_catalog."default" NOT NULL,is_active boolean DEFAULT true,applies_to_facilities jsonb,applies_to_financial_classes jsonb,execution_count bigint DEFAULT 0,failure_count bigint DEFAULT 0,average_execution_time_ms numeric(10,2),created_by character varying(100) COLLATE pg_catalog."default",created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,version integer DEFAULT 1,previous_version_id bigint
+                claims
+                    columns: claim_id (varchar (50)), facility_id (varchar (20)), department_id (integer), patient_account_number (varchar (5)), patient_name (varchar (100)), date_of_birth (date), service_from_date (date), service_to_date (date), primary_diagnosis (varchar (10)), financial_class (varchar (10)), total_charge_amount (numeric (10,2)), processing_status (varchar (20)), processing_stage (varchar (50)), created_at (timestamp with timezone), updated_at (timestamp with timezone), raw_data (jsonb), validation_results (jsonb), ml_predictions (jsonb), processing_metrics (jsonb), error_details (jsonb), priority (varchar(10)), submitted_by (varchar(100)), correlation_id (varchar (50))
+                claims_line_items
+                    colupmns: claim_id character varying(50)  NOT NULL,mline_number integer NOT NULL, procedure_code character varying(10)  NOT NULL, modifier1 character varying(2) , modifier2 character varying(2) , modifier3 character varying(2) , modifier4 character varying(2) , units integer NOT NULL DEFAULT 1, charge_amount numeric(10,2) NOT NULL, service_from_date date, service_to_date date, diagnosis_pointer character varying(4) , place_of_service character varying(2) , revenue_code character varying(4) , created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP, rvu_value numeric(8,4), reimbursement_amount numeric(10,2)
+                claims_diagnosis_codes
+                    columns: claim_id character varying(50)  NOT NULL, diagnosis_sequence integer NOT NULL, diagnosis_code character varying(20)  NOT NULL, diagnosis_description character varying(255) , diagnosis_type character varying(10) , created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+                batch_metadata
+                    columns: batch_id character varying(50)  NOT NULL, submitted_by character varying(100) , submitted_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP, updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP, completed_at timestamp with time zone, total_claims integer NOT NULL DEFAULT 0, valid_claims integer NOT NULL DEFAULT 0, invalid_claims integer NOT NULL DEFAULT 0, processed_claims integer NOT NULL DEFAULT 0,
+                    failed_claims integer NOT NULL DEFAULT 0, priority character varying(10)  DEFAULT 'normal'::character varying, status character varying(20)  DEFAULT 'queued'::character varying, processing_options jsonb, validation_errors text , processing_errors text , additional_data jsonb
+                processing_metrics
+                    columns: metric_timestamp timestamp with time zone DEFAULT CURRENT_TIMESTAMP, batch_id character varying(50) , stage_name character varying(50)  NOT NULL, worker_id character varying(50) , records_processed integer NOT NULL DEFAULT 0, records_failed integer NOT NULL DEFAULT 0, processing_time_seconds numeric(10,3) NOT NULL, throughput_per_second numeric(10,2) NOT NULL DEFAULT 0, memory_usage_mb integer, cpu_usage_percent numeric(5,2), additional_metrics jsonb
+                ml_models
+                    columns: model_name character varying(100)  NOT NULL, model_version character varying(50)  NOT NULL, model_path character varying(500) , model_type character varying(50) , accuracy numeric(5,4), precision_score numeric(5,4), recall_score numeric(5,4), f1_score numeric(5,4), deployed_at timestamp with time zone, is_active boolean DEFAULT false, created_by character varying(100) , training_data_info jsonb, model_parameters jsonb, feature_columns jsonb, created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+
+    SQL Server schema:
+        create a database named: smart_pro_claims
+            create tables:
+                audit_log
+                    columns:[table_name] [varchar](100) NOT NULL,[record_id] [varchar](50) NOT NULL,[operation] [varchar](20) NOT NULL,[user_id] [varchar](100) NULL,[session_id] [varchar](100) NULL,[ip_address] [varchar](45) NULL,[user_agent] [varchar](500) NULL,[old_values] [nvarchar](max) NULL,[new_values] [nvarchar](max) NULL,[changed_columns] [nvarchar](500) NULL,[operation_timestamp] [datetime2](7) NULL,[reason] [varchar](500) NULL,[approval_required] [bit] NULL,[approved_by] [varchar](100) NULL,[approved_at] [datetime2](7) NULL
+                daily_processing_summary
+                    columns: [summary_date] [date] NOT NULL,[facility_id] [varchar](20) NULL,[total_claims_processed] [int] NULL,[total_claims_failed] [int] NULL,[total_line_items] [int] NULL,[total_charge_amount] [decimal](15, 2) NULL,[total_reimbursement_amount] [decimal](15, 2) NULL,[average_reimbursement_rate] [decimal](5, 4) NULL,[average_processing_time_seconds] [decimal](8, 2) NULL,[throughput_claims_per_hour] [decimal](10, 2) NULL,[error_rate_percentage] [decimal](5, 2) NULL,[ml_accuracy_percentage] [decimal](5, 2) NULL,[validation_pass_rate] [decimal](5, 2) NULL,[created_at] [datetime2](7) NULL
+                data_access_log
+                    columns: [access_timestamp] [datetime2](7) NULL,[user_id] [varchar](100) NOT NULL,[user_role] [varchar](50) NULL,[department] [varchar](100) NULL,[table_name] [varchar](100) NOT NULL,[record_id] [varchar](50) NULL,[access_type] [varchar](20) NULL,[data_classification] [varchar](20) NULL,[business_justification] [varchar](500) NULL,[patient_account_number] [varchar](50) NULL,[facility_id] [varchar](20) NULL,[ip_address] [varchar](45) NULL,[application_name] [varchar](100) NULL,[query_executed] [nvarchar](max) NULL
+                facility_organization
+                    columns: org_id (int), org_name (varchar (100)), installed_date (datetime), updated_by (int)
+                facility_region
+                    columns: region_id (int), region_name
+                facilities
+                    columns: facility_id (int), facility_name (varchar (100)), installed_date (datetime), beds (int), city (varchar (24)), state (char (2)), updated_date (datetime), updated_by (int), region_id (key back to facility_region), fiscal_month (int)
+                facility_financial_classes
+                    columns: facility_id (key back to facility_id), financial_class_id (varchar (10)), financial_class_name (varchar (100)), payer_id (key back to core_standard_payers.payer_id), reimbursement_rate (decimal(5,4)), processing_priority(vharchar(10)), auto_posting_enabled(bit), active(bit), effective_date(date), end_date(date), created_at(datetime), HCC (char (3))
+                facility_place_of_service
+                    columns: facility_id (key back to facility_id), place_of_service (varchar(2)), palce_of_service_name (varchar(30), origin (int))
+                facility_departments
+                    columns: department_code (varchar(10)), department_name(varchar(50)), facility_id (int) foreign key back to facilities.facility_id, active (bit), created_at (datetime), updated_at(datetime)
+                facility_coders
+                    columns: facility_id (foreign key back to faciliies.facility_id), coder_id (varchar(50)), coder_last_name (varchar(50)), coder_last_name(varchar(50))
+                physicians
+                    columns: rendering_provider_id (varchar(50)), last_name (varchar(50)), first_name (varchar(50))
+                failed_claims
+                    columns: 	[claim_id] [varchar](50) NOT NULL,[batch_id] [varchar](50) NULL,[facility_id] [varchar](20) NULL,[patient_account_number] [varchar](50) NULL,[original_data] [nvarchar](max) NULL,[failure_reason] [nvarchar](1000) NOT NULL,[failure_category] [varchar](50) NOT NULL,[processing_stage] [varchar](50) NOT NULL,[failed_at] [datetime2](7) NULL,[repair_suggestions] [nvarchar](max) NULL,[resolution_status] [varchar](20) NULL,[assigned_to] [varchar](100) NULL,[resolved_at] [datetime2](7) NULL,[resolution_notes] [nvarchar](2000) NULL,[resolution_action] [varchar](50) NULL,[error_pattern_id] [varchar](50) NULL,[priority_level] [varchar](10) NULL,[impact_level] [varchar](10) NULL,[potential_revenue_loss] [decimal](12, 2) NULL,[created_at] [datetime2](7) NULL,[updated_at] [datetime2](7) NULL, coder_id (varchar(50)) foreign key back to facility_coders
+                failed_claims_patters
+                    columns: 	[pattern_id] [varchar](50) NOT NULL,[pattern_name] [varchar](200) NOT NULL,[pattern_description] [nvarchar](1000) NULL,[failure_category] [varchar](50) NULL,[severity_level] [varchar](20) NULL,[frequency_score] [int] NULL,[pattern_rules] [nvarchar](max) NULL,[auto_repair_possible] [bit] NULL,[repair_template] [nvarchar](max) NULL,[occurrence_count] [int] NULL,[resolution_rate] [decimal](5, 4) NULL,[average_resolution_time_hours] [decimal](8, 2) NULL,[created_at] [datetime2](7) NULL,[updated_at] [datetime2](7) NULL
+                claims
+                    columns: 	[facility_id] [varchar](20) NOT NULL,[patient_account_number] [varchar](50) NOT NULL,[medical_record_number] [varchar](50) NULL,[patient_name] [varchar](100) NULL,[first_name] [varchar](50) NULL,[last_name] [varchar](50) NULL,[date_of_birth] [date] NULL,[gender] [varchar](1) NULL,[financial_class_id] [varchar](10) NULL (key back to facility_financial_classes.financial_class_id),[secondary_insurance] [varchar](10) NULL (key back to facility_financial_classes.financial_class_id),[active] [bit] NULL,[created_at] [datetime2](7) NULL,[updated_at] [datetime2](7) NULL
+                claims_diagnosis
+                    columns:     patient_account_number foreign key back to claims.patient_account_number,diagnosis_sequence integer NOT NULL,diagnosis_code character varying(20) NOT NULL,diagnosis_description character varying(255)diagnosis_type character varying(10),created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+                claims_line_items
+                    columns: patient_account_number foreign key back to claims.patient_account_number,line_number integer NOT NULL,procedure_code character varying(10)  NOT NULL,modifier1 character varying(2),modifier2 character varying(2),modifier3 character varying(2),modifier4 character varying(2),units integer NOT NULL DEFAULT 1,charge_amount numeric(10,2) NOT NULL,service_from_date date,service_to_date date,diagnosis_pointer character varying(4),place_of_service character varying(2) foreign key back to facility_place_of_service.place_of_service,revenue_code character varying(4),    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,rvu_value numeric(8,4),reimbursement_amount numeric(10,2), rendering_provider_id (varchar(50)) foreign key back to physicians.rendering_provider_id
+                performance_metrics
+                    columns: 	[metric_date] [datetime2](7) NULL,[metric_type] [varchar](50) NOT NULL,[facility_id] [varchar](20) NULL,[claims_per_second] [decimal](10, 4) NULL,[records_per_minute] [decimal](10, 2) NULL,[cpu_usage_percent] [decimal](5, 2) NULL,[memory_usage_mb] [int] NULL,[database_response_time_ms] [decimal](8, 2) NULL,[queue_depth] [int] NULL,[error_rate] [decimal](5, 4) NULL,[processing_accuracy] [decimal](5, 4) NULL,[revenue_per_claim] [decimal](10, 2) NULL,	[additional_metrics] [nvarchar](max) NULL
+                rvu_data
+                    columns: 	[procedure_code] [varchar](10) NOT NULL,[description] [varchar](500) NULL,[category] [varchar](50) NULL,[subcategory] [varchar](50) NULL,[work_rvu] [decimal](8, 4) NULL,[practice_expense_rvu] [decimal](8, 4) NULL,	[malpractice_rvu] [decimal](8, 4) NULL,	[total_rvu] [decimal](8, 4) NULL,	[conversion_factor] [decimal](8, 2) NULL,	[non_facility_pe_rvu] [decimal](8, 4) NULL,	[facility_pe_rvu] [decimal](8, 4) NULL,	[effective_date] [date] NULL,	[end_date] [date] NULL,	[status] [varchar](20) NULL,	[global_period] [varchar](10) NULL,	[professional_component] [bit] NULL,	[technical_component] [bit] NULL,	[bilateral_surgery] [bit] NULL,	[created_at] [datetime2](7) NULL,	[updated_at] [datetime2](7) NULL
+                core_standard_payers
+                    columns: payer_id (int), payer_name (varchar(20)), payer_code (char (2))
+
+
+The system is designed for performance, overall optimization and best coding practices, scalability, reliability, compliance with CMS 1500 standards, and robust analytics, with a focus on production-ready ML integration.
