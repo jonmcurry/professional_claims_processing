@@ -24,3 +24,8 @@ cache:
   warm_rvu_codes: []
 model:
   path: model.joblib
+logging:
+  level: INFO
+  aggregator_host: null
+  aggregator_port: null
+  component_levels: {}

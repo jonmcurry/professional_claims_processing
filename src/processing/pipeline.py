@@ -1,4 +1,5 @@
 import asyncio
+import time
 from typing import Dict, Any
 
 from ..config.config import AppConfig
@@ -21,7 +22,7 @@ from ..monitoring.metrics import metrics
 class ClaimsPipeline:
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
-        self.logger = setup_logging()
+        self.logger = setup_logging(cfg.logging)
         self.request_filter: RequestContextFilter | None = None
         self.pg = PostgresDatabase(cfg.postgres)
         self.sql = SQLServerDatabase(cfg.sqlserver)
@@ -60,6 +61,7 @@ class ClaimsPipeline:
             self.request_filter = RequestContextFilter()
             self.logger.addFilter(self.request_filter)
         start_trace()
+        start_time = time.perf_counter()
 
         processing_status["processed"] = 0
         processing_status["failed"] = 0
@@ -73,6 +75,17 @@ class ClaimsPipeline:
             await self.service.insert_claims(valid)
             processing_status["processed"] += len(valid)
             metrics.inc("claims_processed", len(valid))
+
+        duration = time.perf_counter() - start_time
+        self.logger.info(
+            "Batch complete",
+            extra={
+                "event": "batch_complete",
+                "processed": processing_status["processed"],
+                "failed": processing_status["failed"],
+                "duration_sec": round(duration, 4),
+            },
+        )
 
     async def process_claim(self, claim: Dict[str, Any]) -> tuple[str, str] | None:
         assert self.rules_engine and self.validator and self.model
