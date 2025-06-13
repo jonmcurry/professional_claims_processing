@@ -40,6 +40,16 @@ After installing dependencies and setting up the databases and model, run:
 python -m src.processing.main
 ```
 
+## Web UI
+Run the FastAPI server to view failed claims and monitor real-time sync status:
+
+```bash
+uvicorn src.web.app:app --reload
+```
+
+The `/failed_claims` page lists recent failed claims and the `/status` endpoint
+returns processing counts so you can display a real-time indicator in the UI.
+
 ## Tests
 Tests use `pytest`.
 
