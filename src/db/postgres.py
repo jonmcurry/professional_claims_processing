@@ -74,6 +74,7 @@ class PostgresDatabase(BaseDatabase):
                 rows = await conn.fetch(query, *params)
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("postgres_query_ms", duration)
+            metrics.inc("postgres_query_count")
             await self.circuit_breaker.record_success()
             result = [dict(row) for row in rows]
             self.query_cache.set(cache_key, result)
@@ -104,6 +105,7 @@ class PostgresDatabase(BaseDatabase):
                 result = await conn.execute(query, *params)
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("postgres_query_ms", duration)
+            metrics.inc("postgres_query_count")
             await self.circuit_breaker.record_success()
             return int(result.split(" ")[-1])
         except asyncpg.PostgresError:
@@ -131,6 +133,7 @@ class PostgresDatabase(BaseDatabase):
                 await conn.executemany(query, params_list)
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("postgres_query_ms", duration)
+            metrics.inc("postgres_query_count")
             await self.circuit_breaker.record_success()
         except asyncpg.PostgresError:
             await self.circuit_breaker.record_failure()

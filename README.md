@@ -80,6 +80,9 @@ Run the pipeline benchmark script with:
 ```bash
 python benchmarks/benchmark_pipeline.py
 ```
+Additional load testing utilities are available in `benchmarks/load_runner.py`.
+See [docs/PERFORMANCE.md](docs/PERFORMANCE.md) for resource monitoring and query
+analytics instructions.
 
 ## Contributing
 Contributions are welcome! Please open an issue to discuss any changes. Ensure tests pass before submitting a pull request and follow PEP 8 style conventions.
