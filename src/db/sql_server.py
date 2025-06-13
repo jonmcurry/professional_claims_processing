@@ -20,11 +20,12 @@ class SQLServerDatabase(BaseDatabase):
         self._prepared: set[str] = set()
         self.circuit_breaker = CircuitBreaker()
 
-    async def connect(self, size: int = 5) -> None:
+    async def connect(self, size: int | None = None) -> None:
         if not await self.circuit_breaker.allow():
             raise CircuitBreakerOpenError("SQLServer circuit open")
         try:
-            for _ in range(size):
+            pool_size = size or self.cfg.pool_size
+            for _ in range(pool_size):
                 conn = self._create_connection()
                 # pre-warm by executing a simple statement
                 cursor = conn.cursor()

@@ -4,8 +4,10 @@
 This project builds a high-performance claims processing system with an integrated machine learning (ML) model for filter prediction. It fetches claims from a PostgreSQL staging database, validates them, applies rules and ML-based filtering and then inserts the results into a SQL Server production database. Caching, asynchronous processing and connection pooling are used to maximize throughput.
 
 ### Performance Optimizations
-- The pipeline processes streamed claims in parallel.
-- Bulk inserts can utilize multiple connections.
+- The pipeline processes streamed claims in parallel using worker tasks.
+- Bulk inserts utilize multiple connections for higher throughput.
+- Query plans can be inspected via `src/analysis/query_plan.py` for tuning.
+- Connection pool sizes are configurable for improved multiplexing.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a high-level system diagram.
 

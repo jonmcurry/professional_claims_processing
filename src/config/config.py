@@ -43,6 +43,8 @@ class PostgresConfig:
     database: str
     replica_host: Optional[str] = None
     replica_port: Optional[int] = None
+    min_pool_size: int = 5
+    max_pool_size: int = 20
 
 
 @dataclass
@@ -52,6 +54,7 @@ class SQLServerConfig:
     user: str
     password: str
     database: str
+    pool_size: int = 5
 
 
 @dataclass
