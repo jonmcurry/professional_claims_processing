@@ -102,6 +102,13 @@ CREATE TABLE facility_financial_classes (
 );
 GO
 
+ALTER TABLE facility_financial_classes
+    ADD CONSTRAINT fk_ffc_facility FOREIGN KEY (facility_id)
+        REFERENCES facilities(facility_id);
+ALTER TABLE facility_financial_classes
+    ADD CONSTRAINT fk_ffc_payer FOREIGN KEY (payer_id)
+        REFERENCES core_standard_payers(payer_id);
+
 CREATE TABLE facility_place_of_service (
     facility_id INT,
     place_of_service VARCHAR(2),
@@ -120,6 +127,10 @@ CREATE TABLE facility_departments (
 );
 GO
 
+ALTER TABLE facility_departments
+    ADD CONSTRAINT fk_dept_facility FOREIGN KEY (facility_id)
+        REFERENCES facilities(facility_id);
+
 CREATE TABLE facility_coders (
     facility_id INT,
     coder_id VARCHAR(50),
@@ -127,6 +138,10 @@ CREATE TABLE facility_coders (
     coder_first_name VARCHAR(50)
 );
 GO
+
+ALTER TABLE facility_coders
+    ADD CONSTRAINT fk_coder_facility FOREIGN KEY (facility_id)
+        REFERENCES facilities(facility_id);
 
 CREATE TABLE physicians (
     rendering_provider_id VARCHAR(50),
@@ -160,6 +175,10 @@ CREATE TABLE failed_claims (
     coder_id VARCHAR(50)
 );
 GO
+
+ALTER TABLE failed_claims
+    ADD CONSTRAINT fk_failed_claims_coder FOREIGN KEY (coder_id)
+        REFERENCES facility_coders(coder_id);
 
 CREATE TABLE failed_claims_patterns (
     pattern_id VARCHAR(50) NOT NULL,
@@ -206,6 +225,10 @@ CREATE TABLE claims_diagnosis (
 );
 GO
 
+ALTER TABLE claims_diagnosis
+    ADD CONSTRAINT fk_claim_diag_claim FOREIGN KEY (patient_account_number)
+        REFERENCES claims(patient_account_number);
+
 CREATE TABLE claims_line_items (
     patient_account_number VARCHAR(50) NOT NULL,
     line_number INT NOT NULL,
@@ -227,6 +250,13 @@ CREATE TABLE claims_line_items (
     rendering_provider_id VARCHAR(50) NULL
 );
 GO
+
+ALTER TABLE claims_line_items
+    ADD CONSTRAINT fk_line_claim FOREIGN KEY (patient_account_number)
+        REFERENCES claims(patient_account_number);
+ALTER TABLE claims_line_items
+    ADD CONSTRAINT fk_line_provider FOREIGN KEY (rendering_provider_id)
+        REFERENCES physicians(rendering_provider_id);
 
 CREATE TABLE performance_metrics (
     metric_date DATETIME2(7) NULL,
@@ -274,4 +304,30 @@ CREATE TABLE core_standard_payers (
     payer_name VARCHAR(20),
     payer_code CHAR(2)
 );
+GO
+
+-- Partition failed_claims table by failed_at date
+CREATE PARTITION FUNCTION pf_failed_at (DATETIME2(7))
+AS RANGE RIGHT FOR VALUES ('2020-01-01', '2021-01-01', '2022-01-01', '2023-01-01');
+
+CREATE PARTITION SCHEME ps_failed_at
+AS PARTITION pf_failed_at
+ALL TO ([PRIMARY]);
+
+CREATE CLUSTERED INDEX cix_failed_claims_failed_at
+ON failed_claims(failed_at)
+ON ps_failed_at(failed_at);
+
+-- Procedure to archive old failed claims
+IF OBJECT_ID('archived_failed_claims', 'U') IS NULL
+    SELECT * INTO archived_failed_claims FROM failed_claims WHERE 1 = 0;
+GO
+
+CREATE PROCEDURE sp_archive_failed_claims @cutoff DATETIME2
+AS
+BEGIN
+    SET NOCOUNT ON;
+    INSERT INTO archived_failed_claims SELECT * FROM failed_claims WHERE failed_at < @cutoff;
+    DELETE FROM failed_claims WHERE failed_at < @cutoff;
+END
 GO

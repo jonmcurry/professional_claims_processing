@@ -43,7 +43,9 @@ CREATE TABLE claims (
     priority VARCHAR(10),
     submitted_by VARCHAR(100),
     correlation_id VARCHAR(50)
-);
+) PARTITION BY RANGE (service_to_date);
+
+CREATE TABLE claims_default PARTITION OF claims DEFAULT;
 
 CREATE TABLE claims_line_items (
     claim_id VARCHAR(50) NOT NULL,
@@ -124,3 +126,22 @@ CREATE TABLE ml_models (
     feature_columns JSONB,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Foreign key constraints
+ALTER TABLE claims_line_items
+    ADD CONSTRAINT fk_claim_line_claim FOREIGN KEY (claim_id) REFERENCES claims (claim_id);
+
+ALTER TABLE claims_diagnosis_codes
+    ADD CONSTRAINT fk_diagnosis_claim FOREIGN KEY (claim_id) REFERENCES claims (claim_id);
+
+-- Archive procedure for old claims
+CREATE TABLE IF NOT EXISTS archived_claims (LIKE claims INCLUDING ALL);
+
+CREATE OR REPLACE PROCEDURE archive_old_claims(cutoff_date DATE)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO archived_claims SELECT * FROM claims WHERE service_to_date < cutoff_date;
+    DELETE FROM claims WHERE service_to_date < cutoff_date;
+END;
+$$;
