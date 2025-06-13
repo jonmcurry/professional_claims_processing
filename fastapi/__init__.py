@@ -1,6 +1,16 @@
 from .responses import HTMLResponse
 import asyncio
 
+
+class HTTPException(Exception):
+    def __init__(self, status_code: int, detail: str):
+        self.status_code = status_code
+        self.detail = detail
+
+
+def Header(default: str | None = None):
+    return default
+
 class FastAPI:
     def __init__(self):
         self.routes = {}
@@ -19,5 +29,5 @@ class FastAPI:
             return func
         return decorator
 
-__all__ = ["FastAPI", "HTMLResponse"]
+__all__ = ["FastAPI", "HTMLResponse", "HTTPException", "Header"]
 
