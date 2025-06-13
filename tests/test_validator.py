@@ -17,3 +17,21 @@ def test_validator_split_logic():
     errors = validator.validate(claim)
     assert "invalid_facility" in errors
     assert "invalid_service_dates" in errors
+
+
+def test_line_item_date_validation():
+    validator = ClaimValidator({"F1"}, {"A"})
+    claim = {
+        "facility_id": "F1",
+        "financial_class": "A",
+        "service_from_date": "2020-01-01",
+        "service_to_date": "2020-01-31",
+        "line_items": [
+            {
+                "service_from_date": "2019-12-31",
+                "service_to_date": "2020-01-02",
+            }
+        ],
+    }
+    errors = validator.validate(claim)
+    assert "line_item_date_out_of_range" in errors

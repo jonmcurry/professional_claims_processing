@@ -1,27 +1,27 @@
 import asyncio
-import time
 import os
-from typing import Dict, Any
+import time
+from typing import Any, Dict
 
 from ..config.config import AppConfig
-from ..security.compliance import mask_claim_data
 from ..db.postgres import PostgresDatabase
 from ..db.sql_server import SQLServerDatabase
-from ..models.filter_model import FilterModel
 from ..models.ab_test import ABTestModel
+from ..models.filter_model import FilterModel
 from ..models.monitor import ModelMonitor
-from ..rules.durable_engine import DurableRulesEngine
-from ..validation.validator import ClaimValidator
-from ..utils.cache import DistributedCache, InMemoryCache, RvuCache
-from ..utils.retries import retry_async
-from ..utils.logging import setup_logging, RequestContextFilter
-from ..utils.tracing import start_trace, start_span
-from ..utils.errors import ErrorCategory, categorize_exception
-from ..utils.audit import record_audit_event
-from .repair import ClaimRepairSuggester
-from ..services.claim_service import ClaimService
-from ..web.status import processing_status, batch_status
 from ..monitoring.metrics import metrics
+from ..rules.durable_engine import DurableRulesEngine
+from ..security.compliance import mask_claim_data
+from ..services.claim_service import ClaimService
+from ..utils.audit import record_audit_event
+from ..utils.cache import DistributedCache, InMemoryCache, RvuCache
+from ..utils.errors import ErrorCategory, categorize_exception
+from ..utils.logging import RequestContextFilter, setup_logging
+from ..utils.retries import retry_async
+from ..utils.tracing import start_span, start_trace
+from ..validation.validator import ClaimValidator
+from ..web.status import batch_status, processing_status
+from .repair import ClaimRepairSuggester
 
 
 class ClaimsPipeline:
@@ -46,7 +46,9 @@ class ClaimsPipeline:
     async def startup(self) -> None:
         await asyncio.gather(self.pg.connect(), self.sql.connect())
         # Connection pool warming
-        await asyncio.gather(self.pg.fetch("SELECT 1"), self.sql.execute("SELECT 1"))
+        await asyncio.gather(
+            self.pg.fetch("SELECT 1"), self.sql.execute("SELECT 1")
+        )
         # Prepare frequently used statements
         await self.sql.prepare(
             "INSERT INTO claims (patient_account_number, facility_id) VALUES (?, ?)"
@@ -59,9 +61,13 @@ class ClaimsPipeline:
             model_b = FilterModel(
                 self.cfg.model.ab_test_path, self.cfg.model.version + "b"
             )
-            self.model = ABTestModel(model_a, model_b, self.cfg.model.ab_test_ratio)
+            self.model = ABTestModel(
+                model_a, model_b, self.cfg.model.ab_test_ratio
+            )
         else:
-            self.model = FilterModel(self.cfg.model.path, self.cfg.model.version)
+            self.model = FilterModel(
+                self.cfg.model.path, self.cfg.model.version
+            )
         if self.features.enable_model_monitor:
             self.model_monitor = ModelMonitor(self.cfg.model.version)
         self.rules_engine = DurableRulesEngine([])
@@ -70,7 +76,9 @@ class ClaimsPipeline:
             self.distributed_cache = DistributedCache(self.cfg.cache.redis_url)
         self.rvu_cache = RvuCache(
             self.pg,
-            distributed=self.distributed_cache if self.features.enable_cache else None,
+            distributed=(
+                self.distributed_cache if self.features.enable_cache else None
+            ),
         )
         if self.features.enable_cache and self.cfg.cache.warm_rvu_codes:
             await self.rvu_cache.warm_cache(self.cfg.cache.warm_rvu_codes)
@@ -94,7 +102,8 @@ class ClaimsPipeline:
             await self.service.record_checkpoint(claim_id, stage)
         except Exception:
             self.logger.debug(
-                "checkpoint failed", extra={"claim_id": claim_id, "stage": stage}
+                "checkpoint failed",
+                extra={"claim_id": claim_id, "stage": stage},
             )
 
     async def process_batch(self) -> None:
@@ -128,7 +137,10 @@ class ClaimsPipeline:
                 category = categorize_exception(exc)
                 for acct, facility in valid:
                     await self.service.enqueue_dead_letter(
-                        {"patient_account_number": acct, "facility_id": facility},
+                        {
+                            "patient_account_number": acct,
+                            "facility_id": facility,
+                        },
                         str(exc),
                     )
                 self.logger.error(
@@ -162,7 +174,9 @@ class ClaimsPipeline:
             await self.process_claim(claim)
 
     @retry_async()
-    async def process_claim(self, claim: Dict[str, Any]) -> tuple[str, str] | None:
+    async def process_claim(
+        self, claim: Dict[str, Any]
+    ) -> tuple[str, str] | None:
         assert self.rules_engine and self.validator and self.model
         with start_span():
             await self._checkpoint(claim.get("claim_id", ""), "start")
@@ -201,6 +215,15 @@ class ClaimsPipeline:
                 rvu = await self.rvu_cache.get(claim.get("procedure_code", ""))
                 if rvu:
                     claim["rvu_value"] = rvu.get("total_rvu")
+                    units = float(claim.get("units", 1) or 1)
+                    conv = float(self.cfg.processing.conversion_factor)
+                    try:
+                        rvu_total = float(rvu.get("total_rvu", 0))
+                        claim["reimbursement_amount"] = (
+                            rvu_total * units * conv
+                        )
+                    except Exception:
+                        claim["reimbursement_amount"] = None
             self.logger.info(
                 f"Processed claim {claim['claim_id']}",
                 extra={
