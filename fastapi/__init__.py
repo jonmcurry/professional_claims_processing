@@ -22,6 +22,7 @@ class FastAPI:
         self.routes = {}
         self.startup_handlers = []
         self.middleware_handlers = []
+        self.exception_handlers = {}
 
     def on_event(self, name):
         def decorator(func):
@@ -42,5 +43,16 @@ class FastAPI:
             return func
         return decorator
 
+    def add_middleware(self, cls, **kwargs):
+        instance = cls(**kwargs)
+        self.middleware_handlers.append(instance.dispatch)
+
+    def exception_handler(self, exc_cls):
+        def decorator(func):
+            self.exception_handlers[exc_cls] = func
+            return func
+        return decorator
+
 __all__ = ["FastAPI", "HTMLResponse", "HTTPException", "Header", "Request"]
+
 

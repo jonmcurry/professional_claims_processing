@@ -24,6 +24,9 @@ cache:
   warm_rvu_codes: []
 model:
   path: model.joblib
+  version: "1"
+  ab_test_path: null
+  ab_test_ratio: 0.5
 logging:
   level: INFO
   aggregator_host: null

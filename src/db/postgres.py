@@ -1,4 +1,7 @@
-import asyncpg
+try:
+    import asyncpg
+except Exception:  # pragma: no cover - allow missing dependency in tests
+    asyncpg = None
 from typing import Iterable, Any
 import time
 
