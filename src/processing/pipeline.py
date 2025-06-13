@@ -27,6 +27,7 @@ from ..monitoring.metrics import metrics
 class ClaimsPipeline:
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
+        self.features = cfg.features
         self.logger = setup_logging(cfg.logging)
         self.request_filter: RequestContextFilter | None = None
         self.pg = PostgresDatabase(cfg.postgres)
@@ -55,17 +56,23 @@ class ClaimsPipeline:
         )
         if self.cfg.model.ab_test_path:
             model_a = FilterModel(self.cfg.model.path, self.cfg.model.version)
-            model_b = FilterModel(self.cfg.model.ab_test_path, self.cfg.model.version + "b")
+            model_b = FilterModel(
+                self.cfg.model.ab_test_path, self.cfg.model.version + "b"
+            )
             self.model = ABTestModel(model_a, model_b, self.cfg.model.ab_test_ratio)
         else:
             self.model = FilterModel(self.cfg.model.path, self.cfg.model.version)
-        self.model_monitor = ModelMonitor(self.cfg.model.version)
+        if self.features.enable_model_monitor:
+            self.model_monitor = ModelMonitor(self.cfg.model.version)
         self.rules_engine = DurableRulesEngine([])
         self.validator = ClaimValidator(set(), set())
-        if self.cfg.cache.redis_url:
+        if self.features.enable_cache and self.cfg.cache.redis_url:
             self.distributed_cache = DistributedCache(self.cfg.cache.redis_url)
-        self.rvu_cache = RvuCache(self.pg, distributed=self.distributed_cache)
-        if self.cfg.cache.warm_rvu_codes:
+        self.rvu_cache = RvuCache(
+            self.pg,
+            distributed=self.distributed_cache if self.features.enable_cache else None,
+        )
+        if self.features.enable_cache and self.cfg.cache.warm_rvu_codes:
             await self.rvu_cache.warm_cache(self.cfg.cache.warm_rvu_codes)
 
     def calculate_batch_size(self) -> int:
@@ -213,6 +220,8 @@ class ClaimsPipeline:
             await self._checkpoint(claim.get("claim_id", ""), "completed")
             return (claim["patient_account_number"], claim["facility_id"])
 
-    async def process_partial_claim(self, claim_id: str, updates: Dict[str, Any]) -> None:
+    async def process_partial_claim(
+        self, claim_id: str, updates: Dict[str, Any]
+    ) -> None:
         """Process an amendment/correction for an existing claim."""
         await self.service.amend_claim(claim_id, updates)
