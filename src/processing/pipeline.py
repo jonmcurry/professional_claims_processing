@@ -15,6 +15,7 @@ from ..utils.audit import record_audit_event
 from .repair import ClaimRepairSuggester
 from ..services.claim_service import ClaimService
 from ..web.status import processing_status
+from ..monitoring.metrics import metrics
 
 
 class ClaimsPipeline:
@@ -62,6 +63,8 @@ class ClaimsPipeline:
 
         processing_status["processed"] = 0
         processing_status["failed"] = 0
+        metrics.set("claims_processed", 0)
+        metrics.set("claims_failed", 0)
         claims = await self.service.fetch_claims(self.cfg.processing.batch_size)
         tasks = [self.process_claim(claim) for claim in claims]
         results = await asyncio.gather(*tasks)
@@ -69,6 +72,7 @@ class ClaimsPipeline:
         if valid:
             await self.service.insert_claims(valid)
             processing_status["processed"] += len(valid)
+            metrics.inc("claims_processed", len(valid))
 
     async def process_claim(self, claim: Dict[str, Any]) -> tuple[str, str] | None:
         assert self.rules_engine and self.validator and self.model
@@ -77,6 +81,7 @@ class ClaimsPipeline:
             rule_errors = self.rules_engine.evaluate(claim)
             if validation_errors or rule_errors:
                 processing_status["failed"] += 1
+                metrics.inc("claims_failed")
                 suggestions = self.repair_suggester.suggest(validation_errors + rule_errors)
                 await self.service.record_failed_claim(claim, "validation", suggestions)
                 self.logger.error(

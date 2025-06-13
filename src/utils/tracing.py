@@ -13,6 +13,22 @@ def start_trace(trace_id: str | None = None) -> str:
     return trace
 
 
+def start_trace_from_traceparent(header: str | None) -> str:
+    """Parse a W3C traceparent header and start a new trace."""
+    if header:
+        try:
+            parts = header.split("-")
+            if len(parts) >= 3:
+                trace_id = parts[1]
+                span_id = parts[2]
+                trace_id_var.set(trace_id)
+                span_id_var.set(span_id)
+                return trace_id
+        except Exception:
+            pass
+    return start_trace()
+
+
 @contextmanager
 def start_span(span_id: str | None = None):
     """Context manager to set a span_id for the duration of the block."""

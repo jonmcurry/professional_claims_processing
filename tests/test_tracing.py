@@ -15,14 +15,21 @@ class DummyDB:
     async def health_check(self):
         return True
 
+
+class DummyPG(DummyDB):
+    pass
+
 @pytest.fixture
 def client():
-    app = create_app(sql_db=DummyDB(), api_key="test")
+    app = create_app(sql_db=DummyDB(), pg_db=DummyPG(), api_key="test")
     with TestClient(app) as client:
         yield client
 
 def test_trace_id_header(client):
-    resp = client.get("/health", headers={"X-API-Key": "test"})
+    traceparent = "00-1234567890abcdef1234567890abcdef-abcdef1234567890-01"
+    resp = client.get(
+        "/health",
+        headers={"X-API-Key": "test", "traceparent": traceparent},
+    )
     assert resp.status_code == 200
-    assert "X-Trace-ID" in resp.headers
-    assert resp.headers["X-Trace-ID"]
+    assert resp.headers["X-Trace-ID"] == "1234567890abcdef1234567890abcdef"
