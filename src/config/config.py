@@ -91,6 +91,9 @@ class LoggingConfig:
     aggregator_host: Optional[str] = None
     aggregator_port: Optional[int] = None
     component_levels: Dict[str, str] | None = None
+    rotate_mb: int = 10
+    backup_count: int = 5
+    sentry_dsn: Optional[str] = None
 
 
 @dataclass

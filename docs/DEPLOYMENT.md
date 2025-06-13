@@ -18,6 +18,7 @@ This document outlines the basic steps to deploy the claims processing service i
    pip install -r requirements.txt
    ```
 2. **Configure the application** by editing `config.yaml` or providing an environment specific file via the `APP_ENV` or `APP_CONFIG` variables.
+   Set `logging.aggregator_host` and `logging.aggregator_port` to forward JSON logs to your Logstash instance. Provide `logging.sentry_dsn` to enable centralized error tracking.
 3. **Apply database migrations**:
    ```bash
    alembic upgrade head

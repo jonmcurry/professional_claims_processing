@@ -36,6 +36,9 @@ logging:
   aggregator_host: null
   aggregator_port: null
   component_levels: {}
+  rotate_mb: 10
+  backup_count: 5
+  sentry_dsn: null
 features:
   enable_cache: true
   enable_model_monitor: true

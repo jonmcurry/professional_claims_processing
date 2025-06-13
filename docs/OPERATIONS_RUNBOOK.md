@@ -8,7 +8,8 @@ This runbook describes routine tasks for keeping the claims processing system he
 - Confirm that the `/health` and `/readiness` endpoints return `200`.
 
 ## Weekly Maintenance
-- Rotate and archive old log files.
+- Verify log rotation has archived files under `logs/`. The application now
+  rotates `audit.log` and `analytics.log` automatically based on size.
 - Inspect the `failed_claims` table for recurring errors.
 - Update ML model metrics using `src/models/evaluate_model.py`.
 
