@@ -4,3 +4,5 @@ joblib
 PyYAML
 durable_rules
 scikit-learn
+fastapi
+uvicorn
