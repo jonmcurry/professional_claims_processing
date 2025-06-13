@@ -1,6 +1,6 @@
 import logging
 import json
-import uuid
+from .tracing import trace_id_var, span_id_var
 
 
 class JsonFormatter(logging.Formatter):
@@ -13,6 +13,7 @@ class JsonFormatter(logging.Formatter):
             "level": record.levelname,
             "message": record.getMessage(),
             "request_id": getattr(record, "request_id", ""),
+            "span_id": getattr(record, "span_id", ""),
         }
         for key, value in record.__dict__.items():
             if key not in standard and key not in data:
@@ -20,14 +21,14 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(data)
 
 
-def setup_logging(request_id: str | None = None) -> logging.Logger:
+def setup_logging() -> logging.Logger:
     logger = logging.getLogger("claims_processor")
     if logger.handlers:
         return logger
 
     stream_handler = logging.StreamHandler()
     fmt = logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(request_id)s %(message)s"
+        "%(asctime)s [%(levelname)s] %(request_id)s %(span_id)s %(message)s"
     )
     stream_handler.setFormatter(fmt)
     logger.addHandler(stream_handler)
@@ -41,16 +42,13 @@ def setup_logging(request_id: str | None = None) -> logging.Logger:
     logger.addHandler(analytics_handler)
 
     logger.setLevel(logging.INFO)
-    logger.addFilter(RequestContextFilter(request_id))
+    logger.addFilter(RequestContextFilter())
     return logger
 
 
 class RequestContextFilter(logging.Filter):
-    def __init__(self, request_id: str | None = None):
-        super().__init__()
-        self.request_id = request_id or str(uuid.uuid4())
-
     def filter(self, record: logging.LogRecord) -> bool:
-        record.request_id = self.request_id
+        record.request_id = trace_id_var.get("")
+        record.span_id = span_id_var.get("")
         return True
 
