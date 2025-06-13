@@ -45,7 +45,7 @@ class ClaimsPipeline:
         await self.sql.prepare(
             "INSERT INTO failed_claims (claim_id, facility_id, patient_account_number, failure_reason, processing_stage, failed_at, original_data, repair_suggestions) VALUES (?, ?, ?, ?, ?, GETDATE(), ?, ?)"
         )
-        self.model = FilterModel("model.joblib")
+        self.model = FilterModel(self.cfg.model.path)
         self.rules_engine = DurableRulesEngine([])
         self.validator = ClaimValidator(set(), set())
         if self.cfg.cache.redis_url:

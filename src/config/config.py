@@ -29,6 +29,7 @@ except Exception:  # pragma: no cover - fallback simple parser
             return data
 
     yaml = _SimpleYAML()
+import os
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -71,21 +72,58 @@ class CacheConfig:
 
 
 @dataclass
+class ModelConfig:
+    path: str = "model.joblib"
+
+
+@dataclass
 class AppConfig:
     postgres: PostgresConfig
     sqlserver: SQLServerConfig
     processing: ProcessingConfig
     security: SecurityConfig
     cache: CacheConfig
+    model: ModelConfig
+
+
+def _resolve_path(default: str) -> str:
+    env_path = os.getenv("APP_CONFIG")
+    if not env_path:
+        env = os.getenv("APP_ENV")
+        if env:
+            candidate = f"config.{env}.yaml"
+            if Path(candidate).exists():
+                env_path = candidate
+    return env_path or default
+
+
+def validate_config(cfg: AppConfig) -> None:
+    if not cfg.postgres.host:
+        raise ValueError("PostgreSQL host is required")
+    if not cfg.sqlserver.host:
+        raise ValueError("SQL Server host is required")
+    if not cfg.security.api_key:
+        raise ValueError("API key must be set")
+    if not cfg.model.path:
+        raise ValueError("Model path must be configured")
 
 
 def load_config(path: str = "config.yaml") -> AppConfig:
+    path = _resolve_path(path)
     data: Dict[str, Any] = yaml.safe_load(Path(path).read_text())
     pg = PostgresConfig(**data.get("postgresql", {}))
     sql = SQLServerConfig(**data.get("sqlserver", {}))
     proc = ProcessingConfig(**data.get("processing", {}))
     sec = SecurityConfig(**data.get("security", {}))
     cache_cfg = CacheConfig(**data.get("cache", {}))
-    return AppConfig(
-        postgres=pg, sqlserver=sql, processing=proc, security=sec, cache=cache_cfg
+    model_cfg = ModelConfig(**data.get("model", {}))
+    cfg = AppConfig(
+        postgres=pg,
+        sqlserver=sql,
+        processing=proc,
+        security=sec,
+        cache=cache_cfg,
+        model=model_cfg,
     )
+    validate_config(cfg)
+    return cfg

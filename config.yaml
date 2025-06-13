@@ -20,3 +20,5 @@ security:
 cache:
   redis_url: null
   warm_rvu_codes: []
+model:
+  path: model.joblib
