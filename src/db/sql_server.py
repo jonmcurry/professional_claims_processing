@@ -1,4 +1,5 @@
 import asyncio
+import time
 import pyodbc
 from typing import Iterable, Any
 
@@ -6,6 +7,7 @@ from ..utils.errors import DatabaseConnectionError, QueryError
 
 from .base import BaseDatabase
 from ..config.config import SQLServerConfig
+from ..monitoring.metrics import metrics
 
 
 class SQLServerDatabase(BaseDatabase):
@@ -36,12 +38,16 @@ class SQLServerDatabase(BaseDatabase):
     async def _acquire(self) -> pyodbc.Connection:
         async with self._lock:
             if self.pool:
-                return self.pool.pop()
-            return self._create_connection()
+                conn = self.pool.pop()
+            else:
+                conn = self._create_connection()
+            metrics.set("sqlserver_pool_size", float(len(self.pool)))
+            return conn
 
     async def _release(self, conn: pyodbc.Connection) -> None:
         async with self._lock:
             self.pool.append(conn)
+            metrics.set("sqlserver_pool_size", float(len(self.pool)))
 
     async def prepare(self, query: str) -> None:
         conn = await self._acquire()
@@ -55,10 +61,13 @@ class SQLServerDatabase(BaseDatabase):
     async def fetch(self, query: str, *params: Any) -> Iterable[dict]:
         conn = await self._acquire()
         try:
+            start = time.perf_counter()
             cursor = conn.cursor()
             cursor.execute(query, params)
             columns = [col[0] for col in cursor.description]
             rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+            duration = (time.perf_counter() - start) * 1000
+            metrics.inc("sqlserver_query_ms", duration)
             return rows
         except pyodbc.Error:
             conn.close()
@@ -76,12 +85,15 @@ class SQLServerDatabase(BaseDatabase):
     async def execute(self, query: str, *params: Any) -> int:
         conn = await self._acquire()
         try:
+            start = time.perf_counter()
             cursor = conn.cursor()
             if query in self._prepared:
                 cursor.execute(None, params)
             else:
                 cursor.execute(query, params)
             conn.commit()
+            duration = (time.perf_counter() - start) * 1000
+            metrics.inc("sqlserver_query_ms", duration)
             return cursor.rowcount
         except pyodbc.Error:
             conn.close()
@@ -98,10 +110,13 @@ class SQLServerDatabase(BaseDatabase):
         finally:
             await self._release(conn)
 
-    async def execute_many(self, query: str, params_seq: Iterable[Iterable[Any]]) -> int:
+    async def execute_many(
+        self, query: str, params_seq: Iterable[Iterable[Any]]
+    ) -> int:
         conn = await self._acquire()
         params_list = list(params_seq)
         try:
+            start = time.perf_counter()
             cursor = conn.cursor()
             cursor.fast_executemany = True
             if query in self._prepared:
@@ -109,6 +124,8 @@ class SQLServerDatabase(BaseDatabase):
             else:
                 cursor.executemany(query, params_list)
             conn.commit()
+            duration = (time.perf_counter() - start) * 1000
+            metrics.inc("sqlserver_query_ms", duration)
             return cursor.rowcount
         except pyodbc.Error:
             conn.close()
@@ -133,3 +150,5 @@ class SQLServerDatabase(BaseDatabase):
         except DatabaseError:
             return False
 
+    def report_pool_status(self) -> None:
+        metrics.set("sqlserver_pool_size", float(len(self.pool)))

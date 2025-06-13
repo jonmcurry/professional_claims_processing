@@ -4,6 +4,8 @@ postgresql:
   user: user
   password: pass
   database: staging_process
+  replica_host: null
+  replica_port: null
 sqlserver:
   host: localhost
   port: 1433
