@@ -13,6 +13,8 @@ from ..utils.tracing import (
 from ..monitoring.metrics import metrics
 import json
 from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi.responses import JSONResponse
+import logging
 import re
 from ..monitoring.profiling import start_profiling, stop_profiling
 
@@ -28,11 +30,20 @@ def create_app(
     sql = sql_db or SQLServerDatabase(cfg.sqlserver)
     if pg_db is None:
         from ..db.postgres import PostgresDatabase
+
         pg = PostgresDatabase(cfg.postgres)
     else:
         pg = pg_db
     required_key = api_key or cfg.security.api_key
     limiter = RateLimiter(rate_limit_per_sec)
+    logger = logging.getLogger("claims_processor")
+
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: Request, exc: Exception):
+        logger.exception("Unhandled exception", exc_info=exc)
+        return JSONResponse(
+            status_code=500, content={"detail": "Internal Server Error"}
+        )
 
     def _check_role(required: str, role: str | None) -> None:
         current = role or "user"
@@ -56,6 +67,7 @@ def create_app(
         async def dispatch(self, request: Request, call_next):
             if request.headers.get("content-type", "").startswith("application/json"):
                 body = await request.json()
+
                 def _sanitize(value: Any) -> Any:
                     if isinstance(value, str):
                         return re.sub(r"[<>]", "", value)
@@ -64,6 +76,7 @@ def create_app(
                     if isinstance(value, list):
                         return [_sanitize(v) for v in value]
                     return value
+
                 sanitized = _sanitize(body)
                 request._body = bytes(json.dumps(sanitized), "utf-8")  # type: ignore[attr-defined]
             response = await call_next(request)
@@ -95,7 +108,9 @@ def create_app(
         await pg.close()
 
     @app.get("/api/failed_claims")
-    async def api_failed_claims(x_api_key: str = Header(...), x_user_role: str | None = Header(None)):
+    async def api_failed_claims(
+        x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+    ):
         _check_key(x_api_key)
         _check_role("user", x_user_role)
         rows = await sql.fetch(
@@ -104,7 +119,9 @@ def create_app(
         return rows
 
     @app.get("/failed_claims", response_class=HTMLResponse)
-    async def failed_claims_page(x_api_key: str = Header(...), x_user_role: str | None = Header(None)):
+    async def failed_claims_page(
+        x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+    ):
         _check_key(x_api_key)
         _check_role("user", x_user_role)
         rows = await sql.fetch(
@@ -129,20 +146,26 @@ def create_app(
         return HTMLResponse(content=page)
 
     @app.get("/status")
-    async def status(x_api_key: str = Header(...), x_user_role: str | None = Header(None)):
+    async def status(
+        x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+    ):
         _check_key(x_api_key)
         _check_role("user", x_user_role)
         return processing_status
 
     @app.get("/health")
-    async def health(x_api_key: str = Header(...), x_user_role: str | None = Header(None)):
+    async def health(
+        x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+    ):
         _check_key(x_api_key)
         _check_role("user", x_user_role)
         ok = await sql.health_check()
         return {"sqlserver": ok}
 
     @app.get("/readiness")
-    async def readiness(x_api_key: str = Header(...), x_user_role: str | None = Header(None)):
+    async def readiness(
+        x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+    ):
         _check_key(x_api_key)
         _check_role("user", x_user_role)
         pg_ok = await pg.health_check()
@@ -154,20 +177,26 @@ def create_app(
         return {"status": "ok"}
 
     @app.get("/metrics")
-    async def get_metrics(x_api_key: str = Header(...), x_user_role: str | None = Header(None)):
+    async def get_metrics(
+        x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+    ):
         _check_key(x_api_key)
         _check_role("admin", x_user_role)
         return metrics.as_dict()
 
     @app.get("/profiling/start")
-    async def profiling_start(x_api_key: str = Header(...), x_user_role: str | None = Header(None)):
+    async def profiling_start(
+        x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+    ):
         _check_key(x_api_key)
         _check_role("admin", x_user_role)
         start_profiling()
         return {"profiling": "started"}
 
     @app.get("/profiling/stop")
-    async def profiling_stop(x_api_key: str = Header(...), x_user_role: str | None = Header(None)):
+    async def profiling_stop(
+        x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+    ):
         _check_key(x_api_key)
         _check_role("admin", x_user_role)
         stats = stop_profiling()
