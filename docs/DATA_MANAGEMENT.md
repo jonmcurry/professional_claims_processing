@@ -13,3 +13,12 @@ The encryption key used for the archive is the same `encryption_key` from `confi
 
 ### Restoration
 To restore data from an archive file, decrypt it and load the records back into the database using a script such as `restore_archived_claims.py`.
+
+## Automated Retention Policy
+The `enforce_retention_policy.py` helper under `src/maintenance` can be scheduled via cron to automatically archive claims older than 36 months and purge archive files beyond the seven‑year retention window.
+
+Example cron entry:
+```
+0 2 * * * python -m src.maintenance.enforce_retention_policy
+```
+This job keeps production tables slim while ensuring long‑term records are retained for regulatory purposes.

@@ -96,6 +96,13 @@ This project includes basic security features to protect sensitive claim data.
 - **Data Access Controls**: All web endpoints require an API key via the `X-API-Key` header.
 - **Encryption**: The `encryption_key` from the security section of `config.yaml` is used to
   encrypt sensitive payloads before persisting them.
+- **HIPAA Compliance**: See [docs/HIPAA_COMPLIANCE.md](docs/HIPAA_COMPLIANCE.md) for a checklist
+  of recommended practices.
+- **Automated Retention**: The helper script `src/maintenance/enforce_retention_policy.py`
+  can be scheduled to enforce data retention policies.
+- **Security Scanning**: Run `bandit -r src -ll` to perform static security analysis. See
+  [docs/SECURITY_SCANNING.md](docs/SECURITY_SCANNING.md) for details.
+- **RBAC**: Roles now include `auditor`, `user`, and `admin`. Auditor access is read-only.
 
 ## Error Handling
 The system now features a global exception handler for the FastAPI application.
