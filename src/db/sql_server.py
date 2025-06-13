@@ -16,7 +16,8 @@ class SQLServerDatabase(BaseDatabase):
         self.cfg = cfg
         self.pool: list[pyodbc.Connection] = []
         self._lock = asyncio.Lock()
-        self._prepared: dict[str, str] = {}
+        # Set of SQL statements that have been prepared on all connections
+        self._prepared: set[str] = set()
         self.circuit_breaker = CircuitBreaker()
 
     async def connect(self, size: int = 5) -> None:
@@ -35,11 +36,20 @@ class SQLServerDatabase(BaseDatabase):
         await self.circuit_breaker.record_success()
 
     def _create_connection(self) -> pyodbc.Connection:
-        return pyodbc.connect(
+        """Create a new connection and prepare cached statements."""
+        conn = pyodbc.connect(
             f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={self.cfg.host},{self.cfg.port};"
             f"DATABASE={self.cfg.database};UID={self.cfg.user};PWD={self.cfg.password}",
             autocommit=False,
         )
+        if self._prepared:
+            cursor = conn.cursor()
+            for stmt in self._prepared:
+                try:
+                    cursor.prepare(stmt)
+                except Exception:
+                    pass
+        return conn
 
     async def _acquire(self) -> pyodbc.Connection:
         async with self._lock:
@@ -56,13 +66,18 @@ class SQLServerDatabase(BaseDatabase):
             metrics.set("sqlserver_pool_size", float(len(self.pool)))
 
     async def prepare(self, query: str) -> None:
-        conn = await self._acquire()
-        try:
-            cursor = conn.cursor()
-            cursor.prepare(query)
-            self._prepared[query] = query
-        finally:
-            await self._release(conn)
+        """Prepare a statement on all existing connections."""
+        async with self._lock:
+            if query in self._prepared:
+                return
+            self._prepared.add(query)
+            conns = list(self.pool)
+        for conn in conns:
+            try:
+                cursor = conn.cursor()
+                cursor.prepare(query)
+            except Exception:
+                continue
 
     async def fetch(self, query: str, *params: Any) -> Iterable[dict]:
         if not await self.circuit_breaker.allow():
