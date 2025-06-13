@@ -24,18 +24,22 @@ pip install -r requirements.txt
 
 Update `config.yaml` with your connection details.
 
+Set the `APP_ENV` environment variable to load `config.<environment>.yaml` or
+`APP_CONFIG` to specify an explicit configuration file. When neither is set,
+`config.yaml` is used.
+
 The `cache` section can enable Redis for distributed RVU caching. Set `redis_url`
 to your server and list common `warm_rvu_codes` to pre-populate the cache during
 startup.
 
 ## ML Model
-The processing pipeline loads a scikit-learn model from `model.joblib` located in the project root. Train your own model or obtain the file from the maintainers and place it in this location before running the pipeline.
+The processing pipeline loads a scikit-learn model using the path specified in the `model.path` setting of `config.yaml`. Train your own model or obtain the file from the maintainers and update the configuration with the correct location.
 
 To generate a sample model for development, run:
 ```
 python src/models/train_model.py
 ```
-This creates `model.joblib` in the project root.
+This creates the model file at the configured path.
 
 ## Usage
 After installing dependencies and setting up the databases and model, run:
