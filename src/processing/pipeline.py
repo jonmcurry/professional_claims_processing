@@ -1,6 +1,7 @@
 import asyncio
 import os
 import time
+import contextlib
 from typing import Any, Dict
 
 from ..config.config import AppConfig
@@ -130,7 +131,9 @@ class ClaimsPipeline:
         valid = [r for r in results if r]
         if valid:
             try:
-                await self.service.insert_claims(valid)
+                await self.service.insert_claims(
+                    valid, concurrency=self.cfg.processing.insert_workers
+                )
                 processing_status["processed"] += len(valid)
                 metrics.inc("claims_processed", len(valid))
             except Exception as exc:
@@ -163,15 +166,44 @@ class ClaimsPipeline:
         )
 
     async def process_stream(self) -> None:
-        """Continuously process claims from the source stream."""
+        """Continuously process claims using a parallel pipeline."""
         if not self.request_filter:
             self.request_filter = RequestContextFilter()
             self.logger.addFilter(self.request_filter)
         start_trace()
-        async for claim in self.service.stream_claims(
-            self.calculate_batch_size(), priority=True
-        ):
-            await self.process_claim(claim)
+        batch_size = self.calculate_batch_size()
+        queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue(maxsize=batch_size * 2)
+        results: list[tuple[str, str]] = []
+        stop = asyncio.Event()
+
+        async def producer() -> None:
+            async for claim in self.service.stream_claims(batch_size, priority=True):
+                await queue.put(claim)
+            stop.set()
+
+        async def worker() -> None:
+            while not (stop.is_set() and queue.empty()):
+                try:
+                    claim = await asyncio.wait_for(queue.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    continue
+                res = await self.process_claim(claim)
+                if res:
+                    results.append(res)
+                queue.task_done()
+
+        prod_task = asyncio.create_task(producer())
+        workers = [asyncio.create_task(worker()) for _ in range(batch_size)]
+        await prod_task
+        await queue.join()
+        for w in workers:
+            w.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await w
+        if results:
+            await self.service.insert_claims(
+                results, concurrency=self.cfg.processing.insert_workers
+            )
 
     @retry_async()
     async def process_claim(

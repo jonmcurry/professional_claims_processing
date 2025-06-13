@@ -144,12 +144,39 @@ class SQLServerDatabase(BaseDatabase):
             await self._release(conn)
 
     async def execute_many(
-        self, query: str, params_seq: Iterable[Iterable[Any]]
+        self,
+        query: str,
+        params_seq: Iterable[Iterable[Any]],
+        *,
+        concurrency: int = 1,
     ) -> int:
         if not await self.circuit_breaker.allow():
             raise CircuitBreakerOpenError("SQLServer circuit open")
-        conn = await self._acquire()
         params_list = list(params_seq)
+        if concurrency > 1 and len(params_list) > 0:
+            chunks = [
+                params_list[i : i + len(params_list) // concurrency + 1]
+                for i in range(0, len(params_list), len(params_list) // concurrency + 1)
+            ]
+
+            async def run_chunk(chunk: list[Iterable[Any]]) -> int:
+                conn = await self._acquire()
+                try:
+                    cursor = conn.cursor()
+                    cursor.fast_executemany = True
+                    if query in self._prepared:
+                        cursor.executemany(None, chunk)
+                    else:
+                        cursor.executemany(query, chunk)
+                    conn.commit()
+                    return cursor.rowcount
+                finally:
+                    await self._release(conn)
+
+            results = await asyncio.gather(*[run_chunk(c) for c in chunks])
+            return sum(results)
+
+        conn = await self._acquire()
         try:
             start = time.perf_counter()
             cursor = conn.cursor()

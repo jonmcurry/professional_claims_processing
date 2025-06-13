@@ -21,9 +21,16 @@ runtime. Execute it after processing to view the summary:
 python -m src.analysis.query_stats
 ```
 
+### Query Plans
+`src/analysis/query_plan.py` provides helpers to inspect execution plans using
+the database's `EXPLAIN` command. Call `explain()` with a `PostgresDatabase`
+instance and use `has_seq_scan()` to detect sequential scans that may indicate
+missing indexes.
+
 ## Performance Tuning
 - **Batch Size**: The `processing.batch_size` setting controls how many claims are processed at once. Increase this value cautiously to avoid exhausting database connections.
 - **Concurrency**: Run multiple worker processes to take advantage of multi-core servers. Monitor CPU usage to find the optimal number of workers.
+- **Insert Workers**: `processing.insert_workers` controls how many database connections are used for bulk inserts.
 - **Caching**: Enable Redis caching in `config.yaml` to reduce duplicate RVU lookups.
 - **Database Indexes**: Ensure indexes exist on frequently queried columns such as `claims.claim_id` and `failed_claims.failed_at`.
 - **Model Loading**: Place the ML model on local disk for faster startup and prediction latency.
