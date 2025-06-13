@@ -8,6 +8,8 @@ from ..security.compliance import mask_claim_data
 from ..db.postgres import PostgresDatabase
 from ..db.sql_server import SQLServerDatabase
 from ..models.filter_model import FilterModel
+from ..models.ab_test import ABTestModel
+from ..models.monitor import ModelMonitor
 from ..rules.durable_engine import DurableRulesEngine
 from ..validation.validator import ClaimValidator
 from ..utils.cache import DistributedCache, InMemoryCache, RvuCache
@@ -30,7 +32,8 @@ class ClaimsPipeline:
         self.pg = PostgresDatabase(cfg.postgres)
         self.sql = SQLServerDatabase(cfg.sqlserver)
         self.encryption_key = cfg.security.encryption_key
-        self.model: FilterModel | None = None
+        self.model: FilterModel | ABTestModel | None = None
+        self.model_monitor: ModelMonitor | None = None
         self.rules_engine: DurableRulesEngine | None = None
         self.validator: ClaimValidator | None = None
         self.cache = InMemoryCache()
@@ -50,7 +53,13 @@ class ClaimsPipeline:
         await self.sql.prepare(
             "INSERT INTO failed_claims (claim_id, facility_id, patient_account_number, failure_reason, processing_stage, failed_at, original_data, repair_suggestions) VALUES (?, ?, ?, ?, ?, GETDATE(), ?, ?)"
         )
-        self.model = FilterModel(self.cfg.model.path)
+        if self.cfg.model.ab_test_path:
+            model_a = FilterModel(self.cfg.model.path, self.cfg.model.version)
+            model_b = FilterModel(self.cfg.model.ab_test_path, self.cfg.model.version + "b")
+            self.model = ABTestModel(model_a, model_b, self.cfg.model.ab_test_ratio)
+        else:
+            self.model = FilterModel(self.cfg.model.path, self.cfg.model.version)
+        self.model_monitor = ModelMonitor(self.cfg.model.version)
         self.rules_engine = DurableRulesEngine([])
         self.validator = ClaimValidator(set(), set())
         if self.cfg.cache.redis_url:
@@ -177,6 +186,8 @@ class ClaimsPipeline:
                 )
                 return None
             prediction = self.model.predict(claim)
+            if self.model_monitor:
+                self.model_monitor.record_prediction(prediction)
             await self._checkpoint(claim.get("claim_id", ""), "predicted")
             claim["filter_number"] = prediction
             if self.rvu_cache:

@@ -36,6 +36,7 @@ startup.
 
 ## ML Model
 The processing pipeline loads a scikit-learn model using the path specified in the `model.path` setting of `config.yaml`. Train your own model or obtain the file from the maintainers and update the configuration with the correct location.
+Model version and optional A/B test paths can also be configured. Basic model performance metrics are tracked using the in-memory metrics registry.
 
 To generate a sample model for development, run:
 ```

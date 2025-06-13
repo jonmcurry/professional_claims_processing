@@ -76,6 +76,9 @@ class CacheConfig:
 @dataclass
 class ModelConfig:
     path: str = "model.joblib"
+    version: str = "1"
+    ab_test_path: Optional[str] = None
+    ab_test_ratio: float = 0.5
 
 
 @dataclass
