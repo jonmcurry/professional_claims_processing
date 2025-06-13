@@ -2,3 +2,4 @@ asyncpg
 pyodbc
 joblib
 PyYAML
+durable_rules
