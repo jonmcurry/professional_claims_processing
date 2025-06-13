@@ -42,17 +42,26 @@ class ClaimService:
                 results.append(claim)
         return results
 
-    async def insert_claims(self, rows: Iterable[Iterable[Any]]) -> None:
+    async def insert_claims(
+        self, rows: Iterable[Iterable[Any]], concurrency: int = 1
+    ) -> None:
         processed = []
         for acct, facility in rows:
             if self.encryption_key:
                 acct = encrypt_text(str(acct), self.encryption_key)
             processed.append((acct, facility))
         try:
-            await self.sql.execute_many(
-                "INSERT INTO claims (patient_account_number, facility_id) VALUES (?, ?)",
-                processed,
-            )
+            if "concurrency" in self.sql.execute_many.__code__.co_varnames:
+                await self.sql.execute_many(
+                    "INSERT INTO claims (patient_account_number, facility_id) VALUES (?, ?)",
+                    processed,
+                    concurrency=concurrency,
+                )
+            else:
+                await self.sql.execute_many(
+                    "INSERT INTO claims (patient_account_number, facility_id) VALUES (?, ?)",
+                    processed,
+                )
         except Exception:
             for acct, facility in processed:
                 await self.delete_claim(acct, facility)

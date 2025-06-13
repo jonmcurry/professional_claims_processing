@@ -59,6 +59,7 @@ class ProcessingConfig:
     batch_size: int = 1000
     max_workers: int = 4
     conversion_factor: float = 36.04
+    insert_workers: int = 2
 
 
 @dataclass
