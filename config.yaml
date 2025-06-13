@@ -32,3 +32,6 @@ logging:
   aggregator_host: null
   aggregator_port: null
   component_levels: {}
+features:
+  enable_cache: true
+  enable_model_monitor: true

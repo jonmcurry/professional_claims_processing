@@ -90,6 +90,14 @@ class LoggingConfig:
 
 
 @dataclass
+class FeatureFlags:
+    """Enable or disable optional features."""
+
+    enable_cache: bool = True
+    enable_model_monitor: bool = True
+
+
+@dataclass
 class AppConfig:
     postgres: PostgresConfig
     sqlserver: SQLServerConfig
@@ -98,6 +106,7 @@ class AppConfig:
     cache: CacheConfig
     model: ModelConfig
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    features: FeatureFlags = field(default_factory=FeatureFlags)
 
 
 def _resolve_path(default: str) -> str:
@@ -132,6 +141,13 @@ def load_config(path: str = "config.yaml") -> AppConfig:
     cache_cfg = CacheConfig(**data.get("cache", {}))
     model_cfg = ModelConfig(**data.get("model", {}))
     logging_cfg = LoggingConfig(**data.get("logging", {}))
+    feature_cfg = FeatureFlags(**data.get("features", {}))
+    env_cache = os.getenv("ENABLE_CACHE")
+    if env_cache is not None:
+        feature_cfg.enable_cache = env_cache.lower() == "true"
+    env_monitor = os.getenv("ENABLE_MODEL_MONITOR")
+    if env_monitor is not None:
+        feature_cfg.enable_model_monitor = env_monitor.lower() == "true"
     cfg = AppConfig(
         postgres=pg,
         sqlserver=sql,
@@ -140,6 +156,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
         cache=cache_cfg,
         model=model_cfg,
         logging=logging_cfg,
+        features=feature_cfg,
     )
     validate_config(cfg)
     return cfg

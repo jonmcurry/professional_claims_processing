@@ -11,7 +11,11 @@ This project builds a high-performance claims processing system with an integrat
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+pip install pre-commit
+pre-commit install
 ```
+
+Alternatively run `scripts/setup_dev.sh` to perform these steps automatically.
 
 ## Initial Database Setup
 ### PostgreSQL
@@ -33,6 +37,7 @@ Set the `APP_ENV` environment variable to load `config.<environment>.yaml` or
 The `cache` section can enable Redis for distributed RVU caching. Set `redis_url`
 to your server and list common `warm_rvu_codes` to pre-populate the cache during
 startup.
+The `features` section allows toggling optional functionality like caching and model monitoring.
 
 ## ML Model
 The processing pipeline loads a scikit-learn model using the path specified in the `model.path` setting of `config.yaml`. Train your own model or obtain the file from the maintainers and update the configuration with the correct location.
@@ -86,6 +91,7 @@ analytics instructions.
 
 ## Contributing
 Contributions are welcome! Please open an issue to discuss any changes. Ensure tests pass before submitting a pull request and follow PEP 8 style conventions.
+Pre-commit hooks are configured to run linting tools automatically. After cloning the repository run `pre-commit install` (or use `scripts/setup_dev.sh`).
 
 For detailed database schema information see [docs/SCHEMA.md](docs/SCHEMA.md).
 Details on how old claims are archived can be found in
