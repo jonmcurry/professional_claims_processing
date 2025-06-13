@@ -3,6 +3,8 @@ import json
 
 
 class Rule:
+    """Single rule definition."""
+
     def __init__(self, name: str, rule_type: str, rule_logic: str, severity: str):
         self.name = name
         self.rule_type = rule_type
@@ -10,11 +12,32 @@ class Rule:
         self.severity = severity
 
     def apply(self, claim: Dict[str, Any]) -> bool:
-        # Example simple rule: check claim field equality
+        """Return True if the claim satisfies the rule."""
         field = self.logic.get("field")
-        value = self.logic.get("equals")
-        if field:
-            return claim.get(field) == value
+        if not field:
+            return True
+        op = self.logic.get("operator", "equals")
+        value = self.logic.get("value")
+        values = self.logic.get("values")
+        actual = claim.get(field)
+
+        if op == "equals":
+            return actual == value
+        if op == "not_equals":
+            return actual != value
+        if op == "exists":
+            return field in claim
+        if op == "gt":
+            return actual is not None and value is not None and actual > value
+        if op == "lt":
+            return actual is not None and value is not None and actual < value
+        if op == "between":
+            if not values or len(values) != 2 or actual is None:
+                return False
+            start, end = values
+            return start <= actual <= end
+        if op == "in":
+            return actual in (values or [])
         return False
 
 

@@ -1,9 +1,8 @@
 import asyncio
-import json
 from typing import Dict, Any
 
 from ..config.config import AppConfig
-from ..security.compliance import encrypt_text, mask_claim_data
+from ..security.compliance import mask_claim_data
 from ..db.postgres import PostgresDatabase
 from ..db.sql_server import SQLServerDatabase
 from ..models.filter_model import FilterModel
@@ -14,6 +13,7 @@ from ..utils.logging import setup_logging, RequestContextFilter
 from ..utils.tracing import start_trace, start_span
 from ..utils.audit import record_audit_event
 from .repair import ClaimRepairSuggester
+from ..services.claim_service import ClaimService
 from ..web.status import processing_status
 
 
@@ -32,6 +32,7 @@ class ClaimsPipeline:
         self.rvu_cache: RvuCache | None = None
         self.distributed_cache: DistributedCache | None = None
         self.repair_suggester = ClaimRepairSuggester()
+        self.service = ClaimService(self.pg, self.sql, self.encryption_key)
 
     async def startup(self) -> None:
         await asyncio.gather(self.pg.connect(), self.sql.connect())
@@ -61,17 +62,12 @@ class ClaimsPipeline:
 
         processing_status["processed"] = 0
         processing_status["failed"] = 0
-        claims = await self.pg.fetch(
-            "SELECT * FROM claims LIMIT $1", self.cfg.processing.batch_size
-        )
+        claims = await self.service.fetch_claims(self.cfg.processing.batch_size)
         tasks = [self.process_claim(claim) for claim in claims]
         results = await asyncio.gather(*tasks)
         valid = [r for r in results if r]
         if valid:
-            await self.sql.execute_many(
-                "INSERT INTO claims (patient_account_number, facility_id) VALUES (?, ?)",
-                valid,
-            )
+            await self.service.insert_claims(valid)
             processing_status["processed"] += len(valid)
 
     async def process_claim(self, claim: Dict[str, Any]) -> tuple[str, str] | None:
@@ -82,7 +78,7 @@ class ClaimsPipeline:
             if validation_errors or rule_errors:
                 processing_status["failed"] += 1
                 suggestions = self.repair_suggester.suggest(validation_errors + rule_errors)
-                await self.record_failed_claim(claim, "validation", suggestions)
+                await self.service.record_failed_claim(claim, "validation", suggestions)
                 self.logger.error(
                     f"Claim {claim['claim_id']} failed validation",
                     extra={
@@ -117,29 +113,3 @@ class ClaimsPipeline:
             )
             return (claim["patient_account_number"], claim["facility_id"])
 
-    async def record_failed_claim(
-        self, claim: Dict[str, Any], reason: str, suggestions: str
-    ) -> None:
-        await self.sql.execute(
-            "INSERT INTO failed_claims (claim_id, facility_id, patient_account_number, failure_reason, processing_stage, failed_at, original_data, repair_suggestions)"
-            " VALUES (?, ?, ?, ?, ?, GETDATE(), ?, ?)",
-            claim.get("claim_id"),
-            claim.get("facility_id"),
-            claim.get("patient_account_number"),
-            reason,
-            "validation",
-            (
-                encrypt_text(json.dumps(claim), self.encryption_key)
-                if self.encryption_key
-                else json.dumps(claim)
-            ),
-            suggestions,
-        )
-        await record_audit_event(
-            self.sql,
-            "failed_claims",
-            claim.get("claim_id", ""),
-            "insert",
-            new_values=claim,
-            reason=reason,
-        )

@@ -1,11 +1,12 @@
 import asyncio
-from . import HTMLResponse
+from . import HTMLResponse, Request
 
 class Response:
-    def __init__(self, status_code=200, json=None, content=None):
+    def __init__(self, status_code=200, json=None, content=None, headers=None):
         self.status_code = status_code
         self._json = json
         self.text = content or ""
+        self.headers = headers or {}
 
     def json(self):
         return self._json
@@ -33,11 +34,25 @@ class TestClient:
         kwargs = {}
         if headers and "X-API-Key" in headers:
             kwargs["x_api_key"] = headers["X-API-Key"]
+        request = Request(headers)
         if asyncio.iscoroutinefunction(func):
             result = self.loop.run_until_complete(func(**kwargs))
         else:
             result = func(**kwargs)
         if isinstance(result, HTMLResponse):
-            return Response(content=str(result))
-        return Response(json=result)
+            response = Response(content=str(result), headers={})
+        elif isinstance(result, Response):
+            response = result
+        else:
+            response = Response(json=result, headers={})
+
+        async def call_next(_):
+            return response
+
+        for mw in reversed(self.app.middleware_handlers):
+            response = self.loop.run_until_complete(mw(request, call_next))
+            async def call_next(_):
+                return response
+
+        return response
 
