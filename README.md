@@ -139,3 +139,5 @@ updates without reprocessing the full record.
 - Deployment steps are covered in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 - Operational runbook tasks can be found in [docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md).
 - Common troubleshooting tips live in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+- The project includes a `Dockerfile` and Kubernetes manifest under `k8s/` for containerized deployments.
+- Continuous integration runs via GitHub Actions defined in `.github/workflows/ci.yml`.
