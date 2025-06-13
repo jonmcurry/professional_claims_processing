@@ -41,6 +41,8 @@ class PostgresConfig:
     user: str
     password: str
     database: str
+    replica_host: Optional[str] = None
+    replica_port: Optional[int] = None
 
 
 @dataclass

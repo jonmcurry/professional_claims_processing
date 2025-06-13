@@ -17,12 +17,14 @@ pip install -r requirements.txt
 ### PostgreSQL
 1. Create a database named `staging_process`.
 2. Apply the tables described in [docs/SCHEMA.md](docs/SCHEMA.md).
+ 3. Run the migrations with `alembic upgrade head` to apply updates.
 
 ### SQL Server
 1. Create a database named `smart_pro_claims`.
 2. Apply the tables described in [docs/SCHEMA.md](docs/SCHEMA.md).
 
 Update `config.yaml` with your connection details.
+If you have a read replica for PostgreSQL, set `replica_host` and `replica_port` in that file.
 
 Set the `APP_ENV` environment variable to load `config.<environment>.yaml` or
 `APP_CONFIG` to specify an explicit configuration file. When neither is set,
@@ -57,6 +59,8 @@ uvicorn src.web.app:app --reload
 
 The `/failed_claims` page lists recent failed claims and the `/status` endpoint
 returns processing counts so you can display a real-time indicator in the UI.
+Database and query metrics are exposed from the `/metrics` endpoint for
+operational monitoring.
 
 ## Tests
 Tests use `pytest`.
