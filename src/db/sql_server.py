@@ -13,11 +13,15 @@ class SQLServerDatabase(BaseDatabase):
         self.cfg = cfg
         self.pool: list[pyodbc.Connection] = []
         self._lock = asyncio.Lock()
+        self._prepared: dict[str, str] = {}
 
     async def connect(self, size: int = 5) -> None:
         try:
             for _ in range(size):
                 conn = self._create_connection()
+                # pre-warm by executing a simple statement
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1")
                 self.pool.append(conn)
         except Exception as e:
             raise DatabaseConnectionError(str(e)) from e
@@ -38,6 +42,15 @@ class SQLServerDatabase(BaseDatabase):
     async def _release(self, conn: pyodbc.Connection) -> None:
         async with self._lock:
             self.pool.append(conn)
+
+    async def prepare(self, query: str) -> None:
+        conn = await self._acquire()
+        try:
+            cursor = conn.cursor()
+            cursor.prepare(query)
+            self._prepared[query] = query
+        finally:
+            await self._release(conn)
 
     async def fetch(self, query: str, *params: Any) -> Iterable[dict]:
         conn = await self._acquire()
@@ -64,14 +77,20 @@ class SQLServerDatabase(BaseDatabase):
         conn = await self._acquire()
         try:
             cursor = conn.cursor()
-            cursor.execute(query, params)
+            if query in self._prepared:
+                cursor.execute(None, params)
+            else:
+                cursor.execute(query, params)
             conn.commit()
             return cursor.rowcount
         except pyodbc.Error:
             conn.close()
             conn = self._create_connection()
             cursor = conn.cursor()
-            cursor.execute(query, params)
+            if query in self._prepared:
+                cursor.execute(None, params)
+            else:
+                cursor.execute(query, params)
             conn.commit()
             return cursor.rowcount
         except Exception as e:
@@ -84,14 +103,22 @@ class SQLServerDatabase(BaseDatabase):
         params_list = list(params_seq)
         try:
             cursor = conn.cursor()
-            cursor.executemany(query, params_list)
+            cursor.fast_executemany = True
+            if query in self._prepared:
+                cursor.executemany(None, params_list)
+            else:
+                cursor.executemany(query, params_list)
             conn.commit()
             return cursor.rowcount
         except pyodbc.Error:
             conn.close()
             conn = self._create_connection()
             cursor = conn.cursor()
-            cursor.executemany(query, params_list)
+            cursor.fast_executemany = True
+            if query in self._prepared:
+                cursor.executemany(None, params_list)
+            else:
+                cursor.executemany(query, params_list)
             conn.commit()
             return cursor.rowcount
         except Exception as e:

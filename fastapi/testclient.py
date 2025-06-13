@@ -26,14 +26,17 @@ class TestClient:
     def __exit__(self, exc_type, exc, tb):
         return False
 
-    def get(self, path):
+    def get(self, path, headers=None):
         func = self.app.routes.get(("GET", path))
         if not func:
             return Response(status_code=404, content="Not Found")
+        kwargs = {}
+        if headers and "X-API-Key" in headers:
+            kwargs["x_api_key"] = headers["X-API-Key"]
         if asyncio.iscoroutinefunction(func):
-            result = self.loop.run_until_complete(func())
+            result = self.loop.run_until_complete(func(**kwargs))
         else:
-            result = func()
+            result = func(**kwargs)
         if isinstance(result, HTMLResponse):
             return Response(content=str(result))
         return Response(json=result)

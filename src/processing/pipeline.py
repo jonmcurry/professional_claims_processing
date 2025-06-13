@@ -37,6 +37,13 @@ class ClaimsPipeline:
             self.pg.fetch("SELECT 1"),
             self.sql.execute("SELECT 1")
         )
+        # Prepare frequently used statements
+        await self.sql.prepare(
+            "INSERT INTO claims (patient_account_number, facility_id) VALUES (?, ?)"
+        )
+        await self.sql.prepare(
+            "INSERT INTO failed_claims (claim_id, facility_id, patient_account_number, failure_reason, processing_stage, failed_at, original_data, repair_suggestions) VALUES (?, ?, ?, ?, ?, GETDATE(), ?, ?)"
+        )
         self.model = FilterModel("model.joblib")
         self.rules_engine = DurableRulesEngine([])
         self.validator = ClaimValidator(set(), set())
