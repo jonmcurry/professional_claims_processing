@@ -38,3 +38,15 @@ def mask_claim_data(claim: Dict[str, Any]) -> Dict[str, Any]:
     if "date_of_birth" in masked:
         masked["date_of_birth"] = "***"
     return masked
+
+
+def encrypt_claim_fields(claim: Dict[str, Any], key: str) -> Dict[str, Any]:
+    """Return a copy of claim with sensitive fields encrypted."""
+    if not key:
+        return claim
+    encrypted = claim.copy()
+    if "patient_account_number" in encrypted and encrypted["patient_account_number"]:
+        encrypted["patient_account_number"] = encrypt_text(str(encrypted["patient_account_number"]), key)
+    if "patient_name" in encrypted and encrypted["patient_name"]:
+        encrypted["patient_name"] = encrypt_text(str(encrypted["patient_name"]), key)
+    return encrypted

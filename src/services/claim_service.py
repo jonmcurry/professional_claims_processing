@@ -2,7 +2,7 @@ from typing import Any, Dict, Iterable, List
 
 from ..db.postgres import PostgresDatabase
 from ..db.sql_server import SQLServerDatabase
-from ..security.compliance import encrypt_text
+from ..security.compliance import encrypt_text, encrypt_claim_fields
 from ..utils.audit import record_audit_event
 
 
@@ -23,9 +23,14 @@ class ClaimService:
         return await self.pg.fetch(query, batch_size, offset)
 
     async def insert_claims(self, rows: Iterable[Iterable[Any]]) -> None:
+        processed = []
+        for acct, facility in rows:
+            if self.encryption_key:
+                acct = encrypt_text(str(acct), self.encryption_key)
+            processed.append((acct, facility))
         await self.sql.execute_many(
             "INSERT INTO claims (patient_account_number, facility_id) VALUES (?, ?)",
-            rows,
+            processed,
         )
 
     async def record_checkpoint(self, claim_id: str, stage: str) -> None:
@@ -39,12 +44,13 @@ class ClaimService:
     async def record_failed_claim(
         self, claim: Dict[str, Any], reason: str, suggestions: str
     ) -> None:
+        encrypted_claim = encrypt_claim_fields(claim, self.encryption_key)
         await self.sql.execute(
             "INSERT INTO failed_claims (claim_id, facility_id, patient_account_number, failure_reason, processing_stage, failed_at, original_data, repair_suggestions)"
             " VALUES (?, ?, ?, ?, ?, GETDATE(), ?, ?)",
-            claim.get("claim_id"),
-            claim.get("facility_id"),
-            claim.get("patient_account_number"),
+            encrypted_claim.get("claim_id"),
+            encrypted_claim.get("facility_id"),
+            encrypted_claim.get("patient_account_number"),
             reason,
             "validation",
             (
@@ -79,9 +85,10 @@ class ClaimService:
 
     async def enqueue_dead_letter(self, claim: Dict[str, Any], reason: str) -> None:
         """Store failed claims for future reprocessing."""
+        data = encrypt_text(str(claim), self.encryption_key) if self.encryption_key else str(claim)
         await self.pg.execute(
             "INSERT INTO dead_letter_queue (claim_id, reason, data) VALUES ($1, $2, $3)",
             claim.get("claim_id"),
             reason,
-            encrypt_text(str(claim), self.encryption_key) if self.encryption_key else str(claim),
+            data,
         )
