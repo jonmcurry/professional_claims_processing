@@ -7,3 +7,7 @@ class BaseDatabase:
 
     async def execute(self, query: str, *params: Any) -> int:
         raise NotImplementedError
+
+    async def execute_many(self, query: str, params_seq: Iterable[Iterable[Any]]) -> int:
+        """Execute a statement against many parameter sets."""
+        raise NotImplementedError

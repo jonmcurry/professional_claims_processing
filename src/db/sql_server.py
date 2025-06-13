@@ -46,3 +46,13 @@ class SQLServerDatabase(BaseDatabase):
         rowcount = cursor.rowcount
         await self._release(conn)
         return rowcount
+
+    async def execute_many(self, query: str, params_seq: Iterable[Iterable[Any]]) -> int:
+        conn = await self._acquire()
+        cursor = conn.cursor()
+        cursor.executemany(query, list(params_seq))
+        conn.commit()
+        rowcount = cursor.rowcount
+        await self._release(conn)
+        return rowcount
+

@@ -32,3 +32,11 @@ class PostgresDatabase(BaseDatabase):
         async with self.pool.acquire() as conn:
             result = await conn.execute(query, *params)
             return int(result.split(" ")[-1])
+
+    async def execute_many(self, query: str, params_seq: Iterable[Iterable[Any]]) -> int:
+        assert self.pool
+        params_list = list(params_seq)
+        async with self.pool.acquire() as conn:
+            await conn.executemany(query, params_list)
+        return len(params_list)
+
