@@ -1,9 +1,11 @@
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from fastapi.testclient import Response
 from ..config.config import load_config
 from ..db.sql_server import SQLServerDatabase
 from .status import processing_status
 from typing import Optional
+from .rate_limit import RateLimiter
 from ..utils.tracing import (
     start_trace,
     start_trace_from_traceparent,
@@ -17,6 +19,7 @@ def create_app(
     sql_db: Optional[SQLServerDatabase] = None,
     pg_db: Optional["PostgresDatabase"] = None,
     api_key: str | None = None,
+    rate_limit_per_sec: int = 100,
 ) -> FastAPI:
     app = FastAPI()
     cfg = load_config()
@@ -27,6 +30,7 @@ def create_app(
     else:
         pg = pg_db
     required_key = api_key or cfg.security.api_key
+    limiter = RateLimiter(rate_limit_per_sec)
 
     @app.middleware("http")
     async def trace_middleware(request: Request, call_next):
@@ -35,6 +39,8 @@ def create_app(
             trace_id = start_trace_from_traceparent(traceparent)
         else:
             trace_id = start_trace(request.headers.get("X-Request-ID"))
+        if not await limiter.allow():
+            return Response(status_code=429, content="Too Many Requests")
         response = await call_next(request)
         response.headers["X-Trace-ID"] = trace_id
         return response
@@ -47,6 +53,11 @@ def create_app(
     async def startup() -> None:
         await sql.connect()
         await pg.connect()
+
+    @app.on_event("shutdown")
+    async def shutdown() -> None:
+        await sql.close()
+        await pg.close()
 
     @app.get("/api/failed_claims")
     async def api_failed_claims(x_api_key: str = Header(...)):

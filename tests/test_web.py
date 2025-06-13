@@ -23,7 +23,7 @@ class DummyPG(DummyDB):
 
 @pytest.fixture
 def client():
-    app = create_app(sql_db=DummyDB(), pg_db=DummyPG(), api_key="test")
+    app = create_app(sql_db=DummyDB(), pg_db=DummyPG(), api_key="test", rate_limit_per_sec=1)
     with TestClient(app) as client:
         yield client
 
@@ -62,3 +62,10 @@ def test_metrics_endpoint(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["claims_processed"] == 3
+
+
+def test_rate_limit(client):
+    resp1 = client.get("/liveness")
+    assert resp1.status_code == 200
+    resp2 = client.get("/liveness")
+    assert resp2.status_code == 429
