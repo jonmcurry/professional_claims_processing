@@ -3,6 +3,7 @@ from typing import Iterable, Any
 import time
 
 from ..utils.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
+from ..utils.cache import InMemoryCache
 from ..utils.errors import DatabaseConnectionError, QueryError, CircuitBreakerOpenError
 
 from .base import BaseDatabase
@@ -16,6 +17,8 @@ class PostgresDatabase(BaseDatabase):
         self.pool: asyncpg.pool.Pool | None = None
         self.replica_pool: asyncpg.pool.Pool | None = None
         self.circuit_breaker = CircuitBreaker()
+        # Simple in-memory cache for query results
+        self.query_cache = InMemoryCache(ttl=60)
 
     async def connect(self) -> None:
         if not await self.circuit_breaker.allow():
@@ -54,6 +57,10 @@ class PostgresDatabase(BaseDatabase):
     async def fetch(self, query: str, *params: Any) -> Iterable[dict]:
         if not await self.circuit_breaker.allow():
             raise CircuitBreakerOpenError("Postgres circuit open")
+        cache_key = query + str(params)
+        cached = self.query_cache.get(cache_key)
+        if cached is not None:
+            return cached
         await self._ensure_pool()
         assert self.pool
         try:
@@ -65,7 +72,9 @@ class PostgresDatabase(BaseDatabase):
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("postgres_query_ms", duration)
             await self.circuit_breaker.record_success()
-            return [dict(row) for row in rows]
+            result = [dict(row) for row in rows]
+            self.query_cache.set(cache_key, result)
+            return result
         except asyncpg.PostgresError:
             await self.circuit_breaker.record_failure()
             await self.connect()
@@ -74,7 +83,9 @@ class PostgresDatabase(BaseDatabase):
             async with pool.acquire() as conn:
                 rows = await conn.fetch(query, *params)
             await self.circuit_breaker.record_success()
-            return [dict(row) for row in rows]
+            result = [dict(row) for row in rows]
+            self.query_cache.set(cache_key, result)
+            return result
         except Exception as e:
             await self.circuit_breaker.record_failure()
             raise QueryError(str(e)) from e

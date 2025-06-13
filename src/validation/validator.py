@@ -1,4 +1,5 @@
 from typing import Dict, Any, List
+from concurrent.futures import ThreadPoolExecutor
 
 from .validators import (
     validate_facility,
@@ -14,9 +15,17 @@ class ClaimValidator:
         self.valid_financial_classes = valid_financial_classes
 
     def validate(self, claim: Dict[str, Any]) -> List[str]:
+        """Validate a claim using multiple rules in parallel."""
         errors: List[str] = []
-        errors += validate_facility(claim, self.valid_facilities)
-        errors += validate_financial_class(claim, self.valid_financial_classes)
-        errors += validate_dob(claim)
-        errors += validate_service_dates(claim)
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [
+                executor.submit(validate_facility, claim, self.valid_facilities),
+                executor.submit(
+                    validate_financial_class, claim, self.valid_financial_classes
+                ),
+                executor.submit(validate_dob, claim),
+                executor.submit(validate_service_dates, claim),
+            ]
+            for f in futures:
+                errors += f.result()
         return errors
