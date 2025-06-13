@@ -32,3 +32,14 @@ This document outlines the basic steps to deploy the claims processing service i
    ```
 
 For containerized deployments you can base your Docker image on the official Python image and copy the application code into it. Make sure the working directory contains the model file and configuration prior to starting the service.
+
+## Docker and Kubernetes
+A reference `Dockerfile` is provided at the project root. Build the image with:
+```bash
+docker build -t claims-processing:latest .
+```
+Run it locally using:
+```bash
+docker run -p 8000:8000 claims-processing:latest
+```
+For Kubernetes deployments see `docs/DOCKER_K8S.md` and apply the manifest in `k8s/deployment.yaml`.
