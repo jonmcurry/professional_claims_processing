@@ -3,6 +3,8 @@
 ## Overview
 This project builds a high-performance claims processing system with an integrated machine learning (ML) model for filter prediction. It fetches claims from a PostgreSQL staging database, validates them, applies rules and ML-based filtering and then inserts the results into a SQL Server production database. Caching, asynchronous processing and connection pooling are used to maximize throughput.
 
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a high-level system diagram.
+
 ## Requirements
 - Python 3.10 or newer
 - Recommended: create a virtual environment
@@ -66,7 +68,9 @@ uvicorn src.web.app:app --reload
 The `/failed_claims` page lists recent failed claims and the `/status` endpoint
 returns processing counts so you can display a real-time indicator in the UI.
 Database and query metrics are exposed from the `/metrics` endpoint for
-operational monitoring.
+operational monitoring. Full API documentation is available at
+`/docs` when the server is running. The raw OpenAPI specification can be
+downloaded from `/openapi.json`.
 
 ## Tests
 Tests use `pytest`.
@@ -132,3 +136,6 @@ updates without reprocessing the full record.
 - Monitoring setup is documented in [docs/MONITORING.md](docs/MONITORING.md).
 - Example alert rules are provided in [docs/ALERTING.md](docs/ALERTING.md).
 - Backup and restore instructions live in [docs/BACKUP_RESTORE.md](docs/BACKUP_RESTORE.md) with a helper script under `src/maintenance/backup_restore.py`.
+- Deployment steps are covered in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+- Operational runbook tasks can be found in [docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md).
+- Common troubleshooting tips live in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).

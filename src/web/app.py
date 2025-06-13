@@ -1,20 +1,21 @@
+import json
+from typing import Any, Optional
+
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.testclient import Response
+
 from ..config.config import load_config
 from ..db.sql_server import SQLServerDatabase
-from .status import processing_status, batch_status
-from typing import Optional, Any
-from .rate_limit import RateLimiter
-from ..utils.tracing import (
-    start_trace,
-    start_trace_from_traceparent,
-)
 from ..monitoring.metrics import metrics
-import json
+from ..utils.tracing import start_trace, start_trace_from_traceparent
+from .rate_limit import RateLimiter
+from .status import batch_status, processing_status
+
 try:
     from starlette.middleware.base import BaseHTTPMiddleware
 except Exception:  # pragma: no cover - allow running without starlette
+
     class BaseHTTPMiddleware:
         def __init__(self, app=None, dispatch=None, **_: Any):
             self.app = app
@@ -23,9 +24,13 @@ except Exception:  # pragma: no cover - allow running without starlette
 
         async def __call__(self, scope, receive, send):
             await self.dispatch(scope, receive, send)
-from fastapi.responses import JSONResponse
+
+
 import logging
 import re
+
+from fastapi.responses import JSONResponse
+
 from ..monitoring.profiling import start_profiling, stop_profiling
 
 
@@ -35,6 +40,25 @@ def create_app(
     api_key: str | None = None,
     rate_limit_per_sec: int = 100,
 ) -> FastAPI:
+    """Create and configure the FastAPI application used for monitoring.
+
+    Parameters
+    ----------
+    sql_db : Optional[SQLServerDatabase]
+        Pre-configured SQL Server connection. If ``None`` a new connection is
+        created using settings from ``config.yaml``.
+    pg_db : Optional["PostgresDatabase"]
+        Optional PostgreSQL connection for health checks.
+    api_key : str | None
+        API key required for all requests when provided.
+    rate_limit_per_sec : int
+        Requests per second allowed from a single client.
+
+    Returns
+    -------
+    FastAPI
+        Configured application instance ready to run.
+    """
     app = FastAPI()
     cfg = load_config()
     sql = sql_db or SQLServerDatabase(cfg.sqlserver)
@@ -123,7 +147,9 @@ def create_app(
 
     @app.get("/api/failed_claims")
     async def api_failed_claims(
-        request: Request, x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+        request: Request,
+        x_api_key: str = Header(...),
+        x_user_role: str | None = Header(None),
     ):
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
@@ -135,7 +161,9 @@ def create_app(
 
     @app.get("/failed_claims", response_class=HTMLResponse)
     async def failed_claims_page(
-        request: Request, x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+        request: Request,
+        x_api_key: str = Header(...),
+        x_user_role: str | None = Header(None),
     ):
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
@@ -163,7 +191,9 @@ def create_app(
 
     @app.get("/status")
     async def status(
-        request: Request, x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+        request: Request,
+        x_api_key: str = Header(...),
+        x_user_role: str | None = Header(None),
     ):
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
@@ -172,7 +202,9 @@ def create_app(
 
     @app.get("/batch_status")
     async def get_batch_status(
-        request: Request, x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+        request: Request,
+        x_api_key: str = Header(...),
+        x_user_role: str | None = Header(None),
     ):
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
@@ -181,7 +213,9 @@ def create_app(
 
     @app.get("/health")
     async def health(
-        request: Request, x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+        request: Request,
+        x_api_key: str = Header(...),
+        x_user_role: str | None = Header(None),
     ):
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
@@ -191,7 +225,9 @@ def create_app(
 
     @app.get("/readiness")
     async def readiness(
-        request: Request, x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+        request: Request,
+        x_api_key: str = Header(...),
+        x_user_role: str | None = Header(None),
     ):
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
@@ -206,7 +242,9 @@ def create_app(
 
     @app.get("/metrics")
     async def get_metrics(
-        request: Request, x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+        request: Request,
+        x_api_key: str = Header(...),
+        x_user_role: str | None = Header(None),
     ):
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
@@ -215,7 +253,9 @@ def create_app(
 
     @app.get("/profiling/start")
     async def profiling_start(
-        request: Request, x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+        request: Request,
+        x_api_key: str = Header(...),
+        x_user_role: str | None = Header(None),
     ):
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
@@ -225,7 +265,9 @@ def create_app(
 
     @app.get("/profiling/stop")
     async def profiling_stop(
-        request: Request, x_api_key: str = Header(...), x_user_role: str | None = Header(None)
+        request: Request,
+        x_api_key: str = Header(...),
+        x_user_role: str | None = Header(None),
     ):
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
