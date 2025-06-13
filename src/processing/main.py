@@ -7,7 +7,7 @@ def main() -> None:
     cfg = load_config()
     pipeline = ClaimsPipeline(cfg)
     asyncio.run(pipeline.startup())
-    asyncio.run(pipeline.process_batch())
+    asyncio.run(pipeline.process_stream())
 
 
 if __name__ == "__main__":
