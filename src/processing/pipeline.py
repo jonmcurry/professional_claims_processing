@@ -1,5 +1,6 @@
 import asyncio
 import time
+import os
 from typing import Dict, Any
 
 from ..config.config import AppConfig
@@ -10,6 +11,7 @@ from ..models.filter_model import FilterModel
 from ..rules.durable_engine import DurableRulesEngine
 from ..validation.validator import ClaimValidator
 from ..utils.cache import DistributedCache, InMemoryCache, RvuCache
+from ..utils.retries import retry_async
 from ..utils.logging import setup_logging, RequestContextFilter
 from ..utils.tracing import start_trace, start_span
 from ..utils.audit import record_audit_event
@@ -56,6 +58,26 @@ class ClaimsPipeline:
         if self.cfg.cache.warm_rvu_codes:
             await self.rvu_cache.warm_cache(self.cfg.cache.warm_rvu_codes)
 
+    def calculate_batch_size(self) -> int:
+        """Adjust batch size based on system load."""
+        base = self.cfg.processing.batch_size
+        try:
+            load = os.getloadavg()[0]
+        except Exception:
+            load = 0
+        if load > 4:
+            return max(1, base // 2)
+        if load < 1:
+            return base * 2
+        return base
+
+    async def _checkpoint(self, claim_id: str, stage: str) -> None:
+        """Record a processing checkpoint."""
+        try:
+            await self.service.record_checkpoint(claim_id, stage)
+        except Exception:
+            self.logger.debug("checkpoint failed", extra={"claim_id": claim_id, "stage": stage})
+
     async def process_batch(self) -> None:
         if not self.request_filter:
             self.request_filter = RequestContextFilter()
@@ -67,7 +89,8 @@ class ClaimsPipeline:
         processing_status["failed"] = 0
         metrics.set("claims_processed", 0)
         metrics.set("claims_failed", 0)
-        claims = await self.service.fetch_claims(self.cfg.processing.batch_size)
+        batch_size = self.calculate_batch_size()
+        claims = await self.service.fetch_claims(batch_size, priority=True)
         tasks = [self.process_claim(claim) for claim in claims]
         results = await asyncio.gather(*tasks)
         valid = [r for r in results if r]
@@ -87,16 +110,29 @@ class ClaimsPipeline:
             },
         )
 
+    async def process_stream(self) -> None:
+        """Continuously process claims from the source stream."""
+        if not self.request_filter:
+            self.request_filter = RequestContextFilter()
+            self.logger.addFilter(self.request_filter)
+        start_trace()
+        async for claim in self.service.stream_claims(self.calculate_batch_size(), priority=True):
+            await self.process_claim(claim)
+
+    @retry_async()
     async def process_claim(self, claim: Dict[str, Any]) -> tuple[str, str] | None:
         assert self.rules_engine and self.validator and self.model
         with start_span():
+            await self._checkpoint(claim.get("claim_id", ""), "start")
             validation_errors = self.validator.validate(claim)
             rule_errors = self.rules_engine.evaluate(claim)
+            await self._checkpoint(claim.get("claim_id", ""), "validated")
             if validation_errors or rule_errors:
                 processing_status["failed"] += 1
                 metrics.inc("claims_failed")
                 suggestions = self.repair_suggester.suggest(validation_errors + rule_errors)
                 await self.service.record_failed_claim(claim, "validation", suggestions)
+                await self._checkpoint(claim.get("claim_id", ""), "failed")
                 self.logger.error(
                     f"Claim {claim['claim_id']} failed validation",
                     extra={
@@ -108,6 +144,7 @@ class ClaimsPipeline:
                 )
                 return None
             prediction = self.model.predict(claim)
+            await self._checkpoint(claim.get("claim_id", ""), "predicted")
             claim["filter_number"] = prediction
             if self.rvu_cache:
                 rvu = await self.rvu_cache.get(claim.get("procedure_code", ""))
@@ -129,5 +166,6 @@ class ClaimsPipeline:
                 "insert",
                 new_values=claim,
             )
+            await self._checkpoint(claim.get("claim_id", ""), "completed")
             return (claim["patient_account_number"], claim["facility_id"])
 
