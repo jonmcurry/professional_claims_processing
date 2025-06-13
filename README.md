@@ -109,3 +109,9 @@ priority queue for high‑value claims. Batch progress information is exposed fr
 the `/batch_status` endpoint, and `process_partial_claim` allows partial claim
 updates without reprocessing the full record.
 
+
+## Operations
+- See `migrations/README.md` for managing database migrations. Test migrations in a staging environment before production.
+- Monitoring setup is documented in [docs/MONITORING.md](docs/MONITORING.md).
+- Example alert rules are provided in [docs/ALERTING.md](docs/ALERTING.md).
+- Backup and restore instructions live in [docs/BACKUP_RESTORE.md](docs/BACKUP_RESTORE.md) with a helper script under `src/maintenance/backup_restore.py`.

@@ -19,3 +19,5 @@ alembic upgrade head
 ```
 
 The configuration is provided in `alembic.ini` and migrations live under `migrations/versions`.
+
+Always test migrations in a staging environment before deploying to production. Use the `src/db/migrate.py` script to apply migrations from CI pipelines.
