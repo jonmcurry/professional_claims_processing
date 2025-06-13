@@ -84,6 +84,8 @@ python benchmarks/benchmark_pipeline.py
 Contributions are welcome! Please open an issue to discuss any changes. Ensure tests pass before submitting a pull request and follow PEP 8 style conventions.
 
 For detailed database schema information see [docs/SCHEMA.md](docs/SCHEMA.md).
+Details on how old claims are archived can be found in
+[docs/DATA_MANAGEMENT.md](docs/DATA_MANAGEMENT.md).
 
 ## Security and Compliance
 This project includes basic security features to protect sensitive claim data.
