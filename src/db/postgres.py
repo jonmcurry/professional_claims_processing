@@ -33,8 +33,8 @@ class PostgresDatabase(BaseDatabase):
                 user=self.cfg.user,
                 password=self.cfg.password,
                 database=self.cfg.database,
-                min_size=5,
-                max_size=20,
+                min_size=self.cfg.min_pool_size,
+                max_size=self.cfg.max_pool_size,
             )
             if self.cfg.replica_host:
                 self.replica_pool = await asyncpg.create_pool(
@@ -43,8 +43,8 @@ class PostgresDatabase(BaseDatabase):
                     user=self.cfg.user,
                     password=self.cfg.password,
                     database=self.cfg.database,
-                    min_size=5,
-                    max_size=20,
+                    min_size=self.cfg.min_pool_size,
+                    max_size=self.cfg.max_pool_size,
                 )
         except Exception as e:
             await self.circuit_breaker.record_failure()
@@ -120,13 +120,32 @@ class PostgresDatabase(BaseDatabase):
             raise QueryError(str(e)) from e
 
     async def execute_many(
-        self, query: str, params_seq: Iterable[Iterable[Any]]
+        self,
+        query: str,
+        params_seq: Iterable[Iterable[Any]],
+        *,
+        concurrency: int = 1,
     ) -> int:
         if not await self.circuit_breaker.allow():
             raise CircuitBreakerOpenError("Postgres circuit open")
         await self._ensure_pool()
         assert self.pool
         params_list = list(params_seq)
+        if concurrency > 1 and len(params_list) > 0:
+            chunk_size = len(params_list) // concurrency + 1
+            chunks = [
+                params_list[i : i + chunk_size]
+                for i in range(0, len(params_list), chunk_size)
+            ]
+
+            async def run_chunk(chunk: list[Iterable[Any]]) -> int:
+                async with self.pool.acquire() as conn:
+                    await conn.executemany(query, chunk)
+                return len(chunk)
+
+            results = await asyncio.gather(*[run_chunk(c) for c in chunks])
+            return sum(results)
+
         try:
             start = time.perf_counter()
             async with self.pool.acquire() as conn:
