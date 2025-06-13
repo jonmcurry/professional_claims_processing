@@ -1,11 +1,20 @@
 import logging
 import json
 import logging.handlers
+import time
 from typing import Optional, Dict
+
+try:  # pragma: no cover - optional dependency
+    from sentry_sdk import init as sentry_init
+    from sentry_sdk.integrations.logging import LoggingIntegration
+except Exception:  # pragma: no cover - optional dependency
+    sentry_init = None
+    LoggingIntegration = None
 
 from .tracing import trace_id_var, span_id_var
 from ..security.compliance import mask_claim_data
 from ..config.config import LoggingConfig
+from ..monitoring.metrics import metrics
 
 
 class JsonFormatter(logging.Formatter):
@@ -36,32 +45,60 @@ class SensitiveDataFilter(logging.Filter):
         return True
 
 
+class MetricsHandler(logging.Handler):
+    """Wrapper handler that records logging overhead."""
+
+    def __init__(self, handler: logging.Handler) -> None:
+        super().__init__(handler.level)
+        self.handler = handler
+        self.setFormatter(handler.formatter)
+
+    def emit(self, record: logging.LogRecord) -> None:  # pragma: no cover - timing only
+        start = time.perf_counter()
+        self.handler.emit(record)
+        metrics.inc("logging_overhead_ms", (time.perf_counter() - start) * 1000)
+
+
 def setup_logging(cfg: Optional[LoggingConfig] = None) -> logging.Logger:
     logger = logging.getLogger("claims_processor")
     if logger.handlers:
         return logger
+
+    if cfg and cfg.sentry_dsn and sentry_init and LoggingIntegration:
+        sentry_logging = LoggingIntegration(
+            level=logging.INFO, event_level=logging.ERROR
+        )
+        sentry_init(dsn=cfg.sentry_dsn, integrations=[sentry_logging])
 
     stream_handler = logging.StreamHandler()
     fmt = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(request_id)s %(span_id)s %(message)s"
     )
     stream_handler.setFormatter(fmt)
-    logger.addHandler(stream_handler)
+    logger.addHandler(MetricsHandler(stream_handler))
 
-    file_handler = logging.FileHandler("audit.log")
+    file_handler = logging.handlers.RotatingFileHandler(
+        "audit.log",
+        maxBytes=(cfg.rotate_mb * 1024 * 1024 if cfg else 10 * 1024 * 1024),
+        backupCount=(cfg.backup_count if cfg else 5),
+    )
     file_handler.setFormatter(fmt)
-    logger.addHandler(file_handler)
+    logger.addHandler(MetricsHandler(file_handler))
 
-    analytics_handler = logging.FileHandler("analytics.log")
+    analytics_handler = logging.handlers.RotatingFileHandler(
+        "analytics.log",
+        maxBytes=(cfg.rotate_mb * 1024 * 1024 if cfg else 10 * 1024 * 1024),
+        backupCount=(cfg.backup_count if cfg else 5),
+    )
     analytics_handler.setFormatter(JsonFormatter())
-    logger.addHandler(analytics_handler)
+    logger.addHandler(MetricsHandler(analytics_handler))
 
     if cfg and cfg.aggregator_host and cfg.aggregator_port:
         socket_handler = logging.handlers.SocketHandler(
             cfg.aggregator_host, cfg.aggregator_port
         )
         socket_handler.setFormatter(JsonFormatter())
-        logger.addHandler(socket_handler)
+        logger.addHandler(MetricsHandler(socket_handler))
 
     logger.setLevel(getattr(logging, (cfg.level if cfg else "INFO")))
     if cfg and cfg.component_levels:
