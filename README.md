@@ -27,6 +27,12 @@ Update `config.yaml` with your connection details.
 ## ML Model
 The processing pipeline loads a scikit-learn model from `model.joblib` located in the project root. Train your own model or obtain the file from the maintainers and place it in this location before running the pipeline.
 
+To generate a sample model for development, run:
+```
+python src/models/train_model.py
+```
+This creates `model.joblib` in the project root.
+
 ## Usage
 After installing dependencies and setting up the databases and model, run:
 
