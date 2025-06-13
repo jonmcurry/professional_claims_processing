@@ -91,6 +91,7 @@ class SQLServerDatabase(BaseDatabase):
             rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("sqlserver_query_ms", duration)
+            metrics.inc("sqlserver_query_count")
             await self.circuit_breaker.record_success()
             return rows
         except pyodbc.Error:
@@ -122,6 +123,7 @@ class SQLServerDatabase(BaseDatabase):
             conn.commit()
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("sqlserver_query_ms", duration)
+            metrics.inc("sqlserver_query_count")
             await self.circuit_breaker.record_success()
             return cursor.rowcount
         except pyodbc.Error:
@@ -159,6 +161,7 @@ class SQLServerDatabase(BaseDatabase):
             conn.commit()
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("sqlserver_query_ms", duration)
+            metrics.inc("sqlserver_query_count")
             await self.circuit_breaker.record_success()
             return cursor.rowcount
         except pyodbc.Error:
