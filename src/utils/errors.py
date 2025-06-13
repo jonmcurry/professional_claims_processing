@@ -7,3 +7,7 @@ class DatabaseConnectionError(DatabaseError):
 class QueryError(DatabaseError):
     """Raised when a query execution fails."""
 
+
+class CircuitBreakerOpenError(DatabaseError):
+    """Raised when the circuit breaker is open and operations are blocked."""
+

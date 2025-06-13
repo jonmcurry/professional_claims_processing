@@ -1,9 +1,9 @@
 import asyncpg
 from typing import Iterable, Any
-
 import time
 
-from ..utils.errors import DatabaseConnectionError, QueryError
+from ..utils.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
+from ..utils.errors import DatabaseConnectionError, QueryError, CircuitBreakerOpenError
 
 from .base import BaseDatabase
 from ..config.config import PostgresConfig
@@ -15,8 +15,11 @@ class PostgresDatabase(BaseDatabase):
         self.cfg = cfg
         self.pool: asyncpg.pool.Pool | None = None
         self.replica_pool: asyncpg.pool.Pool | None = None
+        self.circuit_breaker = CircuitBreaker()
 
     async def connect(self) -> None:
+        if not await self.circuit_breaker.allow():
+            raise CircuitBreakerOpenError("Postgres circuit open")
         try:
             self.pool = await asyncpg.create_pool(
                 host=self.cfg.host,
@@ -38,7 +41,9 @@ class PostgresDatabase(BaseDatabase):
                     max_size=20,
                 )
         except Exception as e:
+            await self.circuit_breaker.record_failure()
             raise DatabaseConnectionError(str(e)) from e
+        await self.circuit_breaker.record_success()
 
     async def _ensure_pool(self) -> None:
         if not self.pool:
@@ -47,6 +52,8 @@ class PostgresDatabase(BaseDatabase):
             await self.connect()
 
     async def fetch(self, query: str, *params: Any) -> Iterable[dict]:
+        if not await self.circuit_breaker.allow():
+            raise CircuitBreakerOpenError("Postgres circuit open")
         await self._ensure_pool()
         assert self.pool
         try:
@@ -57,18 +64,24 @@ class PostgresDatabase(BaseDatabase):
                 rows = await conn.fetch(query, *params)
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("postgres_query_ms", duration)
+            await self.circuit_breaker.record_success()
             return [dict(row) for row in rows]
         except asyncpg.PostgresError:
+            await self.circuit_breaker.record_failure()
             await self.connect()
             pool = self.replica_pool or self.pool
             assert pool
             async with pool.acquire() as conn:
                 rows = await conn.fetch(query, *params)
+            await self.circuit_breaker.record_success()
             return [dict(row) for row in rows]
         except Exception as e:
+            await self.circuit_breaker.record_failure()
             raise QueryError(str(e)) from e
 
     async def execute(self, query: str, *params: Any) -> int:
+        if not await self.circuit_breaker.allow():
+            raise CircuitBreakerOpenError("Postgres circuit open")
         await self._ensure_pool()
         assert self.pool
         try:
@@ -77,18 +90,24 @@ class PostgresDatabase(BaseDatabase):
                 result = await conn.execute(query, *params)
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("postgres_query_ms", duration)
+            await self.circuit_breaker.record_success()
             return int(result.split(" ")[-1])
         except asyncpg.PostgresError:
+            await self.circuit_breaker.record_failure()
             await self.connect()
             async with self.pool.acquire() as conn:
                 result = await conn.execute(query, *params)
+            await self.circuit_breaker.record_success()
             return int(result.split(" ")[-1])
         except Exception as e:
+            await self.circuit_breaker.record_failure()
             raise QueryError(str(e)) from e
 
     async def execute_many(
         self, query: str, params_seq: Iterable[Iterable[Any]]
     ) -> int:
+        if not await self.circuit_breaker.allow():
+            raise CircuitBreakerOpenError("Postgres circuit open")
         await self._ensure_pool()
         assert self.pool
         params_list = list(params_seq)
@@ -98,19 +117,27 @@ class PostgresDatabase(BaseDatabase):
                 await conn.executemany(query, params_list)
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("postgres_query_ms", duration)
+            await self.circuit_breaker.record_success()
         except asyncpg.PostgresError:
+            await self.circuit_breaker.record_failure()
             await self.connect()
             async with self.pool.acquire() as conn:
                 await conn.executemany(query, params_list)
+            await self.circuit_breaker.record_success()
         except Exception as e:
+            await self.circuit_breaker.record_failure()
             raise QueryError(str(e)) from e
         return len(params_list)
 
     async def health_check(self) -> bool:
+        if not await self.circuit_breaker.allow():
+            return False
         try:
             await self.fetch("SELECT 1")
+            await self.circuit_breaker.record_success()
             return True
         except DatabaseError:
+            await self.circuit_breaker.record_failure()
             return False
 
     def report_pool_status(self) -> None:
@@ -123,3 +150,9 @@ class PostgresDatabase(BaseDatabase):
             metrics.set("postgres_pool_max", float(max_size))
         except Exception:
             pass
+
+    async def close(self) -> None:
+        if self.pool:
+            await self.pool.close()
+        if self.replica_pool:
+            await self.replica_pool.close()

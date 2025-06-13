@@ -11,3 +11,7 @@ class BaseDatabase:
     async def execute_many(self, query: str, params_seq: Iterable[Iterable[Any]]) -> int:
         """Execute a statement against many parameter sets."""
         raise NotImplementedError
+
+    async def close(self) -> None:
+        """Close any underlying connection pools."""
+        raise NotImplementedError
