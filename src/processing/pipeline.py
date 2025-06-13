@@ -3,6 +3,7 @@ import json
 from typing import List, Dict, Any
 
 from ..config.config import AppConfig
+from ..security.compliance import encrypt_text
 from ..db.postgres import PostgresDatabase
 from ..db.sql_server import SQLServerDatabase
 from ..models.filter_model import FilterModel
@@ -21,6 +22,7 @@ class ClaimsPipeline:
         self.logger = setup_logging()
         self.pg = PostgresDatabase(cfg.postgres)
         self.sql = SQLServerDatabase(cfg.sqlserver)
+        self.encryption_key = cfg.security.encryption_key
         self.model: FilterModel | None = None
         self.rules_engine: DurableRulesEngine | None = None
         self.validator: ClaimValidator | None = None
@@ -93,7 +95,7 @@ class ClaimsPipeline:
             claim.get("patient_account_number"),
             reason,
             "validation",
-            json.dumps(claim),
+            encrypt_text(json.dumps(claim), self.encryption_key) if self.encryption_key else json.dumps(claim),
             suggestions,
         )
 

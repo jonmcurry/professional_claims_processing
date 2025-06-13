@@ -58,10 +58,17 @@ class ProcessingConfig:
 
 
 @dataclass
+class SecurityConfig:
+    api_key: str = ""
+    encryption_key: str = ""
+
+
+@dataclass
 class AppConfig:
     postgres: PostgresConfig
     sqlserver: SQLServerConfig
     processing: ProcessingConfig
+    security: SecurityConfig
 
 
 def load_config(path: str = "config.yaml") -> AppConfig:
@@ -69,5 +76,6 @@ def load_config(path: str = "config.yaml") -> AppConfig:
     pg = PostgresConfig(**data.get("postgresql", {}))
     sql = SQLServerConfig(**data.get("sqlserver", {}))
     proc = ProcessingConfig(**data.get("processing", {}))
-    return AppConfig(postgres=pg, sqlserver=sql, processing=proc)
+    sec = SecurityConfig(**data.get("security", {}))
+    return AppConfig(postgres=pg, sqlserver=sql, processing=proc, security=sec)
 
