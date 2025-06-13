@@ -4,14 +4,16 @@ from fastapi.testclient import Response
 from ..config.config import load_config
 from ..db.sql_server import SQLServerDatabase
 from .status import processing_status
-from typing import Optional
+from typing import Optional, Any
 from .rate_limit import RateLimiter
 from ..utils.tracing import (
     start_trace,
     start_trace_from_traceparent,
-    trace_id_var,
 )
 from ..monitoring.metrics import metrics
+import json
+from starlette.middleware.base import BaseHTTPMiddleware
+import re
 from ..monitoring.profiling import start_profiling, stop_profiling
 
 
@@ -32,6 +34,11 @@ def create_app(
     required_key = api_key or cfg.security.api_key
     limiter = RateLimiter(rate_limit_per_sec)
 
+    def _check_role(required: str, role: str | None) -> None:
+        current = role or "user"
+        if required and current != required:
+            raise HTTPException(status_code=403, detail="Forbidden")
+
     @app.middleware("http")
     async def trace_middleware(request: Request, call_next):
         traceparent = request.headers.get("traceparent")
@@ -43,6 +50,34 @@ def create_app(
             return Response(status_code=429, content="Too Many Requests")
         response = await call_next(request)
         response.headers["X-Trace-ID"] = trace_id
+        return response
+
+    class SanitizeMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            if request.headers.get("content-type", "").startswith("application/json"):
+                body = await request.json()
+                def _sanitize(value: Any) -> Any:
+                    if isinstance(value, str):
+                        return re.sub(r"[<>]", "", value)
+                    if isinstance(value, dict):
+                        return {k: _sanitize(v) for k, v in value.items()}
+                    if isinstance(value, list):
+                        return [_sanitize(v) for v in value]
+                    return value
+                sanitized = _sanitize(body)
+                request._body = bytes(json.dumps(sanitized), "utf-8")  # type: ignore[attr-defined]
+            response = await call_next(request)
+            return response
+
+    app.add_middleware(SanitizeMiddleware)
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("Content-Security-Policy", "default-src 'self'")
         return response
 
     def _check_key(x_api_key: str) -> None:
@@ -60,16 +95,18 @@ def create_app(
         await pg.close()
 
     @app.get("/api/failed_claims")
-    async def api_failed_claims(x_api_key: str = Header(...)):
+    async def api_failed_claims(x_api_key: str = Header(...), x_user_role: str | None = Header(None)):
         _check_key(x_api_key)
+        _check_role("user", x_user_role)
         rows = await sql.fetch(
             "SELECT TOP 100 * FROM failed_claims ORDER BY failed_at DESC"
         )
         return rows
 
     @app.get("/failed_claims", response_class=HTMLResponse)
-    async def failed_claims_page(x_api_key: str = Header(...)):
+    async def failed_claims_page(x_api_key: str = Header(...), x_user_role: str | None = Header(None)):
         _check_key(x_api_key)
+        _check_role("user", x_user_role)
         rows = await sql.fetch(
             "SELECT TOP 100 * FROM failed_claims ORDER BY failed_at DESC"
         )
@@ -92,19 +129,22 @@ def create_app(
         return HTMLResponse(content=page)
 
     @app.get("/status")
-    async def status(x_api_key: str = Header(...)):
+    async def status(x_api_key: str = Header(...), x_user_role: str | None = Header(None)):
         _check_key(x_api_key)
+        _check_role("user", x_user_role)
         return processing_status
 
     @app.get("/health")
-    async def health(x_api_key: str = Header(...)):
+    async def health(x_api_key: str = Header(...), x_user_role: str | None = Header(None)):
         _check_key(x_api_key)
+        _check_role("user", x_user_role)
         ok = await sql.health_check()
         return {"sqlserver": ok}
 
     @app.get("/readiness")
-    async def readiness(x_api_key: str = Header(...)):
+    async def readiness(x_api_key: str = Header(...), x_user_role: str | None = Header(None)):
         _check_key(x_api_key)
+        _check_role("user", x_user_role)
         pg_ok = await pg.health_check()
         sql_ok = await sql.health_check()
         return {"postgres": pg_ok, "sqlserver": sql_ok}
@@ -114,19 +154,22 @@ def create_app(
         return {"status": "ok"}
 
     @app.get("/metrics")
-    async def get_metrics(x_api_key: str = Header(...)):
+    async def get_metrics(x_api_key: str = Header(...), x_user_role: str | None = Header(None)):
         _check_key(x_api_key)
+        _check_role("admin", x_user_role)
         return metrics.as_dict()
 
     @app.get("/profiling/start")
-    async def profiling_start(x_api_key: str = Header(...)):
+    async def profiling_start(x_api_key: str = Header(...), x_user_role: str | None = Header(None)):
         _check_key(x_api_key)
+        _check_role("admin", x_user_role)
         start_profiling()
         return {"profiling": "started"}
 
     @app.get("/profiling/stop")
-    async def profiling_stop(x_api_key: str = Header(...)):
+    async def profiling_stop(x_api_key: str = Header(...), x_user_role: str | None = Header(None)):
         _check_key(x_api_key)
+        _check_role("admin", x_user_role)
         stats = stop_profiling()
         return {"profiling": "stopped", "stats": stats}
 
