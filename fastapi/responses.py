@@ -1,0 +1,3 @@
+class HTMLResponse(str):
+    pass
+
