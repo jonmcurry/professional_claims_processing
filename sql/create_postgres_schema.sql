@@ -145,3 +145,7 @@ BEGIN
     DELETE FROM claims WHERE service_to_date < cutoff_date;
 END;
 $$;
+
+CREATE INDEX IF NOT EXISTS idx_claims_claim_id ON claims (claim_id);
+CREATE INDEX IF NOT EXISTS idx_failed_claims_claim_id ON failed_claims (claim_id);
+CREATE INDEX IF NOT EXISTS idx_claims_patient_account ON claims (patient_account_number);
