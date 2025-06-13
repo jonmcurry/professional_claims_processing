@@ -49,6 +49,11 @@ def create_app(sql_db: Optional[SQLServerDatabase] = None) -> FastAPI:
     async def status():
         return processing_status
 
+    @app.get("/health")
+    async def health():
+        ok = await sql.health_check()
+        return {"sqlserver": ok}
+
     return app
 
 

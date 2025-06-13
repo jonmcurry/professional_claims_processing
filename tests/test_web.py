@@ -13,6 +13,9 @@ class DummyDB:
     async def execute(self, query: str, *params):
         return 1
 
+    async def health_check(self):
+        return True
+
 @pytest.fixture
 def client():
     app = create_app(sql_db=DummyDB())
@@ -33,3 +36,9 @@ def test_status_endpoint(client):
     resp = client.get("/status")
     assert resp.status_code == 200
     assert resp.json() == {"processed": 5, "failed": 2}
+
+
+def test_health_endpoint(client):
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"sqlserver": True}
