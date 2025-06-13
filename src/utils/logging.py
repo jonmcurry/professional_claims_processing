@@ -1,6 +1,11 @@
 import logging
 import json
+import logging.handlers
+from typing import Optional, Dict
+
 from .tracing import trace_id_var, span_id_var
+from ..security.compliance import mask_claim_data
+from ..config.config import LoggingConfig
 
 
 class JsonFormatter(logging.Formatter):
@@ -21,7 +26,17 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(data)
 
 
-def setup_logging() -> logging.Logger:
+class SensitiveDataFilter(logging.Filter):
+    """Mask sensitive claim data from logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:  # pragma: no cover - simple masking
+        claim = getattr(record, "claim", None)
+        if isinstance(claim, dict):
+            record.claim = mask_claim_data(claim)
+        return True
+
+
+def setup_logging(cfg: Optional[LoggingConfig] = None) -> logging.Logger:
     logger = logging.getLogger("claims_processor")
     if logger.handlers:
         return logger
@@ -41,8 +56,20 @@ def setup_logging() -> logging.Logger:
     analytics_handler.setFormatter(JsonFormatter())
     logger.addHandler(analytics_handler)
 
-    logger.setLevel(logging.INFO)
+    if cfg and cfg.aggregator_host and cfg.aggregator_port:
+        socket_handler = logging.handlers.SocketHandler(
+            cfg.aggregator_host, cfg.aggregator_port
+        )
+        socket_handler.setFormatter(JsonFormatter())
+        logger.addHandler(socket_handler)
+
+    logger.setLevel(getattr(logging, (cfg.level if cfg else "INFO")))
+    if cfg and cfg.component_levels:
+        for name, level in cfg.component_levels.items():
+            logging.getLogger(name).setLevel(getattr(logging, level))
+
     logger.addFilter(RequestContextFilter())
+    logger.addFilter(SensitiveDataFilter())
     return logger
 
 

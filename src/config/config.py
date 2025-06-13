@@ -31,7 +31,7 @@ except Exception:  # pragma: no cover - fallback simple parser
     yaml = _SimpleYAML()
 import os
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -79,6 +79,14 @@ class ModelConfig:
 
 
 @dataclass
+class LoggingConfig:
+    level: str = "INFO"
+    aggregator_host: Optional[str] = None
+    aggregator_port: Optional[int] = None
+    component_levels: Dict[str, str] | None = None
+
+
+@dataclass
 class AppConfig:
     postgres: PostgresConfig
     sqlserver: SQLServerConfig
@@ -86,6 +94,7 @@ class AppConfig:
     security: SecurityConfig
     cache: CacheConfig
     model: ModelConfig
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
 
 
 def _resolve_path(default: str) -> str:
@@ -119,6 +128,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
     sec = SecurityConfig(**data.get("security", {}))
     cache_cfg = CacheConfig(**data.get("cache", {}))
     model_cfg = ModelConfig(**data.get("model", {}))
+    logging_cfg = LoggingConfig(**data.get("logging", {}))
     cfg = AppConfig(
         postgres=pg,
         sqlserver=sql,
@@ -126,6 +136,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
         security=sec,
         cache=cache_cfg,
         model=model_cfg,
+        logging=logging_cfg,
     )
     validate_config(cfg)
     return cfg
