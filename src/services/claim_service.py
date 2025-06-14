@@ -1,5 +1,5 @@
-from typing import Any, Dict, Iterable, List
 import json
+from typing import Any, Dict, Iterable, List
 
 from ..db.postgres import PostgresDatabase
 from ..db.sql_server import SQLServerDatabase
@@ -110,6 +110,26 @@ class ClaimService:
             for acct, facility in processed:
                 await self.delete_claim(acct, facility)
             raise
+
+    async def bulk_insert_postgres_copy(self, claims: Iterable[Dict[str, Any]]) -> int:
+        """Bulk insert claims into PostgreSQL using COPY."""
+        rows: list[tuple[Any, Any, Any]] = []
+        for claim in claims:
+            acct = claim.get("patient_account_number")
+            if self.encryption_key and acct is not None:
+                acct = encrypt_text(str(acct), self.encryption_key)
+            rows.append(
+                (
+                    acct,
+                    claim.get("facility_id"),
+                    claim.get("procedure_code"),
+                )
+            )
+        return await self.pg.copy_records(
+            "claims",
+            ["patient_account_number", "facility_id", "procedure_code"],
+            rows,
+        )
 
     async def delete_claim(self, account: str, facility: str) -> None:
         await self.sql.execute(
