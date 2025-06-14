@@ -5,7 +5,7 @@ import os
 import time
 import psutil
 import weakref
-from typing import Any, Dict, Iterable, List, Set, Optional
+from typing import Any, Dict, Iterable, List, Set, Optional, Awaitable
 
 from ..config.config import AppConfig
 from ..db.postgres import PostgresDatabase
@@ -541,11 +541,11 @@ class ClaimsPipeline:
     async def _concurrency_monitor_loop(self):
         """Background task to monitor and adjust concurrency limits."""
         while True:
-            try:
-                await asyncio.sleep(15)  # Check every 15 seconds
-                await self.semaphore_manager.adjust_limits_dynamic()
-            except Exception as e:
-                self.logger.warning(f"Concurrency monitor error: {e}")
+            await asyncio.sleep(15)  # Check every 15 seconds
+            await self._run_safely(
+                self.semaphore_manager.adjust_limits_dynamic(),
+                "Concurrency monitor error",
+            )
 
     def _initialize_memory_pools(self) -> None:
         """Initialize memory pools for frequently used objects."""
@@ -567,11 +567,11 @@ class ClaimsPipeline:
     async def _memory_monitor_loop(self) -> None:
         """Background memory monitoring and cleanup."""
         while True:
-            try:
-                await asyncio.sleep(30)  # Check every 30 seconds
-                await self._perform_memory_cleanup()
-            except Exception as e:
-                self.logger.warning(f"Memory monitor error: {e}")
+            await asyncio.sleep(30)  # Check every 30 seconds
+            await self._run_safely(
+                self._perform_memory_cleanup(),
+                "Memory monitor error",
+            )
 
     async def _perform_memory_cleanup(self) -> None:
         """Perform memory cleanup operations."""
@@ -655,6 +655,16 @@ class ClaimsPipeline:
         # Release RVU containers
         for rvu_obj in batch_objects.get("rvu_containers", []):
             self._memory_pool.release("rvu_containers", rvu_obj)
+
+    async def _run_safely(self, coro: Awaitable[Any], message: str, default: Any = None) -> Any:
+        """Run a coroutine and log any exceptions uniformly."""
+        try:
+            return await coro
+        except Exception as e:
+            category = categorize_exception(e)
+            self.logger.warning(f"{message}: {e}")
+            metrics.inc(f"errors_{category.value}")
+            return default
 
     async def process_batch_ultra_optimized(self) -> Dict[str, Any]:
         """Ultra-optimized batch processing with dynamic concurrency management."""
