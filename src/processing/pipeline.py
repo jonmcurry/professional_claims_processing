@@ -23,7 +23,7 @@ from ..utils.cache import DistributedCache, InMemoryCache, RvuCache
 from ..utils.errors import ErrorCategory, categorize_exception
 from ..utils.logging import RequestContextFilter, setup_logging
 from ..utils.retries import retry_async
-from ..utils.tracing import start_span, start_trace
+from ..utils.tracing import start_span, start_trace, trace_id_var
 from ..validation.validator import ClaimValidator
 from ..web.status import batch_status, processing_status
 from .repair import ClaimRepairSuggester
@@ -545,6 +545,7 @@ class ClaimsPipeline:
             await self._run_safely(
                 self.semaphore_manager.adjust_limits_dynamic(),
                 "Concurrency monitor error",
+                stage="concurrency_monitor",
             )
 
     def _initialize_memory_pools(self) -> None:
@@ -571,6 +572,7 @@ class ClaimsPipeline:
             await self._run_safely(
                 self._perform_memory_cleanup(),
                 "Memory monitor error",
+                stage="memory_monitor",
             )
 
     async def _perform_memory_cleanup(self) -> None:
@@ -656,13 +658,28 @@ class ClaimsPipeline:
         for rvu_obj in batch_objects.get("rvu_containers", []):
             self._memory_pool.release("rvu_containers", rvu_obj)
 
-    async def _run_safely(self, coro: Awaitable[Any], message: str, default: Any = None) -> Any:
+    async def _run_safely(
+        self,
+        coro: Awaitable[Any],
+        message: str,
+        default: Any = None,
+        *,
+        claim_id: str | None = None,
+        stage: str | None = None,
+    ) -> Any:
         """Run a coroutine and log any exceptions uniformly."""
         try:
             return await coro
         except Exception as e:
             category = categorize_exception(e)
-            self.logger.warning(f"{message}: {e}")
+            self.logger.exception(
+                f"{message}: {e}",
+                extra={
+                    "claim_id": claim_id,
+                    "processing_stage": stage,
+                    "correlation_id": trace_id_var.get(""),
+                },
+            )
             metrics.inc(f"errors_{category.value}")
             return default
 
@@ -690,7 +707,7 @@ class ClaimsPipeline:
         async with self.semaphore_manager.batch_semaphore:
             # Phase 1: Dead Letter Queue Processing (async)
             dead_letter_task = asyncio.create_task(
-                self.service.reprocess_dead_letter(batch_size=2000)
+                self.service.reprocess_dead_letter_optimized(batch_size=2000)
             )
             
             # Phase 2: Dynamic Batch Size Calculation
@@ -760,14 +777,26 @@ class ClaimsPipeline:
                     try:
                         validation_results = await validation_task
                     except Exception as e:
-                        self.logger.error(f"Validation error: {e}")
+                        self.logger.exception(
+                            f"Validation error: {e}",
+                            extra={
+                                "processing_stage": "validation",
+                                "correlation_id": trace_id_var.get(""),
+                            },
+                        )
                         validation_results = {}
                 
                 if rules_task:
                     try:
                         rules_results = await rules_task
                     except Exception as e:
-                        self.logger.error(f"Rules evaluation error: {e}")
+                        self.logger.exception(
+                            f"Rules evaluation error: {e}",
+                            extra={
+                                "processing_stage": "rules",
+                                "correlation_id": trace_id_var.get(""),
+                            },
+                        )
                         rules_results = {}
                 
                 validation_time = time.perf_counter() - validation_start
@@ -924,9 +953,23 @@ class ClaimsPipeline:
                 
                 # Wait for dead letter processing to complete
                 try:
-                    await dead_letter_task
+                    dlq_processed = await dead_letter_task
+                    self.logger.info(
+                        "Dead letter processing complete",
+                        extra={
+                            "processed": dlq_processed,
+                            "processing_stage": "dead_letter",
+                            "correlation_id": trace_id_var.get(""),
+                        },
+                    )
                 except Exception as e:
-                    self.logger.warning(f"Dead letter processing failed: {e}")
+                    self.logger.exception(
+                        f"Dead letter processing failed: {e}",
+                        extra={
+                            "processing_stage": "dead_letter",
+                            "correlation_id": trace_id_var.get(""),
+                        },
+                    )
                 
                 # Final status update
                 batch_status["end_time"] = time.perf_counter()
@@ -1085,7 +1128,13 @@ class ClaimsPipeline:
                     total_failed += result.get("failed", 0)
                 
             except Exception as e:
-                self.logger.error(f"Stream processing error: {e}")
+                self.logger.exception(
+                    f"Stream processing error: {e}",
+                    extra={
+                        "processing_stage": "stream_processing",
+                        "correlation_id": trace_id_var.get(""),
+                    },
+                )
             finally:
                 # Final cleanup
                 await self._perform_stream_memory_cleanup()
@@ -1148,7 +1197,14 @@ class ClaimsPipeline:
             
             return final_size
             
-        except Exception:
+        except Exception as e:
+            self.logger.exception(
+                f"Memory aware batch size calculation failed: {e}",
+                extra={
+                    "processing_stage": "memory_batch_size",
+                    "correlation_id": trace_id_var.get(""),
+                },
+            )
             return base_size
 
     async def _predict_single_async(self, claim: Dict[str, Any]) -> int:
@@ -1177,7 +1233,13 @@ class ClaimsPipeline:
                 metrics.inc("memory_emergency_cleanups")
                 
         except Exception as e:
-            self.logger.error(f"Memory check failed: {e}")
+            self.logger.exception(
+                f"Memory check failed: {e}",
+                extra={
+                    "processing_stage": "memory_check",
+                    "correlation_id": trace_id_var.get(""),
+                },
+            )
 
     async def _enrich_claims_with_rvu(self, claims: List[Dict[str, Any]], conversion_factor: float) -> List[Dict[str, Any]]:
         """Bulk enrich claims with RVU data using memory-pooled containers."""
@@ -1269,7 +1331,13 @@ class ClaimsPipeline:
                     insert_data
                 )
             except Exception as e:
-                self.logger.warning(f"TVP bulk insert failed: {e}")
+                self.logger.exception(
+                    f"TVP bulk insert failed: {e}",
+                    extra={
+                        "processing_stage": "insert_claims_bulk",
+                        "correlation_id": trace_id_var.get(""),
+                    },
+                )
                 # Fallback to PostgreSQL COPY
                 try:
                     return await self.pg.copy_records(
@@ -1278,7 +1346,13 @@ class ClaimsPipeline:
                         insert_data
                     )
                 except Exception as fallback_e:
-                    self.logger.error(f"All bulk insert methods failed: {fallback_e}")
+                    self.logger.exception(
+                        f"All bulk insert methods failed: {fallback_e}",
+                        extra={
+                            "processing_stage": "insert_claims_bulk",
+                            "correlation_id": trace_id_var.get(""),
+                        },
+                    )
                     return 0
         
         return 0
@@ -1300,7 +1374,13 @@ class ClaimsPipeline:
             )
             metrics.inc("bulk_failed_claims_recorded", len(failed_claims_data))
         except Exception as e:
-            self.logger.error(f"Bulk failed claims recording failed: {e}")
+            self.logger.exception(
+                f"Bulk failed claims recording failed: {e}",
+                extra={
+                    "processing_stage": "record_failed_claims",
+                    "correlation_id": trace_id_var.get(""),
+                },
+            )
 
     async def _record_checkpoints_bulk(self, checkpoints: List[tuple]) -> None:
         """Record checkpoints in bulk with memory management."""
@@ -1315,7 +1395,13 @@ class ClaimsPipeline:
             )
             metrics.inc("bulk_checkpoints_recorded", len(checkpoints))
         except Exception as e:
-            self.logger.error(f"Bulk checkpoint recording failed: {e}")
+            self.logger.exception(
+                f"Bulk checkpoint recording failed: {e}",
+                extra={
+                    "processing_stage": "record_checkpoints",
+                    "correlation_id": trace_id_var.get(""),
+                },
+            )
 
     def calculate_batch_size_adaptive(self) -> int:
         """Advanced adaptive batch sizing based on system metrics and dynamic concurrency."""
@@ -1393,7 +1479,13 @@ class ClaimsPipeline:
                     try:
                         validation_results = await self.validator.validate_batch(enriched_claims)
                     except Exception as e:
-                        self.logger.error(f"Validation error: {e}")
+                        self.logger.exception(
+                            f"Validation error: {e}",
+                            extra={
+                                "processing_stage": "validation_stream",
+                                "correlation_id": trace_id_var.get(""),
+                            },
+                        )
             
             # Rules evaluation
             rules_results = {}
@@ -1401,7 +1493,13 @@ class ClaimsPipeline:
                 try:
                     rules_results = await self.rules_engine.evaluate_batch(enriched_claims)
                 except Exception as e:
-                    self.logger.error(f"Rules evaluation error: {e}")
+                    self.logger.exception(
+                        f"Rules evaluation error: {e}",
+                        extra={
+                            "processing_stage": "rules_stream",
+                            "correlation_id": trace_id_var.get(""),
+                        },
+                    )
             
             # ML inference with dynamic concurrency
             predictions = []
@@ -1614,7 +1712,14 @@ class ClaimsPipeline:
                 return {"status": "processed", "prediction": prediction}
                 
         except Exception as e:
-            self.logger.error(f"Single claim processing failed: {e}")
+            self.logger.exception(
+                f"Single claim processing failed: {e}",
+                extra={
+                    "claim_id": claim.get("claim_id"),
+                    "processing_stage": "single_claim",
+                    "correlation_id": trace_id_var.get(""),
+                },
+            )
             return {"status": "error", "message": str(e)}
 
     def calculate_batch_size(self) -> int:
@@ -1643,7 +1748,14 @@ class ClaimsPipeline:
                                 results.append((patient_acct, facility_id))
                                 
                         except Exception as e:
-                            self.logger.warning(f"Claim processing failed: {e}")
+                            self.logger.exception(
+                                f"Claim processing failed: {e}",
+                                extra={
+                                    "claim_id": claim.get("claim_id"),
+                                    "processing_stage": "batch_single_claim",
+                                    "correlation_id": trace_id_var.get(""),
+                                },
+                            )
                             continue
                     
                     return results
