@@ -1,17 +1,12 @@
 from typing import Dict, Any
-try:  # pragma: no cover - cryptography may be unavailable
+
+try:
     from cryptography.fernet import Fernet
-except Exception:  # pragma: no cover - simple fallback cipher
-
-    class Fernet:  # type: ignore
-        def __init__(self, key: bytes):
-            self.key = key
-
-        def encrypt(self, text: bytes) -> bytes:
-            return text[::-1]
-
-        def decrypt(self, token: bytes) -> bytes:
-            return token[::-1]
+except Exception as exc:  # pragma: no cover - enforce dependency
+    raise ImportError(
+        "The 'cryptography' package is required for encryption features. "
+        "Install it with 'pip install cryptography'."
+    ) from exc
 
 
 def _get_cipher(key: str) -> Fernet:
