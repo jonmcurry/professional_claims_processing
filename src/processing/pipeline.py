@@ -2,7 +2,7 @@ import asyncio
 import os
 import time
 import contextlib
-from typing import Any, Dict
+from typing import Any, Dict, Iterable
 
 from ..config.config import AppConfig
 from ..db.postgres import PostgresDatabase
@@ -111,6 +111,18 @@ class ClaimsPipeline:
                 extra={"claim_id": claim_id, "stage": stage},
             )
 
+    async def _prefetch_rvu(self, claims: Iterable[Dict[str, Any]]) -> None:
+        """Bulk prefetch RVU data for a collection of claims."""
+        if not self.rvu_cache:
+            return
+        codes = {
+            claim.get("procedure_code")
+            for claim in claims
+            if claim.get("procedure_code")
+        }
+        if codes:
+            await self.rvu_cache.warm_cache(codes)
+
     async def process_batch(self) -> None:
         if not self.request_filter:
             self.request_filter = RequestContextFilter()
@@ -131,6 +143,7 @@ class ClaimsPipeline:
         metrics.set("dynamic_batch_size", batch_size)
         claims = await self.service.fetch_claims(batch_size, priority=True)
         batch_status["total"] = len(claims)
+        await self._prefetch_rvu(claims)
         tasks = [self.process_claim(claim) for claim in claims]
         results = await asyncio.gather(*tasks)
         valid = [r for r in results if r]
@@ -196,8 +209,15 @@ class ClaimsPipeline:
         insert_workers = self.cfg.processing.insert_workers
 
         async def fetcher() -> None:
-            async for claim in self.service.stream_claims(batch_size, priority=True):
-                await fetch_to_validate.put(claim)
+            offset = 0
+            while True:
+                batch = await self.service.fetch_claims(batch_size, offset=offset, priority=True)
+                if not batch:
+                    break
+                await self._prefetch_rvu(batch)
+                for claim in batch:
+                    await fetch_to_validate.put(claim)
+                offset += batch_size
             for _ in range(validate_workers):
                 await fetch_to_validate.put(None)  # type: ignore
 
