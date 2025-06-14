@@ -10,6 +10,7 @@ from .base import BaseDatabase
 from ..config.config import SQLServerConfig
 from ..monitoring.metrics import metrics
 from ..analysis.query_tracker import record as record_query
+from ..monitoring.stats import latencies
 
 
 class SQLServerDatabase(BaseDatabase):
@@ -94,6 +95,7 @@ class SQLServerDatabase(BaseDatabase):
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("sqlserver_query_ms", duration)
             metrics.inc("sqlserver_query_count")
+            latencies.record("sqlserver_query", duration)
             record_query(query, duration)
             record_query(query, duration)
             record_query(query, duration)
@@ -129,6 +131,7 @@ class SQLServerDatabase(BaseDatabase):
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("sqlserver_query_ms", duration)
             metrics.inc("sqlserver_query_count")
+            latencies.record("sqlserver_query", duration)
             await self.circuit_breaker.record_success()
             return cursor.rowcount
         except pyodbc.Error:
@@ -194,6 +197,7 @@ class SQLServerDatabase(BaseDatabase):
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("sqlserver_query_ms", duration)
             metrics.inc("sqlserver_query_count")
+            latencies.record("sqlserver_query", duration)
             await self.circuit_breaker.record_success()
             return cursor.rowcount
         except pyodbc.Error:

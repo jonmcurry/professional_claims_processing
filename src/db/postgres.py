@@ -13,6 +13,7 @@ from .base import BaseDatabase
 from ..config.config import PostgresConfig
 from ..monitoring.metrics import metrics
 from ..analysis.query_tracker import record as record_query
+from ..monitoring.stats import latencies
 
 
 class PostgresDatabase(BaseDatabase):
@@ -76,6 +77,7 @@ class PostgresDatabase(BaseDatabase):
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("postgres_query_ms", duration)
             metrics.inc("postgres_query_count")
+            latencies.record("postgres_query", duration)
             record_query(query, duration)
             record_query(query, duration)
             record_query(query, duration)
@@ -110,6 +112,7 @@ class PostgresDatabase(BaseDatabase):
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("postgres_query_ms", duration)
             metrics.inc("postgres_query_count")
+            latencies.record("postgres_query", duration)
             await self.circuit_breaker.record_success()
             return int(result.split(" ")[-1])
         except asyncpg.PostgresError:
@@ -157,6 +160,7 @@ class PostgresDatabase(BaseDatabase):
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("postgres_query_ms", duration)
             metrics.inc("postgres_query_count")
+            latencies.record("postgres_query", duration)
             await self.circuit_breaker.record_success()
         except asyncpg.PostgresError:
             await self.circuit_breaker.record_failure()

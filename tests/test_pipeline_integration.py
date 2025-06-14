@@ -94,6 +94,8 @@ def test_pipeline_process_batch(monkeypatch):
         asyncio.set_event_loop(asyncio.new_event_loop())
     assert processing_status["processed"] == 1
     assert pipeline.sql.inserted == [("111", "F1")]
+    from src.monitoring.metrics import metrics
+    assert metrics.get("batch_processing_rate_per_sec") > 0
 
 class DummyFilterModel:
     def __init__(self, path: str, version: str = "1"):

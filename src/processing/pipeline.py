@@ -128,6 +128,7 @@ class ClaimsPipeline:
         metrics.set("claims_processed", 0)
         metrics.set("claims_failed", 0)
         batch_size = self.calculate_batch_size()
+        metrics.set("dynamic_batch_size", batch_size)
         claims = await self.service.fetch_claims(batch_size, priority=True)
         batch_status["total"] = len(claims)
         tasks = [self.process_claim(claim) for claim in claims]
@@ -156,8 +157,15 @@ class ClaimsPipeline:
                     extra={"category": category.value},
                 )
                 metrics.inc("claims_failed", len(valid))
+                metrics.inc(f"errors_{category.value}", len(valid))
 
         duration = time.perf_counter() - start_time
+        if duration > 0:
+            rate = processing_status["processed"] / duration
+        else:
+            rate = 0.0
+        metrics.set("batch_processing_rate_per_sec", rate)
+        metrics.set("last_batch_duration_ms", duration * 1000)
         batch_status["end_time"] = time.perf_counter()
         self.logger.info(
             "Batch complete",
