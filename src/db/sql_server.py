@@ -5,6 +5,7 @@ from typing import Iterable, Any
 
 from ..utils.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
 from ..utils.errors import DatabaseConnectionError, QueryError, CircuitBreakerOpenError
+from ..utils.cache import InMemoryCache
 
 from .base import BaseDatabase
 from ..config.config import SQLServerConfig
@@ -21,6 +22,8 @@ class SQLServerDatabase(BaseDatabase):
         # Set of SQL statements that have been prepared on all connections
         self._prepared: set[str] = set()
         self.circuit_breaker = CircuitBreaker()
+        # Simple read-through cache for query results
+        self.query_cache = InMemoryCache(ttl=60)
 
     async def connect(self, size: int | None = None) -> None:
         if not await self.circuit_breaker.allow():
@@ -85,6 +88,10 @@ class SQLServerDatabase(BaseDatabase):
     async def fetch(self, query: str, *params: Any) -> Iterable[dict]:
         if not await self.circuit_breaker.allow():
             raise CircuitBreakerOpenError("SQLServer circuit open")
+        cache_key = query + str(params)
+        cached = self.query_cache.get(cache_key)
+        if cached is not None:
+            return cached
         conn = await self._acquire()
         try:
             start = time.perf_counter()
@@ -100,6 +107,7 @@ class SQLServerDatabase(BaseDatabase):
             record_query(query, duration)
             record_query(query, duration)
             await self.circuit_breaker.record_success()
+            self.query_cache.set(cache_key, rows)
             return rows
         except pyodbc.Error:
             conn.close()
@@ -109,6 +117,7 @@ class SQLServerDatabase(BaseDatabase):
             columns = [col[0] for col in cursor.description]
             rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
             await self.circuit_breaker.record_success()
+            self.query_cache.set(cache_key, rows)
             return rows
         except Exception as e:
             await self.circuit_breaker.record_failure()

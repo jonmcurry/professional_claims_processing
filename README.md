@@ -13,6 +13,12 @@ This project builds a high-performance claims processing system with an integrat
 - Slow queries can be fed to the `index_recommender` to generate index suggestions.
 - The `partition_historical_data` script partitions old claim records by year.
 
+### Scaling Enhancements
+- `ShardedDatabase` distributes writes across multiple PostgreSQL instances using a hash of the shard key.
+- SQL Server queries now use a read-through cache to avoid repeated lookups.
+- Materialized views defined in `sql/materialized_views.sql` accelerate analytics queries.
+- A lightweight `ChangeDataCapture` poller streams row changes for real-time synchronization.
+
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a high-level system diagram.
 
 ## Requirements
