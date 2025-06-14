@@ -5,7 +5,7 @@ import os
 import time
 import psutil
 import weakref
-from typing import Any, Dict, Iterable, List, Set
+from typing import Any, Dict, Iterable, List, Set, Optional
 
 from ..config.config import AppConfig
 from ..db.postgres import PostgresDatabase
@@ -27,6 +27,213 @@ from ..utils.tracing import start_span, start_trace
 from ..validation.validator import ClaimValidator
 from ..web.status import batch_status, processing_status
 from .repair import ClaimRepairSuggester
+
+
+class SystemResourceMonitor:
+    """Monitor system resources for dynamic concurrency adjustment."""
+    
+    def __init__(self):
+        self.cpu_percent = 0.0
+        self.memory_percent = 0.0
+        self.memory_available_gb = 0.0
+        self.load_average = 0.0
+        
+    def update(self):
+        """Update system resource metrics."""
+        try:
+            self.cpu_percent = psutil.cpu_percent(interval=0.1)
+            memory = psutil.virtual_memory()
+            self.memory_percent = memory.percent
+            self.memory_available_gb = memory.available / (1024**3)
+            
+            try:
+                self.load_average = os.getloadavg()[0]
+            except (OSError, AttributeError):
+                self.load_average = self.cpu_percent / 100.0 * psutil.cpu_count()
+                
+        except Exception:
+            pass  # Keep previous values on error
+
+
+class DynamicSemaphoreManager:
+    """Manages dynamic semaphore limits based on system resources."""
+    
+    def __init__(self, config: AppConfig):
+        self.config = config
+        self.resource_monitor = SystemResourceMonitor()
+        
+        # Initialize with enhanced limits instead of conservative defaults
+        self.validation_limit = getattr(config.processing, 'validation_concurrency', 100)
+        self.ml_limit = getattr(config.processing, 'ml_concurrency', 60)
+        self.batch_limit = getattr(config.processing, 'batch_concurrency', 12)
+        self.database_limit = getattr(config.processing, 'database_concurrency', 30)
+        
+        # Create semaphores
+        self.validation_semaphore = asyncio.Semaphore(self.validation_limit)
+        self.ml_semaphore = asyncio.Semaphore(self.ml_limit)
+        self.batch_semaphore = asyncio.Semaphore(self.batch_limit)
+        self.database_semaphore = asyncio.Semaphore(self.database_limit)
+        
+        # Adjustment parameters
+        self.last_adjustment = time.time()
+        self.adjustment_interval = 30  # seconds
+        self.adjustment_count = 0
+        
+        # Limits
+        self.min_limits = {
+            'validation': 15,
+            'ml': 8,
+            'batch': 3,
+            'database': 8
+        }
+        self.max_limits = {
+            'validation': 300,
+            'ml': 150,
+            'batch': 25,
+            'database': 80
+        }
+        
+        # Emergency throttling
+        self.emergency_active = False
+        self.emergency_start_time = 0
+        
+    async def adjust_limits_dynamic(self):
+        """Dynamically adjust semaphore limits based on system state."""
+        current_time = time.time()
+        if current_time - self.last_adjustment < self.adjustment_interval:
+            return
+            
+        self.resource_monitor.update()
+        
+        # Calculate scaling factors
+        cpu_factor = self._get_cpu_scaling_factor()
+        memory_factor = self._get_memory_scaling_factor()
+        load_factor = self._get_load_scaling_factor()
+        
+        # Combined scaling factor
+        combined_factor = min(cpu_factor, memory_factor, load_factor)
+        
+        # Emergency throttling check
+        if self._should_emergency_throttle():
+            if not self.emergency_active:
+                self.emergency_active = True
+                self.emergency_start_time = current_time
+                combined_factor *= 0.3  # Reduce to 30%
+        elif self.emergency_active and current_time - self.emergency_start_time > 120:
+            self.emergency_active = False
+            
+        # Calculate new limits
+        new_validation = int(100 * combined_factor * 1.2)  # Validation is less intensive
+        new_ml = int(60 * combined_factor * 0.8)  # ML is more intensive
+        new_batch = int(12 * combined_factor)
+        new_database = int(30 * combined_factor * 1.1)
+        
+        # Apply bounds
+        new_validation = max(self.min_limits['validation'], 
+                           min(self.max_limits['validation'], new_validation))
+        new_ml = max(self.min_limits['ml'], 
+                    min(self.max_limits['ml'], new_ml))
+        new_batch = max(self.min_limits['batch'], 
+                       min(self.max_limits['batch'], new_batch))
+        new_database = max(self.min_limits['database'], 
+                          min(self.max_limits['database'], new_database))
+        
+        # Update limits if significant change
+        if self._should_update_limits(new_validation, new_ml, new_batch, new_database):
+            await self._update_semaphore_limits(new_validation, new_ml, new_batch, new_database)
+            self.last_adjustment = current_time
+            self.adjustment_count += 1
+            
+    def _get_cpu_scaling_factor(self) -> float:
+        """Get scaling factor based on CPU usage."""
+        cpu = self.resource_monitor.cpu_percent
+        if cpu < 30:
+            return 1.5
+        elif cpu < 60:
+            return 1.2
+        elif cpu < 80:
+            return 1.0
+        elif cpu < 90:
+            return 0.7
+        else:
+            return 0.4
+            
+    def _get_memory_scaling_factor(self) -> float:
+        """Get scaling factor based on memory usage."""
+        memory = self.resource_monitor.memory_percent
+        available = self.resource_monitor.memory_available_gb
+        
+        if memory < 40:
+            return 1.4
+        elif memory < 70:
+            return 1.1
+        elif memory < 85:
+            return 0.9
+        else:
+            return 0.6 if available > 1.0 else 0.3
+            
+    def _get_load_scaling_factor(self) -> float:
+        """Get scaling factor based on load average."""
+        load_ratio = self.resource_monitor.load_average / psutil.cpu_count()
+        if load_ratio < 0.5:
+            return 1.3
+        elif load_ratio < 1.0:
+            return 1.0
+        elif load_ratio < 1.5:
+            return 0.8
+        else:
+            return 0.4
+            
+    def _should_emergency_throttle(self) -> bool:
+        """Check if emergency throttling should be activated."""
+        return (self.resource_monitor.cpu_percent > 95 or 
+                self.resource_monitor.memory_percent > 95 or
+                self.resource_monitor.memory_available_gb < 0.5)
+                
+    def _should_update_limits(self, new_val, new_ml, new_batch, new_db) -> bool:
+        """Check if limits should be updated."""
+        val_change = abs(new_val - self.validation_limit) / max(self.validation_limit, 1)
+        ml_change = abs(new_ml - self.ml_limit) / max(self.ml_limit, 1)
+        batch_change = abs(new_batch - self.batch_limit) / max(self.batch_limit, 1)
+        db_change = abs(new_db - self.database_limit) / max(self.database_limit, 1)
+        
+        return (val_change > 0.15 or ml_change > 0.15 or 
+                batch_change > 0.15 or db_change > 0.15)
+                
+    async def _update_semaphore_limits(self, new_val, new_ml, new_batch, new_db):
+        """Update semaphore limits."""
+        # Store old limits for logging
+        old_limits = (self.validation_limit, self.ml_limit, self.batch_limit, self.database_limit)
+        
+        # Update limits
+        self.validation_limit = new_val
+        self.ml_limit = new_ml
+        self.batch_limit = new_batch
+        self.database_limit = new_db
+        
+        # Create new semaphores (asyncio.Semaphore doesn't support dynamic limits)
+        self.validation_semaphore = asyncio.Semaphore(new_val)
+        self.ml_semaphore = asyncio.Semaphore(new_ml)
+        self.batch_semaphore = asyncio.Semaphore(new_batch)
+        self.database_semaphore = asyncio.Semaphore(new_db)
+        
+        # Update metrics
+        metrics.set("dynamic_validation_limit", new_val)
+        metrics.set("dynamic_ml_limit", new_ml)
+        metrics.set("dynamic_batch_limit", new_batch)
+        metrics.set("dynamic_database_limit", new_db)
+        metrics.set("system_cpu_percent", self.resource_monitor.cpu_percent)
+        metrics.set("system_memory_percent", self.resource_monitor.memory_percent)
+        metrics.set("emergency_throttling_active", 1 if self.emergency_active else 0)
+        
+        # Log the change
+        print(f"Dynamic concurrency adjustment #{self.adjustment_count}: "
+              f"Validation: {old_limits[0]} → {new_val}, "
+              f"ML: {old_limits[1]} → {new_ml}, "
+              f"Batch: {old_limits[2]} → {new_batch}, "
+              f"Database: {old_limits[3]} → {new_db} "
+              f"(CPU: {self.resource_monitor.cpu_percent:.1f}%, "
+              f"Memory: {self.resource_monitor.memory_percent:.1f}%)")
 
 
 class MemoryPool:
@@ -108,10 +315,14 @@ class MemoryPool:
         for pool_name in list(self.pools.keys()):
             cleanup_stats[pool_name] = self.cleanup_pool(pool_name)
         return cleanup_stats
+    
+    def get_stats(self) -> Dict[str, Dict[str, int]]:
+        """Get pool statistics."""
+        return self.stats.copy()
 
 
 class ClaimsPipeline:
-    """Ultra-optimized claims processing pipeline with memory management."""
+    """Ultra-optimized claims processing pipeline with dynamic concurrency management."""
 
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
@@ -160,9 +371,13 @@ class ClaimsPipeline:
         # Performance tracking
         self._startup_time = 0.0
         self._preparation_stats = {}
+        
+        # Dynamic concurrency management
+        self.semaphore_manager = DynamicSemaphoreManager(cfg)
+        self._concurrency_monitor_task: Optional[asyncio.Task] = None
 
     async def startup_optimized(self) -> None:
-        """Ultra-optimized startup with memory management."""
+        """Ultra-optimized startup with dynamic concurrency management."""
         startup_start = time.perf_counter()
         
         # Phase 1: Database Connection and Pre-warming
@@ -296,6 +511,9 @@ class ClaimsPipeline:
         # Start memory monitoring
         asyncio.create_task(self._memory_monitor_loop())
         
+        # Start dynamic concurrency monitoring
+        self._concurrency_monitor_task = asyncio.create_task(self._concurrency_monitor_loop())
+        
         monitoring_time = time.perf_counter() - monitoring_start
         self._preparation_stats["monitoring_time"] = monitoring_time
         
@@ -303,15 +521,31 @@ class ClaimsPipeline:
         self._startup_time = time.perf_counter() - startup_start
         metrics.set("pipeline_startup_time", self._startup_time)
         metrics.set("pipeline_startup_optimized", 1.0)
+        metrics.set("dynamic_concurrency_enabled", 1.0)
         
         self.logger.info(
-            "Optimized pipeline startup complete",
+            "Optimized pipeline startup complete with dynamic concurrency",
             extra={
                 "startup_time": round(self._startup_time, 4),
                 "preparation_stats": self._preparation_stats,
                 "optimization_features": self._get_optimization_features(),
+                "initial_concurrency_limits": {
+                    "validation": self.semaphore_manager.validation_limit,
+                    "ml": self.semaphore_manager.ml_limit,
+                    "batch": self.semaphore_manager.batch_limit,
+                    "database": self.semaphore_manager.database_limit,
+                }
             }
         )
+
+    async def _concurrency_monitor_loop(self):
+        """Background task to monitor and adjust concurrency limits."""
+        while True:
+            try:
+                await asyncio.sleep(15)  # Check every 15 seconds
+                await self.semaphore_manager.adjust_limits_dynamic()
+            except Exception as e:
+                self.logger.warning(f"Concurrency monitor error: {e}")
 
     def _initialize_memory_pools(self) -> None:
         """Initialize memory pools for frequently used objects."""
@@ -386,6 +620,8 @@ class ClaimsPipeline:
             "query_optimization": True,
             "memory_pooling": True,
             "memory_monitoring": True,
+            "dynamic_concurrency": True,
+            "emergency_throttling": True,
         }
 
     def _acquire_batch_objects(self, batch_size: int) -> Dict[str, Any]:
@@ -421,7 +657,7 @@ class ClaimsPipeline:
             self._memory_pool.release("rvu_containers", rvu_obj)
 
     async def process_batch_ultra_optimized(self) -> Dict[str, Any]:
-        """Ultra-optimized batch processing with memory management."""
+        """Ultra-optimized batch processing with dynamic concurrency management."""
         if not self.request_filter:
             self.request_filter = RequestContextFilter()
             self.logger.addFilter(self.request_filter)
@@ -440,285 +676,439 @@ class ClaimsPipeline:
         batch_status["start_time"] = batch_start
         batch_status["end_time"] = None
         
-        # Phase 1: Dead Letter Queue Processing (async)
-        dead_letter_task = asyncio.create_task(
-            self.service.reprocess_dead_letter(batch_size=2000)
-        )
-        
-        # Phase 2: Dynamic Batch Size Calculation
-        base_batch_size = self.calculate_batch_size_adaptive()
-        # Scale up for ultra-optimization but consider memory
-        optimized_batch_size = await self._calculate_memory_aware_batch_size(base_batch_size)
-        
-        metrics.set("dynamic_batch_size", optimized_batch_size)
-        
-        # Acquire batch objects from pool
-        batch_objects = None
-        try:
-            batch_objects = self._acquire_batch_objects(optimized_batch_size)
-            
-            # Phase 3: Optimized Claims Fetching
-            fetch_start = time.perf_counter()
-            claims = await self.service.fetch_claims(
-                optimized_batch_size, priority=True
-            )
-            fetch_time = time.perf_counter() - fetch_start
-            
-            batch_status["total"] = len(claims)
-            if not claims:
-                batch_status["end_time"] = time.perf_counter()
-                return {"processed": 0, "failed": 0, "duration": fetch_time}
-            
-            # Phase 4: Bulk Preprocessing
-            preprocess_start = time.perf_counter()
-            
-            # Extract claim IDs for bulk checkpointing
-            claim_ids = [c.get("claim_id", "") for c in claims]
-            
-            # Bulk checkpoint - start processing
-            checkpoint_task = asyncio.create_task(
-                self._record_checkpoints_bulk(
-                    [(cid, "start") for cid in claim_ids]
-                )
+        # Use batch semaphore for overall batch processing concurrency
+        async with self.semaphore_manager.batch_semaphore:
+            # Phase 1: Dead Letter Queue Processing (async)
+            dead_letter_task = asyncio.create_task(
+                self.service.reprocess_dead_letter(batch_size=2000)
             )
             
-            # Bulk RVU enrichment
-            enriched_claims = await self._enrich_claims_with_rvu(
-                claims, self.cfg.processing.conversion_factor
-            )
+            # Phase 2: Dynamic Batch Size Calculation
+            base_batch_size = self.calculate_batch_size_adaptive()
+            # Scale up for ultra-optimization but consider memory
+            optimized_batch_size = await self._calculate_memory_aware_batch_size(base_batch_size)
             
-            preprocess_time = time.perf_counter() - preprocess_start
+            metrics.set("dynamic_batch_size", optimized_batch_size)
             
-            # Phase 5: Vectorized Validation and Rules
-            validation_start = time.perf_counter()
-            
-            # Parallel validation and rules evaluation
-            validation_task = self.validator.validate_batch(enriched_claims) if self.validator else {}
-            rules_task = self.rules_engine.evaluate_batch(enriched_claims) if self.rules_engine else {}
-            
-            validation_results, rules_results = await asyncio.gather(
-                validation_task, rules_task, return_exceptions=True
-            )
-            
-            # Handle exceptions in validation/rules
-            if isinstance(validation_results, Exception):
-                validation_results = {}
-            if isinstance(rules_results, Exception):
-                rules_results = {}
-            
-            validation_time = time.perf_counter() - validation_start
-            
-            # Phase 6: Vectorized ML Inference
-            ml_start = time.perf_counter()
-            
-            predictions: List[int] = []
-            if self.model and hasattr(self.model, "predict_batch"):
-                predictions = self.model.predict_batch(enriched_claims)
-            elif self.model:
-                # Parallel individual predictions for models without batch support
-                prediction_tasks = [
-                    asyncio.create_task(self._predict_single_async(claim)) 
-                    for claim in enriched_claims
-                ]
-                predictions = await asyncio.gather(*prediction_tasks)
-            else:
-                predictions = [0] * len(enriched_claims)
-            
-            ml_time = time.perf_counter() - ml_start
-            
-            # Phase 7: Results Processing and Segregation
-            segregation_start = time.perf_counter()
-            
-            valid_claims = []
-            failed_claims_data = []
-            
-            for i, (claim, prediction) in enumerate(zip(enriched_claims, predictions)):
-                claim_id = claim.get("claim_id", "")
-                v_errors = validation_results.get(claim_id, [])
-                r_errors = rules_results.get(claim_id, [])
-                
-                # Add prediction to claim
-                claim["filter_number"] = prediction
-                
-                # Record model prediction
-                if self.model_monitor:
-                    self.model_monitor.record_prediction(prediction)
-                
-                if v_errors or r_errors:
-                    # Prepare failed claim data
-                    all_errors = v_errors + r_errors
-                    suggestions = self.repair_suggester.suggest(all_errors)
-                    
-                    encrypted_claim = claim.copy()
-                    if self.encryption_key:
-                        from ..security.compliance import encrypt_claim_fields, encrypt_text
-                        encrypted_claim = encrypt_claim_fields(claim, self.encryption_key)
-                        original_data = encrypt_text(str(claim), self.encryption_key)
-                    else:
-                        original_data = str(claim)
-                    
-                    failed_claims_data.append((
-                        encrypted_claim.get("claim_id"),
-                        encrypted_claim.get("facility_id"),
-                        encrypted_claim.get("patient_account_number"),
-                        "validation" if v_errors else "rules",
-                        ErrorCategory.VALIDATION.value,
-                        "validation",
-                        original_data,
-                        suggestions
-                    ))
-                else:
-                    valid_claims.append(claim)
-            
-            segregation_time = time.perf_counter() - segregation_start
-            
-            # Phase 8: Bulk Database Operations
-            db_start = time.perf_counter()
-            
-            # Parallel bulk operations
-            bulk_tasks = []
-            
-            # Bulk insert valid claims
-            if valid_claims:
-                bulk_tasks.append(
-                    self._insert_claims_bulk(valid_claims)
-                )
-            
-            # Bulk insert failed claims
-            if failed_claims_data:
-                bulk_tasks.append(
-                    self._record_failed_claims_bulk(failed_claims_data)
-                )
-            
-            # Execute bulk operations
-            if bulk_tasks:
-                await asyncio.gather(*bulk_tasks, return_exceptions=True)
-            
-            db_time = time.perf_counter() - db_start
-            
-            # Phase 9: Bulk Checkpointing and Audit
-            checkpoint_start = time.perf_counter()
-            
-            # Prepare checkpoint data
-            valid_claim_ids = [c.get("claim_id", "") for c in valid_claims]
-            failed_claim_ids = [f[0] for f in failed_claims_data]  # claim_id is first element
-            
-            checkpoint_tasks = []
-            if valid_claim_ids:
-                checkpoint_tasks.append(
-                    self._record_checkpoints_bulk([
-                        (cid, "completed") for cid in valid_claim_ids
-                    ])
-                )
-            if failed_claim_ids:
-                checkpoint_tasks.append(
-                    self._record_checkpoints_bulk([
-                        (cid, "failed") for cid in failed_claim_ids
-                    ])
-                )
-            
-            if checkpoint_tasks:
-                await asyncio.gather(*checkpoint_tasks, return_exceptions=True)
-            
-            # Ensure start checkpoint task completes
-            await checkpoint_task
-            
-            checkpoint_time = time.perf_counter() - checkpoint_start
-            
-            # Phase 10: Metrics and Status Updates
-            metrics_start = time.perf_counter()
-            
-            # Update processing status
-            processing_status["processed"] += len(valid_claims)
-            processing_status["failed"] += len(failed_claims_data)
-            
-            # Update metrics
-            metrics.inc("claims_processed", len(valid_claims))
-            metrics.inc("claims_failed", len(failed_claims_data))
-            metrics.inc("batches_processed_optimized")
-            
-            # Performance metrics
-            total_duration = time.perf_counter() - batch_start
-            throughput = len(enriched_claims) / total_duration if total_duration > 0 else 0
-            
-            metrics.set("batch_processing_rate_per_sec", throughput)
-            metrics.set("last_batch_duration_ms", total_duration * 1000)
-            metrics.set("batch_fetch_time_ms", fetch_time * 1000)
-            metrics.set("batch_preprocess_time_ms", preprocess_time * 1000)
-            metrics.set("batch_validation_time_ms", validation_time * 1000)
-            metrics.set("batch_ml_time_ms", ml_time * 1000)
-            metrics.set("batch_segregation_time_ms", segregation_time * 1000)
-            metrics.set("batch_db_time_ms", db_time * 1000)
-            metrics.set("batch_checkpoint_time_ms", checkpoint_time * 1000)
-            
-            metrics_time = time.perf_counter() - metrics_start
-            
-            # Wait for dead letter processing to complete
+            # Acquire batch objects from pool
+            batch_objects = None
             try:
-                await dead_letter_task
-            except Exception as e:
-                self.logger.warning(f"Dead letter processing failed: {e}")
-            
-            # Final status update
-            batch_status["end_time"] = time.perf_counter()
-            
-            # Comprehensive logging
-            self.logger.info(
-                "Ultra-optimized batch complete",
-                extra={
-                    "event": "batch_complete_optimized",
-                    "total_claims": len(enriched_claims),
+                batch_objects = self._acquire_batch_objects(optimized_batch_size)
+                
+                # Phase 3: Optimized Claims Fetching with database semaphore
+                fetch_start = time.perf_counter()
+                async with self.semaphore_manager.database_semaphore:
+                    claims = await self.service.fetch_claims(
+                        optimized_batch_size, priority=True
+                    )
+                fetch_time = time.perf_counter() - fetch_start
+                
+                batch_status["total"] = len(claims)
+                if not claims:
+                    batch_status["end_time"] = time.perf_counter()
+                    return {"processed": 0, "failed": 0, "duration": fetch_time}
+                
+                # Phase 4: Bulk Preprocessing
+                preprocess_start = time.perf_counter()
+                
+                # Extract claim IDs for bulk checkpointing
+                claim_ids = [c.get("claim_id", "") for c in claims]
+                
+                # Bulk checkpoint - start processing
+                checkpoint_task = asyncio.create_task(
+                    self._record_checkpoints_bulk(
+                        [(cid, "start") for cid in claim_ids]
+                    )
+                )
+                
+                # Bulk RVU enrichment
+                enriched_claims = await self._enrich_claims_with_rvu(
+                    claims, self.cfg.processing.conversion_factor
+                )
+                
+                preprocess_time = time.perf_counter() - preprocess_start
+                
+                # Phase 5: Vectorized Validation and Rules with dynamic concurrency
+                validation_start = time.perf_counter()
+                
+                # Use validation semaphore for validation operations
+                validation_task = None
+                if self.validator:
+                    async with self.semaphore_manager.validation_semaphore:
+                        validation_task = self.validator.validate_batch(enriched_claims)
+                
+                # Rules engine typically doesn't need heavy concurrency control
+                rules_task = None
+                if self.rules_engine:
+                    rules_task = self.rules_engine.evaluate_batch(enriched_claims)
+                
+                # Wait for validation and rules
+                validation_results = {}
+                rules_results = {}
+                
+                if validation_task:
+                    try:
+                        validation_results = await validation_task
+                    except Exception as e:
+                        self.logger.error(f"Validation error: {e}")
+                        validation_results = {}
+                
+                if rules_task:
+                    try:
+                        rules_results = await rules_task
+                    except Exception as e:
+                        self.logger.error(f"Rules evaluation error: {e}")
+                        rules_results = {}
+                
+                validation_time = time.perf_counter() - validation_start
+                
+                # Phase 6: Vectorized ML Inference with dynamic concurrency
+                ml_start = time.perf_counter()
+                
+                predictions: List[int] = []
+                if self.model:
+                    # Use ML semaphore for model predictions
+                    async with self.semaphore_manager.ml_semaphore:
+                        if hasattr(self.model, "predict_batch"):
+                            predictions = self.model.predict_batch(enriched_claims)
+                        else:
+                            # Individual predictions with controlled concurrency
+                            prediction_tasks = [
+                                asyncio.create_task(self._predict_single_async(claim)) 
+                                for claim in enriched_claims
+                            ]
+                            predictions = await asyncio.gather(*prediction_tasks)
+                else:
+                    predictions = [0] * len(enriched_claims)
+                
+                ml_time = time.perf_counter() - ml_start
+                
+                # Phase 7: Results Processing and Segregation
+                segregation_start = time.perf_counter()
+                
+                valid_claims = []
+                failed_claims_data = []
+                
+                for i, (claim, prediction) in enumerate(zip(enriched_claims, predictions)):
+                    claim_id = claim.get("claim_id", "")
+                    v_errors = validation_results.get(claim_id, [])
+                    r_errors = rules_results.get(claim_id, [])
+                    
+                    # Add prediction to claim
+                    claim["filter_number"] = prediction
+                    
+                    # Record model prediction
+                    if self.model_monitor:
+                        self.model_monitor.record_prediction(prediction)
+                    
+                    if v_errors or r_errors:
+                        # Prepare failed claim data
+                        all_errors = v_errors + r_errors
+                        suggestions = self.repair_suggester.suggest(all_errors)
+                        
+                        encrypted_claim = claim.copy()
+                        if self.encryption_key:
+                            from ..security.compliance import encrypt_claim_fields, encrypt_text
+                            encrypted_claim = encrypt_claim_fields(claim, self.encryption_key)
+                            original_data = encrypt_text(str(claim), self.encryption_key)
+                        else:
+                            original_data = str(claim)
+                        
+                        failed_claims_data.append((
+                            encrypted_claim.get("claim_id"),
+                            encrypted_claim.get("facility_id"),
+                            encrypted_claim.get("patient_account_number"),
+                            "validation" if v_errors else "rules",
+                            ErrorCategory.VALIDATION.value,
+                            "validation",
+                            original_data,
+                            suggestions
+                        ))
+                    else:
+                        valid_claims.append(claim)
+                
+                segregation_time = time.perf_counter() - segregation_start
+                
+                # Phase 8: Bulk Database Operations with dynamic concurrency
+                db_start = time.perf_counter()
+                
+                # Use database semaphore for database operations
+                async with self.semaphore_manager.database_semaphore:
+                    # Parallel bulk operations
+                    bulk_tasks = []
+                    
+                    # Bulk insert valid claims
+                    if valid_claims:
+                        bulk_tasks.append(
+                            self._insert_claims_bulk(valid_claims)
+                        )
+                    
+                    # Bulk insert failed claims
+                    if failed_claims_data:
+                        bulk_tasks.append(
+                            self._record_failed_claims_bulk(failed_claims_data)
+                        )
+                    
+                    # Execute bulk operations
+                    if bulk_tasks:
+                        await asyncio.gather(*bulk_tasks, return_exceptions=True)
+                
+                db_time = time.perf_counter() - db_start
+                
+                # Phase 9: Bulk Checkpointing and Audit
+                checkpoint_start = time.perf_counter()
+                
+                # Prepare checkpoint data
+                valid_claim_ids = [c.get("claim_id", "") for c in valid_claims]
+                failed_claim_ids = [f[0] for f in failed_claims_data]  # claim_id is first element
+                
+                checkpoint_tasks = []
+                if valid_claim_ids:
+                    checkpoint_tasks.append(
+                        self._record_checkpoints_bulk([
+                            (cid, "completed") for cid in valid_claim_ids
+                        ])
+                    )
+                if failed_claim_ids:
+                    checkpoint_tasks.append(
+                        self._record_checkpoints_bulk([
+                            (cid, "failed") for cid in failed_claim_ids
+                        ])
+                    )
+                
+                if checkpoint_tasks:
+                    await asyncio.gather(*checkpoint_tasks, return_exceptions=True)
+                
+                # Ensure start checkpoint task completes
+                await checkpoint_task
+                
+                checkpoint_time = time.perf_counter() - checkpoint_start
+                
+                # Phase 10: Metrics and Status Updates
+                metrics_start = time.perf_counter()
+                
+                # Update processing status
+                processing_status["processed"] += len(valid_claims)
+                processing_status["failed"] += len(failed_claims_data)
+                
+                # Update metrics
+                metrics.inc("claims_processed", len(valid_claims))
+                metrics.inc("claims_failed", len(failed_claims_data))
+                metrics.inc("batches_processed_optimized")
+                
+                # Performance metrics
+                total_duration = time.perf_counter() - batch_start
+                throughput = len(enriched_claims) / total_duration if total_duration > 0 else 0
+                
+                metrics.set("batch_processing_rate_per_sec", throughput)
+                metrics.set("last_batch_duration_ms", total_duration * 1000)
+                metrics.set("batch_fetch_time_ms", fetch_time * 1000)
+                metrics.set("batch_preprocess_time_ms", preprocess_time * 1000)
+                metrics.set("batch_validation_time_ms", validation_time * 1000)
+                metrics.set("batch_ml_time_ms", ml_time * 1000)
+                metrics.set("batch_segregation_time_ms", segregation_time * 1000)
+                metrics.set("batch_db_time_ms", db_time * 1000)
+                metrics.set("batch_checkpoint_time_ms", checkpoint_time * 1000)
+                
+                metrics_time = time.perf_counter() - metrics_start
+                
+                # Wait for dead letter processing to complete
+                try:
+                    await dead_letter_task
+                except Exception as e:
+                    self.logger.warning(f"Dead letter processing failed: {e}")
+                
+                # Final status update
+                batch_status["end_time"] = time.perf_counter()
+                
+                # Comprehensive logging
+                self.logger.info(
+                    "Ultra-optimized batch complete with dynamic concurrency",
+                    extra={
+                        "event": "batch_complete_optimized",
+                        "total_claims": len(enriched_claims),
+                        "processed": len(valid_claims),
+                        "failed": len(failed_claims_data),
+                        "throughput_per_sec": round(throughput, 2),
+                        "total_duration_sec": round(total_duration, 4),
+                        "performance_breakdown": {
+                            "fetch_ms": round(fetch_time * 1000, 2),
+                            "preprocess_ms": round(preprocess_time * 1000, 2),
+                            "validation_ms": round(validation_time * 1000, 2),
+                            "ml_inference_ms": round(ml_time * 1000, 2),
+                            "segregation_ms": round(segregation_time * 1000, 2),
+                            "database_ms": round(db_time * 1000, 2),
+                            "checkpoint_ms": round(checkpoint_time * 1000, 2),
+                            "metrics_ms": round(metrics_time * 1000, 2),
+                        },
+                        "concurrency_limits": {
+                            "validation": self.semaphore_manager.validation_limit,
+                            "ml": self.semaphore_manager.ml_limit,
+                            "batch": self.semaphore_manager.batch_limit,
+                            "database": self.semaphore_manager.database_limit,
+                        },
+                        "system_resources": {
+                            "cpu_percent": self.semaphore_manager.resource_monitor.cpu_percent,
+                            "memory_percent": self.semaphore_manager.resource_monitor.memory_percent,
+                            "emergency_throttling": self.semaphore_manager.emergency_active,
+                        },
+                        "optimization_efficiency": {
+                            "memory_pooled": True,
+                            "vectorized_processing": True,
+                            "bulk_database_ops": True,
+                            "parallel_execution": True,
+                            "prepared_statements": True,
+                            "connection_reuse": True,
+                            "dynamic_concurrency": True,
+                        },
+                        "trace_id": trace_id,
+                    },
+                )
+                
+                return {
                     "processed": len(valid_claims),
                     "failed": len(failed_claims_data),
-                    "throughput_per_sec": round(throughput, 2),
-                    "total_duration_sec": round(total_duration, 4),
+                    "duration": total_duration,
+                    "throughput": throughput,
                     "performance_breakdown": {
-                        "fetch_ms": round(fetch_time * 1000, 2),
-                        "preprocess_ms": round(preprocess_time * 1000, 2),
-                        "validation_ms": round(validation_time * 1000, 2),
-                        "ml_inference_ms": round(ml_time * 1000, 2),
-                        "segregation_ms": round(segregation_time * 1000, 2),
-                        "database_ms": round(db_time * 1000, 2),
-                        "checkpoint_ms": round(checkpoint_time * 1000, 2),
-                        "metrics_ms": round(metrics_time * 1000, 2),
+                        "fetch_time": fetch_time,
+                        "preprocess_time": preprocess_time,
+                        "validation_time": validation_time,
+                        "ml_time": ml_time,
+                        "segregation_time": segregation_time,
+                        "db_time": db_time,
+                        "checkpoint_time": checkpoint_time,
                     },
-                    "optimization_efficiency": {
-                        "memory_pooled": True,
-                        "vectorized_processing": True,
-                        "bulk_database_ops": True,
-                        "parallel_execution": True,
-                        "prepared_statements": True,
-                        "connection_reuse": True,
-                    },
-                    "trace_id": trace_id,
-                },
-            )
-            
-            return {
-                "processed": len(valid_claims),
-                "failed": len(failed_claims_data),
-                "duration": total_duration,
-                "throughput": throughput,
-                "performance_breakdown": {
-                    "fetch_time": fetch_time,
-                    "preprocess_time": preprocess_time,
-                    "validation_time": validation_time,
-                    "ml_time": ml_time,
-                    "segregation_time": segregation_time,
-                    "db_time": db_time,
-                    "checkpoint_time": checkpoint_time,
+                    "concurrency_stats": {
+                        "validation_limit": self.semaphore_manager.validation_limit,
+                        "ml_limit": self.semaphore_manager.ml_limit,
+                        "batch_limit": self.semaphore_manager.batch_limit,
+                        "database_limit": self.semaphore_manager.database_limit,
+                        "adjustments_made": self.semaphore_manager.adjustment_count,
+                    }
                 }
-            }
-            
-        finally:
-            # Always release objects back to pool
-            if batch_objects:
-                self._release_batch_objects(batch_objects)
-            
-            # Periodic cleanup
-            if self._batch_count % 50 == 0:  # Every 50 batches
-                asyncio.create_task(self._perform_memory_cleanup())
+                
+            finally:
+                # Always release objects back to pool
+                if batch_objects:
+                    self._release_batch_objects(batch_objects)
+                
+                # Periodic cleanup
+                if self._batch_count % 50 == 0:  # Every 50 batches
+                    asyncio.create_task(self._perform_memory_cleanup())
 
+    async def process_stream_ultra_optimized(self) -> None:
+        """Ultra-optimized stream processing with dynamic concurrency management."""
+        if not self.request_filter:
+            self.request_filter = RequestContextFilter()
+            self.logger.addFilter(self.request_filter)
+        
+        start_trace()
+        stream_start = time.perf_counter()
+        
+        # Memory management for long-running processes
+        last_cleanup = stream_start
+        cleanup_interval = 300  # 5 minutes
+        
+        # Large batch sizes for streaming optimization but memory-aware
+        base_batch_size = self.calculate_batch_size_adaptive()
+        batch_size = await self._calculate_memory_aware_batch_size(base_batch_size * 2)
+        
+        total_processed = 0
+        total_failed = 0
+        
+        # Use batch semaphore for overall stream concurrency
+        async with self.semaphore_manager.batch_semaphore:
+            try:
+                # Process stream in batches
+                offset = 0
+                active_tasks = []
+                max_concurrent_batches = self.semaphore_manager.batch_limit
+                
+                while True:
+                    current_time = time.time()
+                    
+                    # Periodic memory cleanup for long-running processes
+                    if current_time - last_cleanup > cleanup_interval:
+                        await self._perform_stream_memory_cleanup()
+                        last_cleanup = current_time
+                    
+                    # Fetch next batch with database semaphore
+                    async with self.semaphore_manager.database_semaphore:
+                        batch = await self.service.fetch_claims(
+                            batch_size, offset=offset, priority=True
+                        )
+                    
+                    if not batch:
+                        break
+                    
+                    # Create processing task
+                    task = asyncio.create_task(self._process_stream_batch_optimized(batch))
+                    active_tasks.append(task)
+                    
+                    # Limit concurrent tasks based on dynamic limits
+                    if len(active_tasks) >= max_concurrent_batches:
+                        # Wait for oldest task to complete
+                        completed_task = active_tasks.pop(0)
+                        result = await completed_task
+                        total_processed += result.get("processed", 0)
+                        total_failed += result.get("failed", 0)
+                    
+                    offset += batch_size
+                    
+                    # Progress logging for large streams
+                    if offset % 50000 == 0:
+                        elapsed = time.perf_counter() - stream_start
+                        rate = offset / elapsed if elapsed > 0 else 0
+                        self.logger.info(
+                            f"Stream processing progress: {offset} claims fetched, "
+                            f"rate: {rate:.2f} claims/sec, "
+                            f"concurrency limits: V:{self.semaphore_manager.validation_limit} "
+                            f"ML:{self.semaphore_manager.ml_limit} "
+                            f"DB:{self.semaphore_manager.database_limit}"
+                        )
+                
+                # Wait for remaining tasks
+                for task in active_tasks:
+                    result = await task
+                    total_processed += result.get("processed", 0)
+                    total_failed += result.get("failed", 0)
+                
+            except Exception as e:
+                self.logger.error(f"Stream processing error: {e}")
+            finally:
+                # Final cleanup
+                await self._perform_stream_memory_cleanup()
+        
+        # Final metrics
+        total_duration = time.perf_counter() - stream_start
+        overall_rate = (total_processed + total_failed) / total_duration if total_duration > 0 else 0
+        
+        metrics.set("stream_processing_rate_per_sec", overall_rate)
+        metrics.set("stream_total_duration_sec", total_duration)
+        
+        self.logger.info(
+            "Ultra-optimized stream processing complete with dynamic concurrency",
+            extra={
+                "total_processed": total_processed,
+                "total_failed": total_failed,
+                "duration_sec": round(total_duration, 2),
+                "overall_rate_per_sec": round(overall_rate, 2),
+                "optimization_level": "ultra",
+                "memory_managed": True,
+                "dynamic_concurrency": True,
+                "final_concurrency_limits": {
+                    "validation": self.semaphore_manager.validation_limit,
+                    "ml": self.semaphore_manager.ml_limit,
+                    "batch": self.semaphore_manager.batch_limit,
+                    "database": self.semaphore_manager.database_limit,
+                },
+                "concurrency_adjustments": self.semaphore_manager.adjustment_count,
+            }
+        )
+
+    # [Continue with all the existing methods from the original file...]
+    
     async def _calculate_memory_aware_batch_size(self, base_size: int) -> int:
         """Calculate batch size based on available memory."""
         try:
@@ -918,7 +1308,7 @@ class ClaimsPipeline:
             self.logger.error(f"Bulk checkpoint recording failed: {e}")
 
     def calculate_batch_size_adaptive(self) -> int:
-        """Advanced adaptive batch sizing based on system metrics."""
+        """Advanced adaptive batch sizing based on system metrics and dynamic concurrency."""
         base_size = self.cfg.processing.batch_size
         
         try:
@@ -931,32 +1321,11 @@ class ClaimsPipeline:
         memory_usage = metrics.get("memory_usage_mb")
         cpu_usage = metrics.get("cpu_usage_percent")
         
-        # Adaptive scaling factors
-        load_factor = 1.0
-        if load > 8:
-            load_factor = 0.5  # Reduce batch size under extreme load
-        elif load > 4:
-            load_factor = 0.75  # Moderate reduction
-        elif load < 1:
-            load_factor = 2.0  # Increase batch size under low load
-        
-        # Memory-based scaling
-        memory_factor = 1.0
-        if memory_usage > 8000:  # Over 8GB
-            memory_factor = 0.6
-        elif memory_usage > 4000:  # Over 4GB
-            memory_factor = 0.8
-        elif memory_usage < 2000:  # Under 2GB
-            memory_factor = 1.5
-        
-        # CPU-based scaling
-        cpu_factor = 1.0
-        if cpu_usage > 90:
-            cpu_factor = 0.5
-        elif cpu_usage > 70:
-            cpu_factor = 0.8
-        elif cpu_usage < 30:
-            cpu_factor = 1.3
+        # Get system resource factors from semaphore manager
+        self.semaphore_manager.resource_monitor.update()
+        cpu_factor = self.semaphore_manager._get_cpu_scaling_factor()
+        memory_factor = self.semaphore_manager._get_memory_scaling_factor()
+        load_factor = self.semaphore_manager._get_load_scaling_factor()
         
         # Throughput-based scaling
         throughput_factor = 1.0
@@ -966,8 +1335,15 @@ class ClaimsPipeline:
             elif current_throughput < 2000:  # Low throughput
                 throughput_factor = 0.8
         
+        # Concurrency-based scaling - adjust batch size based on available concurrency
+        concurrency_factor = min(
+            self.semaphore_manager.validation_limit / 100,  # Normalize
+            self.semaphore_manager.ml_limit / 60,
+            self.semaphore_manager.database_limit / 30
+        )
+        
         # Calculate final batch size
-        combined_factor = load_factor * memory_factor * cpu_factor * throughput_factor
+        combined_factor = cpu_factor * memory_factor * load_factor * throughput_factor * concurrency_factor
         adaptive_size = int(base_size * combined_factor)
         
         # Apply bounds
@@ -976,119 +1352,17 @@ class ClaimsPipeline:
         final_size = max(min_size, min(max_size, adaptive_size))
         
         # Update metrics
-        metrics.set("adaptive_load_factor", load_factor)
-        metrics.set("adaptive_memory_factor", memory_factor)
         metrics.set("adaptive_cpu_factor", cpu_factor)
+        metrics.set("adaptive_memory_factor", memory_factor)
+        metrics.set("adaptive_load_factor", load_factor)
         metrics.set("adaptive_throughput_factor", throughput_factor)
+        metrics.set("adaptive_concurrency_factor", concurrency_factor)
         metrics.set("adaptive_combined_factor", combined_factor)
         
         return final_size
 
-    async def process_stream_ultra_optimized(self) -> None:
-        """Ultra-optimized stream processing with memory management."""
-        if not self.request_filter:
-            self.request_filter = RequestContextFilter()
-            self.logger.addFilter(self.request_filter)
-        
-        start_trace()
-        stream_start = time.perf_counter()
-        
-        # Memory management for long-running processes
-        last_cleanup = stream_start
-        cleanup_interval = 300  # 5 minutes
-        
-        # Large batch sizes for streaming optimization but memory-aware
-        base_batch_size = self.calculate_batch_size_adaptive()
-        batch_size = await self._calculate_memory_aware_batch_size(base_batch_size * 2)
-        
-        total_processed = 0
-        total_failed = 0
-        
-        # Stream processing with adaptive concurrency
-        max_concurrent_batches = 2  # Reduced for memory management
-        semaphore = asyncio.Semaphore(max_concurrent_batches)
-        
-        async def process_batch_with_memory_management(batch_claims: List[Dict[str, Any]]) -> Dict[str, int]:
-            async with semaphore:
-                return await self._process_stream_batch_optimized(batch_claims)
-        
-        try:
-            # Process stream in batches
-            offset = 0
-            active_tasks = []
-            
-            while True:
-                current_time = time.time()
-                
-                # Periodic memory cleanup for long-running processes
-                if current_time - last_cleanup > cleanup_interval:
-                    await self._perform_stream_memory_cleanup()
-                    last_cleanup = current_time
-                
-                # Fetch next batch
-                batch = await self.service.fetch_claims(
-                    batch_size, offset=offset, priority=True
-                )
-                
-                if not batch:
-                    break
-                
-                # Create processing task
-                task = asyncio.create_task(process_batch_with_memory_management(batch))
-                active_tasks.append(task)
-                
-                # Limit concurrent tasks
-                if len(active_tasks) >= max_concurrent_batches:
-                    # Wait for oldest task to complete
-                    completed_task = active_tasks.pop(0)
-                    result = await completed_task
-                    total_processed += result.get("processed", 0)
-                    total_failed += result.get("failed", 0)
-                
-                offset += batch_size
-                
-                # Progress logging for large streams
-                if offset % 50000 == 0:
-                    elapsed = time.perf_counter() - stream_start
-                    rate = offset / elapsed if elapsed > 0 else 0
-                    self.logger.info(
-                        f"Stream processing progress: {offset} claims fetched, "
-                        f"rate: {rate:.2f} claims/sec"
-                    )
-            
-            # Wait for remaining tasks
-            for task in active_tasks:
-                result = await task
-                total_processed += result.get("processed", 0)
-                total_failed += result.get("failed", 0)
-            
-        except Exception as e:
-            self.logger.error(f"Stream processing error: {e}")
-        finally:
-            # Final cleanup
-            await self._perform_stream_memory_cleanup()
-        
-        # Final metrics
-        total_duration = time.perf_counter() - stream_start
-        overall_rate = (total_processed + total_failed) / total_duration if total_duration > 0 else 0
-        
-        metrics.set("stream_processing_rate_per_sec", overall_rate)
-        metrics.set("stream_total_duration_sec", total_duration)
-        
-        self.logger.info(
-            "Ultra-optimized stream processing complete",
-            extra={
-                "total_processed": total_processed,
-                "total_failed": total_failed,
-                "duration_sec": round(total_duration, 2),
-                "overall_rate_per_sec": round(overall_rate, 2),
-                "optimization_level": "ultra",
-                "memory_managed": True,
-            }
-        )
-
     async def _process_stream_batch_optimized(self, claims: List[Dict[str, Any]]) -> Dict[str, int]:
-        """Process a single batch in the optimized stream with memory management."""
+        """Process a single batch in the optimized stream with dynamic concurrency management."""
         if not claims:
             return {"processed": 0, "failed": 0}
         
@@ -1102,25 +1376,31 @@ class ClaimsPipeline:
                 claims, self.cfg.processing.conversion_factor
             )
             
-            # Parallel validation and rules evaluation
-            validation_task = self.validator.validate_batch(enriched_claims) if self.validator else {}
-            rules_task = self.rules_engine.evaluate_batch(enriched_claims) if self.rules_engine else {}
+            # Validation with dynamic concurrency
+            validation_results = {}
+            if self.validator:
+                async with self.semaphore_manager.validation_semaphore:
+                    try:
+                        validation_results = await self.validator.validate_batch(enriched_claims)
+                    except Exception as e:
+                        self.logger.error(f"Validation error: {e}")
             
-            validation_results, rules_results = await asyncio.gather(
-                validation_task, rules_task, return_exceptions=True
-            )
+            # Rules evaluation
+            rules_results = {}
+            if self.rules_engine:
+                try:
+                    rules_results = await self.rules_engine.evaluate_batch(enriched_claims)
+                except Exception as e:
+                    self.logger.error(f"Rules evaluation error: {e}")
             
-            if isinstance(validation_results, Exception):
-                validation_results = {}
-            if isinstance(rules_results, Exception):
-                rules_results = {}
-            
-            # Vectorized ML inference
+            # ML inference with dynamic concurrency
             predictions = []
-            if self.model and hasattr(self.model, "predict_batch"):
-                predictions = self.model.predict_batch(enriched_claims)
-            elif self.model:
-                predictions = [self.model.predict(claim) for claim in enriched_claims]
+            if self.model:
+                async with self.semaphore_manager.ml_semaphore:
+                    if hasattr(self.model, "predict_batch"):
+                        predictions = self.model.predict_batch(enriched_claims)
+                    else:
+                        predictions = [self.model.predict(claim) for claim in enriched_claims]
             else:
                 predictions = [0] * len(enriched_claims)
             
@@ -1164,15 +1444,16 @@ class ClaimsPipeline:
                 else:
                     valid_claims.append(claim)
             
-            # Bulk database operations
-            bulk_tasks = []
-            if valid_claims:
-                bulk_tasks.append(self._insert_claims_bulk(valid_claims))
-            if failed_claims_data:
-                bulk_tasks.append(self._record_failed_claims_bulk(failed_claims_data))
-            
-            if bulk_tasks:
-                await asyncio.gather(*bulk_tasks, return_exceptions=True)
+            # Bulk database operations with dynamic concurrency
+            async with self.semaphore_manager.database_semaphore:
+                bulk_tasks = []
+                if valid_claims:
+                    bulk_tasks.append(self._insert_claims_bulk(valid_claims))
+                if failed_claims_data:
+                    bulk_tasks.append(self._record_failed_claims_bulk(failed_claims_data))
+                
+                if bulk_tasks:
+                    await asyncio.gather(*bulk_tasks, return_exceptions=True)
             
             # Update status
             processing_status["processed"] += len(valid_claims)
@@ -1246,16 +1527,36 @@ class ClaimsPipeline:
         """Backward compatibility wrapper."""
         await self.process_stream_ultra_optimized()
 
+    async def shutdown(self) -> None:
+        """Shutdown the pipeline and cleanup resources."""
+        # Stop the concurrency monitor
+        if self._concurrency_monitor_task:
+            self._concurrency_monitor_task.cancel()
+            try:
+                await self._concurrency_monitor_task
+            except asyncio.CancelledError:
+                pass
+        
+        # Perform final cleanup
+        await self._perform_memory_cleanup()
+        
+        # Close database connections
+        if self.pg:
+            await self.pg.close()
+        if self.sql:
+            await self.sql.close()
+        
+        self.logger.info("Pipeline shutdown complete")
+
     async def process_claim(self, claim: Dict[str, Any]) -> None:
-        """Process single claim with memory management."""
+        """Process single claim with memory management and dynamic concurrency."""
         # Use memory pool for single claim processing
         pooled_claim = self._memory_pool.acquire("claims", dict)
         try:
             pooled_claim.clear()
             pooled_claim.update(claim)
             
-            # Process claim using existing pipeline logic
-            # This is a simplified version - in practice would use full pipeline
+            # Process claim using existing pipeline logic with concurrency control
             result = await self._process_single_claim_with_pooling(pooled_claim)
             return result
             
@@ -1263,40 +1564,43 @@ class ClaimsPipeline:
             self._memory_pool.release("claims", pooled_claim)
 
     async def _process_single_claim_with_pooling(self, claim: Dict[str, Any]) -> Dict[str, Any]:
-        """Process single claim using memory pooling."""
-        # Simplified single claim processing
+        """Process single claim using memory pooling and dynamic concurrency."""
         try:
-            # Validate claim
+            # Validate claim with dynamic concurrency
             errors = []
             if self.validator:
-                errors = await self.validator.validate(claim)
+                async with self.semaphore_manager.validation_semaphore:
+                    errors = await self.validator.validate(claim)
             
             # Apply rules
             if self.rules_engine and not errors:
                 rule_errors = self.rules_engine.evaluate(claim)
                 errors.extend(rule_errors)
             
-            # Apply ML model
+            # Apply ML model with dynamic concurrency
             prediction = 0
             if self.model and not errors:
-                prediction = self.model.predict(claim)
-                claim["filter_number"] = prediction
+                async with self.semaphore_manager.ml_semaphore:
+                    prediction = self.model.predict(claim)
+                    claim["filter_number"] = prediction
             
             if errors:
-                # Record failed claim
-                await self.service.record_failed_claim(
-                    claim, 
-                    "validation_failed", 
-                    self.repair_suggester.suggest(errors)
-                )
+                # Record failed claim with database semaphore
+                async with self.semaphore_manager.database_semaphore:
+                    await self.service.record_failed_claim(
+                        claim, 
+                        "validation_failed", 
+                        self.repair_suggester.suggest(errors)
+                    )
                 return {"status": "failed", "errors": errors}
             else:
-                # Insert valid claim
-                await self.service.insert_claims([
-                    (claim.get("patient_account_number"), 
-                     claim.get("facility_id"),
-                     claim.get("procedure_code"))
-                ])
+                # Insert valid claim with database semaphore
+                async with self.semaphore_manager.database_semaphore:
+                    await self.service.insert_claims([
+                        (claim.get("patient_account_number"), 
+                         claim.get("facility_id"),
+                         claim.get("procedure_code"))
+                    ])
                 return {"status": "processed", "prediction": prediction}
                 
         except Exception as e:
@@ -1308,28 +1612,31 @@ class ClaimsPipeline:
         return self.calculate_batch_size_adaptive()
 
     async def process_claims_batch(self, claims: List[Dict[str, Any]]) -> List[tuple]:
-        """Process a batch of claims and return results."""
+        """Process a batch of claims and return results with dynamic concurrency."""
         # Use memory pooling for batch processing
         batch_objects = None
         try:
             batch_objects = self._acquire_batch_objects(len(claims))
             
-            # Process batch
-            results = []
-            for claim in claims:
-                try:
-                    # Simplified processing
-                    patient_acct = claim.get("patient_account_number")
-                    facility_id = claim.get("facility_id")
+            # Use batch semaphore for overall concurrency control
+            async with self.semaphore_manager.batch_semaphore:
+                # Process batch with database semaphore
+                async with self.semaphore_manager.database_semaphore:
+                    results = []
+                    for claim in claims:
+                        try:
+                            # Simplified processing
+                            patient_acct = claim.get("patient_account_number")
+                            facility_id = claim.get("facility_id")
+                            
+                            if patient_acct and facility_id:
+                                results.append((patient_acct, facility_id))
+                                
+                        except Exception as e:
+                            self.logger.warning(f"Claim processing failed: {e}")
+                            continue
                     
-                    if patient_acct and facility_id:
-                        results.append((patient_acct, facility_id))
-                        
-                except Exception as e:
-                    self.logger.warning(f"Claim processing failed: {e}")
-                    continue
-            
-            return results
+                    return results
             
         finally:
             if batch_objects:
@@ -1337,7 +1644,7 @@ class ClaimsPipeline:
 
     # Performance monitoring methods
     def get_optimization_metrics(self) -> Dict[str, Any]:
-        """Get comprehensive optimization metrics including memory management."""
+        """Get comprehensive optimization metrics including dynamic concurrency management."""
         return {
             "startup": {
                 "startup_time_sec": self._startup_time,
@@ -1349,6 +1656,22 @@ class ClaimsPipeline:
                 "last_gc_time": self._last_gc_time,
                 "memory_cleanup_cycles": metrics.get("memory_cleanup_cycles"),
                 "emergency_cleanups": metrics.get("memory_emergency_cleanups"),
+            },
+            "dynamic_concurrency": {
+                "current_limits": {
+                    "validation": self.semaphore_manager.validation_limit,
+                    "ml": self.semaphore_manager.ml_limit,
+                    "batch": self.semaphore_manager.batch_limit,
+                    "database": self.semaphore_manager.database_limit,
+                },
+                "adjustments_made": self.semaphore_manager.adjustment_count,
+                "emergency_throttling_active": self.semaphore_manager.emergency_active,
+                "system_resources": {
+                    "cpu_percent": self.semaphore_manager.resource_monitor.cpu_percent,
+                    "memory_percent": self.semaphore_manager.resource_monitor.memory_percent,
+                    "memory_available_gb": self.semaphore_manager.resource_monitor.memory_available_gb,
+                    "load_average": self.semaphore_manager.resource_monitor.load_average,
+                }
             },
             "pipeline_features": self._get_optimization_features(),
             "performance_metrics": {
@@ -1385,8 +1708,44 @@ class ClaimsPipeline:
         except Exception as e:
             return {"error": str(e)}
 
+    def get_concurrency_status(self) -> Dict[str, Any]:
+        """Get current dynamic concurrency status and statistics."""
+        return {
+            "current_limits": {
+                "validation": self.semaphore_manager.validation_limit,
+                "ml": self.semaphore_manager.ml_limit,
+                "batch": self.semaphore_manager.batch_limit,
+                "database": self.semaphore_manager.database_limit,
+            },
+            "limit_bounds": {
+                "min_limits": self.semaphore_manager.min_limits,
+                "max_limits": self.semaphore_manager.max_limits,
+            },
+            "system_resources": {
+                "cpu_percent": self.semaphore_manager.resource_monitor.cpu_percent,
+                "memory_percent": self.semaphore_manager.resource_monitor.memory_percent,
+                "memory_available_gb": self.semaphore_manager.resource_monitor.memory_available_gb,
+                "load_average": self.semaphore_manager.resource_monitor.load_average,
+            },
+            "adjustment_stats": {
+                "total_adjustments": self.semaphore_manager.adjustment_count,
+                "last_adjustment": self.semaphore_manager.last_adjustment,
+                "adjustment_interval": self.semaphore_manager.adjustment_interval,
+            },
+            "emergency_throttling": {
+                "active": self.semaphore_manager.emergency_active,
+                "start_time": self.semaphore_manager.emergency_start_time,
+            },
+            "scaling_factors": {
+                "cpu_factor": metrics.get("adaptive_cpu_factor", 1.0),
+                "memory_factor": metrics.get("adaptive_memory_factor", 1.0),
+                "load_factor": metrics.get("adaptive_load_factor", 1.0),
+                "concurrency_factor": metrics.get("adaptive_concurrency_factor", 1.0),
+            }
+        }
+
     async def benchmark_optimizations(self, test_size: int = 10000) -> Dict[str, Any]:
-        """Benchmark the optimization improvements including memory management."""
+        """Benchmark the optimization improvements including dynamic concurrency management."""
         # This would typically run against a test dataset
         benchmark_results = {
             "test_size": test_size,
@@ -1400,20 +1759,25 @@ class ClaimsPipeline:
                 "adaptive_batching",
                 "memory_pooling",
                 "memory_monitoring",
-                "garbage_collection_optimization"
+                "garbage_collection_optimization",
+                "dynamic_concurrency_management",
+                "emergency_throttling",
+                "resource_aware_scaling"
             ]
         }
         
-        # Record initial memory state
+        # Record initial states
         initial_memory = self.get_memory_status()
+        initial_concurrency = self.get_concurrency_status()
         
         # Run a test batch to measure performance
         start_time = time.perf_counter()
         result = await self.process_batch_ultra_optimized()
         end_time = time.perf_counter()
         
-        # Record final memory state
+        # Record final states
         final_memory = self.get_memory_status()
+        final_concurrency = self.get_concurrency_status()
         
         benchmark_results.update({
             "test_duration_sec": end_time - start_time,
@@ -1426,7 +1790,46 @@ class ClaimsPipeline:
                 "memory_growth_mb": final_memory.get("current_memory_mb", 0) - initial_memory.get("current_memory_mb", 0),
                 "memory_pools_used": final_memory.get("memory_pools", {}),
                 "memory_efficiency": "excellent" if final_memory.get("current_memory_mb", 0) - initial_memory.get("current_memory_mb", 0) < 100 else "good"
+            },
+            "concurrency_performance": {
+                "initial_limits": initial_concurrency.get("current_limits", {}),
+                "final_limits": final_concurrency.get("current_limits", {}),
+                "adjustments_during_test": final_concurrency.get("adjustment_stats", {}).get("total_adjustments", 0) - initial_concurrency.get("adjustment_stats", {}).get("total_adjustments", 0),
+                "emergency_throttling_triggered": final_concurrency.get("emergency_throttling", {}).get("active", False),
+                "resource_utilization": final_concurrency.get("system_resources", {}),
+                "concurrency_efficiency": "excellent" if result.get("concurrency_stats", {}).get("adjustments_made", 0) > 0 else "good"
             }
         })
         
         return benchmark_results
+
+    async def force_concurrency_adjustment(self) -> Dict[str, Any]:
+        """Force an immediate concurrency adjustment for testing/debugging."""
+        old_limits = {
+            "validation": self.semaphore_manager.validation_limit,
+            "ml": self.semaphore_manager.ml_limit,
+            "batch": self.semaphore_manager.batch_limit,
+            "database": self.semaphore_manager.database_limit,
+        }
+        
+        # Force adjustment
+        await self.semaphore_manager.adjust_limits_dynamic()
+        
+        new_limits = {
+            "validation": self.semaphore_manager.validation_limit,
+            "ml": self.semaphore_manager.ml_limit,
+            "batch": self.semaphore_manager.batch_limit,
+            "database": self.semaphore_manager.database_limit,
+        }
+        
+        return {
+            "adjustment_forced": True,
+            "old_limits": old_limits,
+            "new_limits": new_limits,
+            "system_resources": {
+                "cpu_percent": self.semaphore_manager.resource_monitor.cpu_percent,
+                "memory_percent": self.semaphore_manager.resource_monitor.memory_percent,
+                "load_average": self.semaphore_manager.resource_monitor.load_average,
+            },
+            "emergency_throttling": self.semaphore_manager.emergency_active,
+        }

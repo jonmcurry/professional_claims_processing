@@ -1,48 +1,131 @@
+# Updated config.yaml with dynamic concurrency management
+
 postgresql:
-  host: localhost
+  host: "localhost"
   port: 5432
-  user: user
-  password: pass
-  database: staging_process
+  user: "claims_user"
+  password: "${POSTGRES_PASSWORD}"
+  database: "staging_process"
   replica_host: null
   replica_port: null
-  min_pool_size: 20
-  max_pool_size: 100
+  min_pool_size: 25
+  max_pool_size: 150
+
 sqlserver:
-  host: localhost
+  host: "localhost"
   port: 1433
-  user: user
-  password: pass
-  database: smart_pro_claims
-  pool_size: 20
-  min_pool_size: 20
-  max_pool_size: 40
+  user: "claims_user"
+  password: "${SQLSERVER_PASSWORD}"
+  database: "smart_pro_claims"
+  min_pool_size: 25
+  max_pool_size: 80
+  pool_size: 40
+
 processing:
-  batch_size: 1000
-  max_workers: 4
+  batch_size: 1500
+  max_workers: 8
   conversion_factor: 36.04
-  insert_workers: 2
-  fetcher_workers: 1
+  insert_workers: 4
+  fetcher_workers: 2
+
+# Dynamic Concurrency Configuration
+concurrency:
+  # Operating mode: conservative, balanced, aggressive, adaptive
+  mode: "adaptive"
+  
+  # How often to adjust limits (seconds)
+  adjustment_interval: 15
+  
+  # Initial limits (will be dynamically adjusted)
+  initial_validation_limit: 100
+  initial_ml_limit: 60
+  initial_batch_limit: 12
+  initial_database_limit: 30
+  initial_total_limit: 200
+  
+  # Minimum limits (safety bounds)
+  min_limits:
+    validation: 15
+    ml: 8
+    batch_processing: 3
+    database: 8
+    total: 35
+  
+  # Maximum limits (resource bounds)
+  max_limits:
+    validation: 300
+    ml: 150
+    batch_processing: 25
+    database: 80
+    total: 500
+  
+  # Performance thresholds for scaling decisions
+  cpu_thresholds:
+    low: 25
+    medium: 55
+    high: 80
+    critical: 92
+  
+  memory_thresholds:
+    low: 35
+    medium: 65
+    high: 82
+    critical: 92
+  
+  # Advanced settings
+  enable_performance_learning: true
+  enable_predictive_scaling: true
+  scaling_aggressiveness: 1.0  # 0.5 = conservative, 2.0 = aggressive
+  
+  # Emergency throttling
+  emergency_throttle:
+    enable: true
+    cpu_threshold: 95
+    memory_threshold: 95
+    throttle_factor: 0.3  # Reduce to 30% of current limits
+    recovery_time: 120  # seconds before attempting to scale back up
+
+# Resource Monitoring
+monitoring:
+  enable_system_monitoring: true
+  resource_check_interval: 5  # seconds
+  performance_history_size: 200
+  
+  # Alerting thresholds
+  alerts:
+    high_cpu_threshold: 85
+    high_memory_threshold: 85
+    low_throughput_threshold: 1000  # claims per second
+    high_error_rate_threshold: 0.05  # 5%
+
 security:
-  api_key: changeme
-  encryption_key: changeme
+  api_key: "${CLAIMS_API_KEY}"
+  encryption_key: "${ENCRYPTION_KEY}"
+
 cache:
-  redis_url: null
-  warm_rvu_codes: []
-  predictive_ahead: 2
+  redis_url: "${REDIS_URL}"
+  warm_rvu_codes: ["99213", "99214", "99215", "99203", "99204", "99205"]
+  predictive_ahead: 3
+
 model:
-  path: model.joblib
-  version: "1"
+  path: "models/filter_model.joblib"
+  version: "2.1.0"
   ab_test_path: null
-  ab_test_ratio: 0.5
+  ab_test_ratio: 0.1
+
 logging:
-  level: INFO
-  aggregator_host: null
-  aggregator_port: null
-  component_levels: {}
-  rotate_mb: 10
-  backup_count: 5
-  sentry_dsn: null
+  level: "INFO"
+  component_levels:
+    "concurrency": "DEBUG"
+    "performance": "DEBUG"
+    "system": "INFO"
+  rotate_mb: 50
+  backup_count: 10
+  sentry_dsn: "${SENTRY_DSN}"
+
 features:
   enable_cache: true
   enable_model_monitor: true
+  enable_dynamic_concurrency: true
+  enable_performance_analytics: true
+  enable_predictive_scaling: true
