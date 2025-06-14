@@ -18,3 +18,7 @@ Apply the deployment manifest in `k8s/deployment.yaml`:
 kubectl apply -f k8s/deployment.yaml
 ```
 This creates a Deployment and Service exposing the API on port 80.
+
+The Deployment also configures liveness and readiness probes. Kubernetes
+checks `/liveness` and `/readiness` on port `8000` to ensure the service is
+running correctly.
