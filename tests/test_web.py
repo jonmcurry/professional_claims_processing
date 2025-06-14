@@ -132,6 +132,48 @@ def test_request_logging_middleware(client, caplog):
     )
 
 
+def test_invalid_api_key_audited(client, monkeypatch):
+    recorded = []
+
+    async def fake_record(db, table, record_id, operation, **kwargs):
+        recorded.append({
+            "table": table,
+            "record_id": record_id,
+            "operation": operation,
+            "values": kwargs.get("new_values"),
+        })
+
+    monkeypatch.setattr("src.utils.audit.record_audit_event", fake_record)
+    monkeypatch.setattr("src.web.app.record_audit_event", fake_record)
+
+    resp = client.get("/status", headers={"X-API-Key": "bad"})
+    assert resp.status_code == 401
+    assert recorded and recorded[0]["operation"] == "invalid_api_key"
+    assert recorded[0]["values"]["path"] == "/status"
+
+
+def test_forbidden_role_audited(client, monkeypatch):
+    recorded = []
+
+    async def fake_record(db, table, record_id, operation, **kwargs):
+        recorded.append({
+            "table": table,
+            "record_id": record_id,
+            "operation": operation,
+            "values": kwargs.get("new_values"),
+        })
+
+    monkeypatch.setattr("src.utils.audit.record_audit_event", fake_record)
+    monkeypatch.setattr("src.web.app.record_audit_event", fake_record)
+
+    resp = client.get(
+        "/metrics", headers={"X-API-Key": "test", "X-User-Role": "auditor"}
+    )
+    assert resp.status_code == 403
+    assert recorded and recorded[0]["operation"] == "unauthorized"
+    assert recorded[0]["values"]["role"] == "auditor"
+
+
 USER_ENDPOINTS = [
     "/api/failed_claims",
     "/status",
