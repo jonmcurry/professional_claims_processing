@@ -12,6 +12,7 @@ from ..utils.errors import DatabaseConnectionError, QueryError, CircuitBreakerOp
 from .base import BaseDatabase
 from ..config.config import PostgresConfig
 from ..monitoring.metrics import metrics
+from ..analysis.query_tracker import record as record_query
 
 
 class PostgresDatabase(BaseDatabase):
@@ -75,6 +76,9 @@ class PostgresDatabase(BaseDatabase):
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("postgres_query_ms", duration)
             metrics.inc("postgres_query_count")
+            record_query(query, duration)
+            record_query(query, duration)
+            record_query(query, duration)
             await self.circuit_breaker.record_success()
             result = [dict(row) for row in rows]
             self.query_cache.set(cache_key, result)

@@ -3,6 +3,15 @@
 ## Data Archival Strategy for Old Claims
 To keep the primary databases lean, claim records are retained in the active tables for 36 months. Older records are archived to long‑term storage.
 
+## Table Partitioning
+The `partition_historical_data.py` helper creates yearly partitions of the `claims`
+table so that lookups on recent data remain fast while older data is isolated.
+Run the script periodically to create new partitions for the current year:
+
+```bash
+python -m src.maintenance.partition_historical_data
+```
+
 ### Archival Process
 1. A nightly maintenance job runs `python -m src.maintenance.archive_old_claims`.
 2. Claims where `service_to_date` is more than 36 months old are exported to encrypted JSON Lines files under `archive/YYYY/MM/`.

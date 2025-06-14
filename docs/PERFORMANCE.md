@@ -27,9 +27,16 @@ the database's `EXPLAIN` command. Call `explain()` with a `PostgresDatabase`
 instance and use `has_seq_scan()` to detect sequential scans that may indicate
 missing indexes.
 
+### Automatic Index Recommendations
+`src/analysis/index_recommender.py` analyzes recorded query times and plans to
+suggest indexes for slow statements. Run the recommender after a workload to
+print suggested `CREATE INDEX` commands.
+
 ### Connection Pool Multiplexing
 Connection pool sizes can be tuned in `config.yaml`. Increasing the pool allows
 more tasks to share connections for greater throughput.
+`src/monitoring/pool_monitor.py` periodically records the number of connections
+in use so you can visualize pool saturation over time.
 
 ## Performance Tuning
 - **Batch Size**: The `processing.batch_size` setting controls how many claims are processed at once. Increase this value cautiously to avoid exhausting database connections.
