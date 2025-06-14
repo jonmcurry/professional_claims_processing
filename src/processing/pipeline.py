@@ -712,6 +712,20 @@ class ClaimsPipeline:
                         optimized_batch_size, priority=True
                     )
                 fetch_time = time.perf_counter() - fetch_start
+                self.semaphore_manager.resource_monitor.update()
+                self.logger.info(
+                    "Fetch stage complete",
+                    extra={
+                        "event": "fetch_complete",
+                        "performance_breakdown": {
+                            "fetch_ms": round(fetch_time * 1000, 2)
+                        },
+                        "system_resources": {
+                            "memory_percent": self.semaphore_manager.resource_monitor.memory_percent,
+                            "memory_available_gb": self.semaphore_manager.resource_monitor.memory_available_gb,
+                        },
+                    },
+                )
                 
                 batch_status["total"] = len(claims)
                 if not claims:
@@ -737,6 +751,20 @@ class ClaimsPipeline:
                 )
                 
                 preprocess_time = time.perf_counter() - preprocess_start
+                self.semaphore_manager.resource_monitor.update()
+                self.logger.info(
+                    "Preprocess stage complete",
+                    extra={
+                        "event": "preprocess_complete",
+                        "performance_breakdown": {
+                            "preprocess_ms": round(preprocess_time * 1000, 2)
+                        },
+                        "system_resources": {
+                            "memory_percent": self.semaphore_manager.resource_monitor.memory_percent,
+                            "memory_available_gb": self.semaphore_manager.resource_monitor.memory_available_gb,
+                        },
+                    },
+                )
                 
                 # Phase 5: Vectorized Validation and Rules with dynamic concurrency
                 validation_start = time.perf_counter()
@@ -771,6 +799,20 @@ class ClaimsPipeline:
                         rules_results = {}
                 
                 validation_time = time.perf_counter() - validation_start
+                self.semaphore_manager.resource_monitor.update()
+                self.logger.info(
+                    "Validation stage complete",
+                    extra={
+                        "event": "validation_complete",
+                        "performance_breakdown": {
+                            "validation_ms": round(validation_time * 1000, 2)
+                        },
+                        "system_resources": {
+                            "memory_percent": self.semaphore_manager.resource_monitor.memory_percent,
+                            "memory_available_gb": self.semaphore_manager.resource_monitor.memory_available_gb,
+                        },
+                    },
+                )
                 
                 # Phase 6: Vectorized ML Inference with dynamic concurrency
                 ml_start = time.perf_counter()
@@ -792,6 +834,20 @@ class ClaimsPipeline:
                     predictions = [0] * len(enriched_claims)
                 
                 ml_time = time.perf_counter() - ml_start
+                self.semaphore_manager.resource_monitor.update()
+                self.logger.info(
+                    "ML stage complete",
+                    extra={
+                        "event": "ml_complete",
+                        "performance_breakdown": {
+                            "ml_inference_ms": round(ml_time * 1000, 2)
+                        },
+                        "system_resources": {
+                            "memory_percent": self.semaphore_manager.resource_monitor.memory_percent,
+                            "memory_available_gb": self.semaphore_manager.resource_monitor.memory_available_gb,
+                        },
+                    },
+                )
                 
                 # Phase 7: Results Processing and Segregation
                 segregation_start = time.perf_counter()
@@ -864,6 +920,20 @@ class ClaimsPipeline:
                         await asyncio.gather(*bulk_tasks, return_exceptions=True)
                 
                 db_time = time.perf_counter() - db_start
+                self.semaphore_manager.resource_monitor.update()
+                self.logger.info(
+                    "Database stage complete",
+                    extra={
+                        "event": "database_complete",
+                        "performance_breakdown": {
+                            "database_ms": round(db_time * 1000, 2)
+                        },
+                        "system_resources": {
+                            "memory_percent": self.semaphore_manager.resource_monitor.memory_percent,
+                            "memory_available_gb": self.semaphore_manager.resource_monitor.memory_available_gb,
+                        },
+                    },
+                )
                 
                 # Phase 9: Bulk Checkpointing and Audit
                 checkpoint_start = time.perf_counter()
@@ -893,6 +963,20 @@ class ClaimsPipeline:
                 await checkpoint_task
                 
                 checkpoint_time = time.perf_counter() - checkpoint_start
+                self.semaphore_manager.resource_monitor.update()
+                self.logger.info(
+                    "Checkpoint stage complete",
+                    extra={
+                        "event": "checkpoint_complete",
+                        "performance_breakdown": {
+                            "checkpoint_ms": round(checkpoint_time * 1000, 2)
+                        },
+                        "system_resources": {
+                            "memory_percent": self.semaphore_manager.resource_monitor.memory_percent,
+                            "memory_available_gb": self.semaphore_manager.resource_monitor.memory_available_gb,
+                        },
+                    },
+                )
                 
                 # Phase 10: Metrics and Status Updates
                 metrics_start = time.perf_counter()
@@ -921,6 +1005,20 @@ class ClaimsPipeline:
                 metrics.set("batch_checkpoint_time_ms", checkpoint_time * 1000)
                 
                 metrics_time = time.perf_counter() - metrics_start
+                self.semaphore_manager.resource_monitor.update()
+                self.logger.info(
+                    "Metrics stage complete",
+                    extra={
+                        "event": "metrics_complete",
+                        "performance_breakdown": {
+                            "metrics_ms": round(metrics_time * 1000, 2)
+                        },
+                        "system_resources": {
+                            "memory_percent": self.semaphore_manager.resource_monitor.memory_percent,
+                            "memory_available_gb": self.semaphore_manager.resource_monitor.memory_available_gb,
+                        },
+                    },
+                )
                 
                 # Wait for dead letter processing to complete
                 try:
@@ -1044,10 +1142,26 @@ class ClaimsPipeline:
                         last_cleanup = current_time
                     
                     # Fetch next batch with database semaphore
+                    fetch_start = time.perf_counter()
                     async with self.semaphore_manager.database_semaphore:
                         batch = await self.service.fetch_claims(
                             batch_size, offset=offset, priority=True
                         )
+                    fetch_time = time.perf_counter() - fetch_start
+                    self.semaphore_manager.resource_monitor.update()
+                    self.logger.info(
+                        "Fetch stage complete",
+                        extra={
+                            "event": "fetch_complete",
+                            "performance_breakdown": {
+                                "fetch_ms": round(fetch_time * 1000, 2)
+                            },
+                            "system_resources": {
+                                "memory_percent": self.semaphore_manager.resource_monitor.memory_percent,
+                                "memory_available_gb": self.semaphore_manager.resource_monitor.memory_available_gb,
+                            },
+                        },
+                    )
                     
                     if not batch:
                         break
@@ -1382,11 +1496,28 @@ class ClaimsPipeline:
             batch_objects = self._acquire_batch_objects(len(claims))
             
             # Bulk RVU enrichment
+            enrich_start = time.perf_counter()
             enriched_claims = await self._enrich_claims_with_rvu(
                 claims, self.cfg.processing.conversion_factor
             )
+            enrich_time = time.perf_counter() - enrich_start
+            self.semaphore_manager.resource_monitor.update()
+            self.logger.info(
+                "Enrichment stage complete",
+                extra={
+                    "event": "enrichment_complete",
+                    "performance_breakdown": {
+                        "enrich_ms": round(enrich_time * 1000, 2)
+                    },
+                    "system_resources": {
+                        "memory_percent": self.semaphore_manager.resource_monitor.memory_percent,
+                        "memory_available_gb": self.semaphore_manager.resource_monitor.memory_available_gb,
+                    },
+                },
+            )
             
             # Validation with dynamic concurrency
+            validation_start = time.perf_counter()
             validation_results = {}
             if self.validator:
                 async with self.semaphore_manager.validation_semaphore:
@@ -1394,6 +1525,21 @@ class ClaimsPipeline:
                         validation_results = await self.validator.validate_batch(enriched_claims)
                     except Exception as e:
                         self.logger.error(f"Validation error: {e}")
+            validation_time = time.perf_counter() - validation_start
+            self.semaphore_manager.resource_monitor.update()
+            self.logger.info(
+                "Validation stage complete",
+                extra={
+                    "event": "validation_complete",
+                    "performance_breakdown": {
+                        "validation_ms": round(validation_time * 1000, 2)
+                    },
+                    "system_resources": {
+                        "memory_percent": self.semaphore_manager.resource_monitor.memory_percent,
+                        "memory_available_gb": self.semaphore_manager.resource_monitor.memory_available_gb,
+                    },
+                },
+            )
             
             # Rules evaluation
             rules_results = {}
@@ -1404,6 +1550,7 @@ class ClaimsPipeline:
                     self.logger.error(f"Rules evaluation error: {e}")
             
             # ML inference with dynamic concurrency
+            ml_start = time.perf_counter()
             predictions = []
             if self.model:
                 async with self.semaphore_manager.ml_semaphore:
@@ -1413,6 +1560,21 @@ class ClaimsPipeline:
                         predictions = [self.model.predict(claim) for claim in enriched_claims]
             else:
                 predictions = [0] * len(enriched_claims)
+            ml_time = time.perf_counter() - ml_start
+            self.semaphore_manager.resource_monitor.update()
+            self.logger.info(
+                "ML stage complete",
+                extra={
+                    "event": "ml_complete",
+                    "performance_breakdown": {
+                        "ml_inference_ms": round(ml_time * 1000, 2)
+                    },
+                    "system_resources": {
+                        "memory_percent": self.semaphore_manager.resource_monitor.memory_percent,
+                        "memory_available_gb": self.semaphore_manager.resource_monitor.memory_available_gb,
+                    },
+                },
+            )
             
             # Process results
             valid_claims = []
@@ -1455,15 +1617,31 @@ class ClaimsPipeline:
                     valid_claims.append(claim)
             
             # Bulk database operations with dynamic concurrency
+            db_start = time.perf_counter()
             async with self.semaphore_manager.database_semaphore:
                 bulk_tasks = []
                 if valid_claims:
                     bulk_tasks.append(self._insert_claims_bulk(valid_claims))
                 if failed_claims_data:
                     bulk_tasks.append(self._record_failed_claims_bulk(failed_claims_data))
-                
+
                 if bulk_tasks:
                     await asyncio.gather(*bulk_tasks, return_exceptions=True)
+            db_time = time.perf_counter() - db_start
+            self.semaphore_manager.resource_monitor.update()
+            self.logger.info(
+                "Database stage complete",
+                extra={
+                    "event": "database_complete",
+                    "performance_breakdown": {
+                        "database_ms": round(db_time * 1000, 2)
+                    },
+                    "system_resources": {
+                        "memory_percent": self.semaphore_manager.resource_monitor.memory_percent,
+                        "memory_available_gb": self.semaphore_manager.resource_monitor.memory_available_gb,
+                    },
+                },
+            )
             
             # Update status
             processing_status["processed"] += len(valid_claims)
