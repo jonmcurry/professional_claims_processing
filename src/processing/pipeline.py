@@ -85,6 +85,10 @@ class ClaimsPipeline:
         )
         if self.features.enable_cache and self.cfg.cache.warm_rvu_codes:
             await self.rvu_cache.warm_cache(self.cfg.cache.warm_rvu_codes)
+        facilities, classes = await self.service.load_validation_sets()
+        self.validator = ClaimValidator(facilities, classes)
+        top_codes = await self.service.top_rvu_codes()
+        await self.rvu_cache.warm_cache(top_codes)
         resource_monitor.start()
         pool_monitor.start(self.pg, self.sql)
 
@@ -104,7 +108,7 @@ class ClaimsPipeline:
     async def _checkpoint(self, claim_id: str, stage: str) -> None:
         """Record a processing checkpoint."""
         try:
-            await self.service.record_checkpoint(claim_id, stage)
+            await self.service.record_checkpoint(claim_id, stage, buffered=True)
         except Exception:
             self.logger.debug(
                 "checkpoint failed",
@@ -255,6 +259,7 @@ class ClaimsPipeline:
                 "duration_sec": round(duration, 4),
             },
         )
+        await self.service.flush_checkpoints()
 
     async def process_stream(self) -> None:
         """Continuously process claims using a staged parallel pipeline."""
@@ -390,6 +395,7 @@ class ClaimsPipeline:
         await validate_to_rules.join()
         await rules_to_predict.join()
         await predict_to_insert.join()
+        await self.service.flush_checkpoints()
 
     @retry_async()
     async def process_claim(self, claim: Dict[str, Any]) -> tuple[str, str] | None:
