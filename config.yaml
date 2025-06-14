@@ -91,6 +91,7 @@ concurrency:
 monitoring:
   enable_system_monitoring: true
   resource_check_interval: 5  # seconds
+  resource_log_interval: 60  # seconds
   performance_history_size: 200
   
   # Alerting thresholds

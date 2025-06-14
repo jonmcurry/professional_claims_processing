@@ -90,6 +90,7 @@ class MonitoringConfig:
     """Resource monitoring configuration."""
     enable_system_monitoring: bool = True
     resource_check_interval: int = 5
+    resource_log_interval: int = 60
     performance_history_size: int = 200
     alerts: AlertConfig = field(default_factory=AlertConfig)
 
@@ -293,6 +294,7 @@ def _create_monitoring_config(data: Dict[str, Any]) -> MonitoringConfig:
     return MonitoringConfig(
         enable_system_monitoring=monitoring_data.get("enable_system_monitoring", True),
         resource_check_interval=monitoring_data.get("resource_check_interval", 5),
+        resource_log_interval=monitoring_data.get("resource_log_interval", 60),
         performance_history_size=monitoring_data.get("performance_history_size", 200),
         alerts=alerts
     )
@@ -566,6 +568,7 @@ def save_config(cfg: AppConfig, path: str = "config.yaml") -> None:
         "monitoring": {
             "enable_system_monitoring": cfg.monitoring.enable_system_monitoring,
             "resource_check_interval": cfg.monitoring.resource_check_interval,
+            "resource_log_interval": cfg.monitoring.resource_log_interval,
             "performance_history_size": cfg.monitoring.performance_history_size,
             "alerts": {
                 "high_cpu_threshold": cfg.monitoring.alerts.high_cpu_threshold,
