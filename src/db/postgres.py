@@ -2,19 +2,20 @@ try:
     import asyncpg
 except Exception:  # pragma: no cover - allow missing dependency in tests
     asyncpg = None
+import asyncio
 import os
-from typing import Iterable, Any
 import time
+from typing import Any, Iterable
 
-from ..utils.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
-from ..utils.cache import InMemoryCache
-from ..utils.errors import DatabaseConnectionError, QueryError, CircuitBreakerOpenError
-
-from .base import BaseDatabase
+from ..analysis.query_tracker import record as record_query
 from ..config.config import PostgresConfig
 from ..monitoring.metrics import metrics
-from ..analysis.query_tracker import record as record_query
 from ..monitoring.stats import latencies
+from ..utils.cache import InMemoryCache
+from ..utils.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
+from ..utils.errors import (CircuitBreakerOpenError, DatabaseConnectionError,
+                            QueryError)
+from .base import BaseDatabase
 
 
 class PostgresDatabase(BaseDatabase):
@@ -49,6 +50,19 @@ class PostgresDatabase(BaseDatabase):
                     min_size=self.cfg.min_pool_size,
                     max_size=self.cfg.max_pool_size,
                 )
+
+            # Pre-warm connections
+            async def warm(pool: asyncpg.pool.Pool) -> None:
+                async def ping() -> None:
+                    async with pool.acquire() as conn:
+                        await conn.execute("SELECT 1")
+
+                await asyncio.gather(*[ping() for _ in range(self.cfg.max_pool_size)])
+
+            if self.pool:
+                await warm(self.pool)
+            if self.replica_pool:
+                await warm(self.replica_pool)
         except Exception as e:
             await self.circuit_breaker.record_failure()
             raise DatabaseConnectionError(str(e)) from e

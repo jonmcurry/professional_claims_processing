@@ -30,8 +30,8 @@ except Exception:  # pragma: no cover - fallback simple parser
 
     yaml = _SimpleYAML()
 import os
-from pathlib import Path
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass
@@ -43,8 +43,8 @@ class PostgresConfig:
     database: str
     replica_host: Optional[str] = None
     replica_port: Optional[int] = None
-    min_pool_size: int = 5
-    max_pool_size: int = 20
+    min_pool_size: int = 20
+    max_pool_size: int = 100
 
 
 @dataclass
@@ -54,9 +54,9 @@ class SQLServerConfig:
     user: str
     password: str
     database: str
-    pool_size: int = 5
-    min_pool_size: int = 5
-    max_pool_size: int = 10
+    pool_size: int = 20
+    min_pool_size: int = 20
+    max_pool_size: int = 40
 
 
 @dataclass
