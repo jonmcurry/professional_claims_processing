@@ -2,9 +2,7 @@ import asyncio
 import contextlib
 import os
 import time
-import contextlib
 from typing import Any, Dict, Iterable
-from typing import Any, Dict
 
 from ..config.config import AppConfig
 from ..db.postgres import PostgresDatabase
@@ -271,65 +269,91 @@ class ClaimsPipeline:
         fetch_to_validate: asyncio.Queue[Dict[str, Any] | None] = asyncio.Queue(
             maxsize=max_qsize
         )
-        validate_to_predict: asyncio.Queue[Dict[str, Any] | None] = asyncio.Queue(
+        validate_to_rules: asyncio.Queue[Dict[str, Any] | None] = asyncio.Queue(
+            maxsize=max_qsize
+        )
+        rules_to_predict: asyncio.Queue[Dict[str, Any] | None] = asyncio.Queue(
             maxsize=max_qsize
         )
         predict_to_insert: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue(
             maxsize=max_qsize
         )
 
+        fetch_workers = self.cfg.processing.fetcher_workers
         validate_workers = self.cfg.processing.max_workers
+        rule_workers = self.cfg.processing.max_workers
         predict_workers = self.cfg.processing.max_workers
         insert_workers = self.cfg.processing.insert_workers
 
-        async def fetcher() -> None:
-            """Fetch claims in batches with one-batch lookahead."""
-            offset = 0
-            next_batch = asyncio.create_task(
-                self.service.fetch_claims(batch_size, offset=offset, priority=True)
-            )
-            offset += batch_size
+        offset = 0
+        offset_lock = asyncio.Lock()
+
+        async def fetcher_worker() -> None:
+            nonlocal offset
             while True:
-                batch = await next_batch
+                async with offset_lock:
+                    start = offset
+                    offset += batch_size
+                batch = await self.service.fetch_claims(
+                    batch_size, offset=start, priority=True
+                )
                 if not batch:
                     break
-                next_batch = asyncio.create_task(
-                    self.service.fetch_claims(batch_size, offset=offset, priority=True)
-                )
-                offset += batch_size
                 await self._prefetch_rvu(batch)
                 for claim in batch:
                     await fetch_to_validate.put(claim)
+
+        async def run_fetchers() -> None:
+            tasks = [asyncio.create_task(fetcher_worker()) for _ in range(fetch_workers)]
+            await asyncio.gather(*tasks)
             for _ in range(validate_workers):
-                await fetch_to_validate.put(None)  # type: ignore
+                await fetch_to_validate.put(None)
 
         async def validate_worker() -> None:
             while True:
                 claim = await fetch_to_validate.get()
                 if claim is None:
                     fetch_to_validate.task_done()
-                    await validate_to_predict.put(None)
+                    await validate_to_rules.put(None)
                     break
                 res = await self._validate_stage(claim)
                 fetch_to_validate.task_done()
                 if res is not None:
-                    await validate_to_predict.put(res)
+                    await validate_to_rules.put(res)
+
+        rule_done = 0
+
+        async def rule_worker() -> None:
+            nonlocal rule_done
+            while True:
+                claim = await validate_to_rules.get()
+                if claim is None:
+                    validate_to_rules.task_done()
+                    rule_done += 1
+                    if rule_done == rule_workers:
+                        for _ in range(predict_workers):
+                            await rules_to_predict.put(None)
+                    break
+                res = await self._rules_stage(claim)
+                validate_to_rules.task_done()
+                if res is not None:
+                    await rules_to_predict.put(res)
 
         predict_done = 0
 
         async def predict_worker() -> None:
             nonlocal predict_done
             while True:
-                claim = await validate_to_predict.get()
+                claim = await rules_to_predict.get()
                 if claim is None:
-                    validate_to_predict.task_done()
+                    rules_to_predict.task_done()
                     predict_done += 1
                     if predict_done == predict_workers:
                         for _ in range(insert_workers):
                             await predict_to_insert.put(None)
                     break
                 res = await self._predict_stage(claim)
-                validate_to_predict.task_done()
+                rules_to_predict.task_done()
                 await predict_to_insert.put(res)
 
         async def insert_worker() -> None:
@@ -355,16 +379,16 @@ class ClaimsPipeline:
                     metrics.inc("claims_processed", len(buffer))
                     buffer = []
 
-        tasks = [asyncio.create_task(fetcher())]
-        tasks += [
-            asyncio.create_task(validate_worker()) for _ in range(validate_workers)
-        ]
+        tasks = [asyncio.create_task(run_fetchers())]
+        tasks += [asyncio.create_task(validate_worker()) for _ in range(validate_workers)]
+        tasks += [asyncio.create_task(rule_worker()) for _ in range(rule_workers)]
         tasks += [asyncio.create_task(predict_worker()) for _ in range(predict_workers)]
         tasks += [asyncio.create_task(insert_worker()) for _ in range(insert_workers)]
 
         await asyncio.gather(*tasks)
         await fetch_to_validate.join()
-        await validate_to_predict.join()
+        await validate_to_rules.join()
+        await rules_to_predict.join()
         await predict_to_insert.join()
 
     @retry_async()
@@ -373,27 +397,46 @@ class ClaimsPipeline:
         with start_span():
             await self._checkpoint(claim.get("claim_id", ""), "start")
             validation_errors = await self.validator.validate(claim)
-            rule_errors = self.rules_engine.evaluate(claim)
-            await self._checkpoint(claim.get("claim_id", ""), "validated")
-            if validation_errors or rule_errors:
+            if validation_errors:
+                await self._checkpoint(claim.get("claim_id", ""), "failed")
                 processing_status["failed"] += 1
                 metrics.inc("claims_failed")
-                suggestions = self.repair_suggester.suggest(
-                    validation_errors + rule_errors
-                )
+                suggestions = self.repair_suggester.suggest(validation_errors)
                 await self.service.record_failed_claim(
                     claim,
                     "validation",
                     suggestions,
                     category=ErrorCategory.VALIDATION.value,
                 )
-                await self._checkpoint(claim.get("claim_id", ""), "failed")
                 self.logger.error(
                     f"Claim {claim['claim_id']} failed validation",
                     extra={
                         "event": "claim_failed",
                         "claim_id": claim.get("claim_id"),
                         "reason": "validation",
+                        "claim": mask_claim_data(claim),
+                    },
+                )
+                return None
+            rule_errors = self.rules_engine.evaluate(claim)
+            await self._checkpoint(claim.get("claim_id", ""), "validated")
+            if rule_errors:
+                processing_status["failed"] += 1
+                metrics.inc("claims_failed")
+                suggestions = self.repair_suggester.suggest(rule_errors)
+                await self.service.record_failed_claim(
+                    claim,
+                    "rules",
+                    suggestions,
+                    category=ErrorCategory.VALIDATION.value,
+                )
+                await self._checkpoint(claim.get("claim_id", ""), "failed")
+                self.logger.error(
+                    f"Claim {claim['claim_id']} failed rules",
+                    extra={
+                        "event": "claim_failed",
+                        "claim_id": claim.get("claim_id"),
+                        "reason": "rules",
                         "claim": mask_claim_data(claim),
                     },
                 )
@@ -434,16 +477,14 @@ class ClaimsPipeline:
             return (claim["patient_account_number"], claim["facility_id"])
 
     async def _validate_stage(self, claim: Dict[str, Any]) -> Dict[str, Any] | None:
-        """Run validation and rules stage."""
-        assert self.validator and self.rules_engine
+        """Run the validation stage."""
+        assert self.validator
         await self._checkpoint(claim.get("claim_id", ""), "start")
-        validation_errors = await self.validator.validate(claim)
-        rule_errors = self.rules_engine.evaluate(claim)
-        await self._checkpoint(claim.get("claim_id", ""), "validated")
-        if validation_errors or rule_errors:
+        errors = await self.validator.validate(claim)
+        if errors:
             processing_status["failed"] += 1
             metrics.inc("claims_failed")
-            suggestions = self.repair_suggester.suggest(validation_errors + rule_errors)
+            suggestions = self.repair_suggester.suggest(errors)
             await self.service.record_failed_claim(
                 claim,
                 "validation",
@@ -457,6 +498,34 @@ class ClaimsPipeline:
                     "event": "claim_failed",
                     "claim_id": claim.get("claim_id"),
                     "reason": "validation",
+                    "claim": mask_claim_data(claim),
+                },
+            )
+            return None
+        return claim
+
+    async def _rules_stage(self, claim: Dict[str, Any]) -> Dict[str, Any] | None:
+        """Run the rules evaluation stage."""
+        assert self.rules_engine
+        rule_errors = self.rules_engine.evaluate(claim)
+        await self._checkpoint(claim.get("claim_id", ""), "validated")
+        if rule_errors:
+            processing_status["failed"] += 1
+            metrics.inc("claims_failed")
+            suggestions = self.repair_suggester.suggest(rule_errors)
+            await self.service.record_failed_claim(
+                claim,
+                "rules",
+                suggestions,
+                category=ErrorCategory.VALIDATION.value,
+            )
+            await self._checkpoint(claim.get("claim_id", ""), "failed")
+            self.logger.error(
+                f"Claim {claim['claim_id']} failed rules",
+                extra={
+                    "event": "claim_failed",
+                    "claim_id": claim.get("claim_id"),
+                    "reason": "rules",
                     "claim": mask_claim_data(claim),
                 },
             )

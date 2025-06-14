@@ -65,6 +65,7 @@ class ProcessingConfig:
     max_workers: int = 4
     conversion_factor: float = 36.04
     insert_workers: int = 2
+    fetcher_workers: int = 1
 
 
 @dataclass

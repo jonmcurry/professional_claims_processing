@@ -22,6 +22,7 @@ processing:
   max_workers: 4
   conversion_factor: 36.04
   insert_workers: 2
+  fetcher_workers: 1
 security:
   api_key: changeme
   encryption_key: changeme
