@@ -160,8 +160,17 @@ class ClaimsPipeline:
         codes = [c.get("procedure_code", "") for c in claims]
         rvu_map = await self.rvu_cache.get_many(codes) if self.rvu_cache else {}
 
+        predictions: list[int] = []
+        if self.model:
+            if hasattr(self.model, "predict_batch"):
+                predictions = self.model.predict_batch(claims)
+            else:
+                predictions = [self.model.predict(c) for c in claims]
+        else:
+            predictions = [0 for _ in claims]
+
         valid_rows: list[tuple[str, str]] = []
-        for claim in claims:
+        for claim, prediction in zip(claims, predictions):
             cid = claim.get("claim_id", "")
             await self._checkpoint(cid, "start")
             v_err = validations.get(cid, [])
@@ -188,7 +197,6 @@ class ClaimsPipeline:
                 )
                 continue
 
-            prediction = self.model.predict(claim) if self.model else 0
             if self.model_monitor:
                 self.model_monitor.record_prediction(prediction)
             await self._checkpoint(cid, "predicted")
@@ -309,7 +317,9 @@ class ClaimsPipeline:
                     await fetch_to_validate.put(claim)
 
         async def run_fetchers() -> None:
-            tasks = [asyncio.create_task(fetcher_worker()) for _ in range(fetch_workers)]
+            tasks = [
+                asyncio.create_task(fetcher_worker()) for _ in range(fetch_workers)
+            ]
             await asyncio.gather(*tasks)
             for _ in range(validate_workers):
                 await fetch_to_validate.put(None)
@@ -385,7 +395,9 @@ class ClaimsPipeline:
                     buffer = []
 
         tasks = [asyncio.create_task(run_fetchers())]
-        tasks += [asyncio.create_task(validate_worker()) for _ in range(validate_workers)]
+        tasks += [
+            asyncio.create_task(validate_worker()) for _ in range(validate_workers)
+        ]
         tasks += [asyncio.create_task(rule_worker()) for _ in range(rule_workers)]
         tasks += [asyncio.create_task(predict_worker()) for _ in range(predict_workers)]
         tasks += [asyncio.create_task(insert_worker()) for _ in range(insert_workers)]
