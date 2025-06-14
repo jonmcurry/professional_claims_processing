@@ -185,9 +185,11 @@ class ClaimsPipeline:
         start_trace()
         batch_size = self.calculate_batch_size()
 
-        fetch_to_validate: asyncio.Queue[Dict[str, Any]] = asyncio.Queue(maxsize=batch_size)
-        validate_to_predict: asyncio.Queue[Dict[str, Any] | None] = asyncio.Queue(maxsize=batch_size)
-        predict_to_insert: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue(maxsize=batch_size)
+        # Queues provide backpressure between pipeline stages
+        max_qsize = batch_size * 2
+        fetch_to_validate: asyncio.Queue[Dict[str, Any] | None] = asyncio.Queue(maxsize=max_qsize)
+        validate_to_predict: asyncio.Queue[Dict[str, Any] | None] = asyncio.Queue(maxsize=max_qsize)
+        predict_to_insert: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue(maxsize=max_qsize)
 
         validate_workers = self.cfg.processing.max_workers
         predict_workers = self.cfg.processing.max_workers
@@ -211,12 +213,18 @@ class ClaimsPipeline:
                 if res is not None:
                     await validate_to_predict.put(res)
 
+        predict_done = 0
+
         async def predict_worker() -> None:
+            nonlocal predict_done
             while True:
                 claim = await validate_to_predict.get()
                 if claim is None:
                     validate_to_predict.task_done()
-                    await predict_to_insert.put(None)
+                    predict_done += 1
+                    if predict_done == predict_workers:
+                        for _ in range(insert_workers):
+                            await predict_to_insert.put(None)
                     break
                 res = await self._predict_stage(claim)
                 validate_to_predict.task_done()
@@ -251,6 +259,9 @@ class ClaimsPipeline:
         tasks += [asyncio.create_task(insert_worker()) for _ in range(insert_workers)]
 
         await asyncio.gather(*tasks)
+        await fetch_to_validate.join()
+        await validate_to_predict.join()
+        await predict_to_insert.join()
 
     @retry_async()
     async def process_claim(
