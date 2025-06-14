@@ -130,3 +130,56 @@ def test_request_logging_middleware(client, caplog):
         r.message == "response" and getattr(r, "status", None) == 200
         for r in caplog.records
     )
+
+
+USER_ENDPOINTS = [
+    "/api/failed_claims",
+    "/status",
+    "/batch_status",
+    "/health",
+    "/readiness",
+]
+
+ADMIN_ENDPOINTS = [
+    "/metrics",
+    "/profiling/start",
+    "/profiling/stop",
+]
+
+
+@pytest.mark.parametrize("path", USER_ENDPOINTS)
+@pytest.mark.parametrize(
+    "role,expected",
+    [
+        (None, 200),
+        ("auditor", 200),
+        ("user", 200),
+        ("admin", 200),
+        ("bad", 403),
+    ],
+)
+def test_user_endpoint_permissions(client, path, role, expected):
+    headers = {"X-API-Key": "test"}
+    if role is not None:
+        headers["X-User-Role"] = role
+    resp = client.get(path, headers=headers)
+    assert resp.status_code == expected
+
+
+@pytest.mark.parametrize("path", ADMIN_ENDPOINTS)
+@pytest.mark.parametrize(
+    "role,expected",
+    [
+        (None, 200),
+        ("admin", 200),
+        ("user", 403),
+        ("auditor", 403),
+        ("bad", 403),
+    ],
+)
+def test_admin_endpoint_permissions(client, path, role, expected):
+    headers = {"X-API-Key": "test"}
+    if role is not None:
+        headers["X-User-Role"] = role
+    resp = client.get(path, headers=headers)
+    assert resp.status_code == expected

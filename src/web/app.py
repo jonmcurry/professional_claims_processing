@@ -97,13 +97,29 @@ def create_app(
             status_code=500, content={"detail": "Internal Server Error"}
         )
 
-    ROLE_LEVEL = {"auditor": 1, "user": 1, "admin": 2}
+    # Map of endpoint paths to allowed roles. Endpoints not listed are open to
+    # all roles.
+    role_permissions: dict[str, set[str]] = {
+        "/api/failed_claims": {"auditor", "user", "admin"},
+        "/failed_claims": {"auditor", "user", "admin"},
+        "/status": {"auditor", "user", "admin"},
+        "/batch_status": {"auditor", "user", "admin"},
+        "/health": {"auditor", "user", "admin"},
+        "/readiness": {"auditor", "user", "admin"},
+        "/metrics": {"admin"},
+        "/profiling/start": {"admin"},
+        "/profiling/stop": {"admin"},
+    }
 
-    def _check_role(required: str, role: str | None) -> None:
+    def _check_role(path: str, role: str | None) -> None:
+        """Validate that the provided role can access the given path."""
         if role is None:
+            # When no role header is provided, allow access for backward
+            # compatibility with internal tools.
             return
+        allowed = role_permissions.get(path, {"auditor", "user", "admin"})
         current = role or "user"
-        if ROLE_LEVEL.get(current, -1) < ROLE_LEVEL.get(required, 0):
+        if current not in allowed:
             raise HTTPException(status_code=403, detail="Forbidden")
 
     @app.middleware("http")
@@ -204,7 +220,7 @@ def create_app(
     ):
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
-        _check_role("user", role)
+        _check_role(request.url.path, role)
         rows = await sql.fetch(
             "SELECT TOP 100 * FROM failed_claims ORDER BY failed_at DESC"
         )
@@ -218,7 +234,7 @@ def create_app(
     ):
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
-        _check_role("user", role)
+        _check_role(request.url.path, role)
         rows = await sql.fetch(
             "SELECT TOP 100 * FROM failed_claims ORDER BY failed_at DESC"
         )
@@ -248,7 +264,7 @@ def create_app(
     ):
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
-        _check_role("user", role)
+        _check_role(request.url.path, role)
         from .status import sync_status
 
         return {"processing": processing_status, "sync": sync_status}
@@ -261,7 +277,7 @@ def create_app(
     ):
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
-        _check_role("user", role)
+        _check_role(request.url.path, role)
         return batch_status
 
     @app.get("/health")
@@ -272,7 +288,7 @@ def create_app(
     ):
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
-        _check_role("user", role)
+        _check_role(request.url.path, role)
         status = {"sqlserver": await sql.health_check()}
         if redis:
             status["redis"] = await redis.health_check()
@@ -288,7 +304,7 @@ def create_app(
     ):
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
-        _check_role("user", role)
+        _check_role(request.url.path, role)
         status = {
             "postgres": await pg.health_check(),
             "sqlserver": await sql.health_check(),
@@ -311,7 +327,7 @@ def create_app(
     ):
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
-        _check_role("admin", role)
+        _check_role(request.url.path, role)
         return metrics.as_dict()
 
     @app.get("/profiling/start")
@@ -322,7 +338,7 @@ def create_app(
     ):
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
-        _check_role("admin", role)
+        _check_role(request.url.path, role)
         start_profiling()
         return {"profiling": "started"}
 
@@ -334,7 +350,7 @@ def create_app(
     ):
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
-        _check_role("admin", role)
+        _check_role(request.url.path, role)
         stats = stop_profiling()
         return {"profiling": "stopped", "stats": stats}
 
