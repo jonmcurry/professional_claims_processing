@@ -83,6 +83,7 @@ class AlertConfig:
     high_memory_threshold: int = 85
     low_throughput_threshold: int = 1000
     high_error_rate_threshold: float = 0.05
+    email_recipients: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -288,7 +289,8 @@ def _create_monitoring_config(data: Dict[str, Any]) -> MonitoringConfig:
         high_cpu_threshold=alerts_data.get("high_cpu_threshold", 85),
         high_memory_threshold=alerts_data.get("high_memory_threshold", 85),
         low_throughput_threshold=alerts_data.get("low_throughput_threshold", 1000),
-        high_error_rate_threshold=alerts_data.get("high_error_rate_threshold", 0.05)
+        high_error_rate_threshold=alerts_data.get("high_error_rate_threshold", 0.05),
+        email_recipients=alerts_data.get("email_recipients", [])
     )
     
     return MonitoringConfig(
@@ -574,7 +576,8 @@ def save_config(cfg: AppConfig, path: str = "config.yaml") -> None:
                 "high_cpu_threshold": cfg.monitoring.alerts.high_cpu_threshold,
                 "high_memory_threshold": cfg.monitoring.alerts.high_memory_threshold,
                 "low_throughput_threshold": cfg.monitoring.alerts.low_throughput_threshold,
-                "high_error_rate_threshold": cfg.monitoring.alerts.high_error_rate_threshold
+                "high_error_rate_threshold": cfg.monitoring.alerts.high_error_rate_threshold,
+                "email_recipients": cfg.monitoring.alerts.email_recipients
             }
         },
         "security": {
