@@ -4,8 +4,7 @@ import json
 from ..db.postgres import PostgresDatabase
 from ..db.sql_server import SQLServerDatabase
 from ..monitoring.metrics import metrics
-from ..security.compliance import (decrypt_text, encrypt_claim_fields,
-                                   encrypt_text)
+from ..security.compliance import decrypt_text, encrypt_claim_fields, encrypt_text
 from ..utils.audit import record_audit_event
 from ..utils.priority_queue import PriorityClaimQueue
 
@@ -28,18 +27,53 @@ class ClaimService:
     async def fetch_claims(
         self, batch_size: int, offset: int = 0, priority: bool = False
     ) -> List[Dict[str, Any]]:
-        """Fetch a batch of claims optionally ordered by priority."""
-        order_clause = "ORDER BY priority DESC" if priority else ""
-        query = f"SELECT * FROM claims {order_clause} LIMIT $1 OFFSET $2"
+        """Fetch a batch of claims with associated line items."""
+        order_clause = "ORDER BY c.priority DESC" if priority else ""
+        query = (
+            "SELECT c.*, li.line_number, li.procedure_code AS li_procedure_code, "
+            "li.units AS li_units, li.charge_amount AS li_charge_amount, "
+            "li.service_from_date AS li_service_from_date, "
+            "li.service_to_date AS li_service_to_date "
+            "FROM claims c LEFT JOIN claims_line_items li ON c.claim_id = li.claim_id "
+            f"{order_clause} LIMIT $1 OFFSET $2"
+        )
         rows = await self.pg.fetch(query, batch_size, offset)
+        claims: Dict[str, Dict[str, Any]] = {}
+        line_keys = {
+            "line_number",
+            "li_procedure_code",
+            "li_units",
+            "li_charge_amount",
+            "li_service_from_date",
+            "li_service_to_date",
+        }
         for row in rows:
-            pr = int(row.get("priority", 0) or 0)
-            self.priority_queue.push(row, pr)
+            claim_id = row.get("claim_id")
+            if claim_id not in claims:
+                base = {k: row[k] for k in row.keys() if k not in line_keys}
+                base.setdefault("line_items", [])
+                claims[claim_id] = base
+            if any(k in row for k in line_keys) and row.get("line_number") is not None:
+                item = {
+                    "line_number": row.get("line_number"),
+                    "procedure_code": row.get("li_procedure_code")
+                    or row.get("procedure_code"),
+                    "units": row.get("li_units"),
+                    "charge_amount": row.get("li_charge_amount"),
+                    "service_from_date": row.get("li_service_from_date"),
+                    "service_to_date": row.get("li_service_to_date"),
+                }
+                claims[claim_id].setdefault("line_items", []).append(item)
+
+        for claim in claims.values():
+            pr = int(claim.get("priority", 0) or 0)
+            self.priority_queue.push(claim, pr)
+
         results: List[Dict[str, Any]] = []
         while len(results) < batch_size and len(self.priority_queue) > 0:
-            claim = self.priority_queue.pop()
-            if claim:
-                results.append(claim)
+            item = self.priority_queue.pop()
+            if item:
+                results.append(item)
         return results
 
     async def insert_claims(
