@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List
 
 
@@ -24,6 +26,13 @@ class FeaturePipeline:
         for step in self.steps:
             features.update(step(claim))
         return features
+
+    def run_batch(
+        self, claims: List[Dict[str, Any]], max_workers: int | None = None
+    ) -> List[Dict[str, float]]:
+        """Run the pipeline for a batch of claims in parallel."""
+        with ThreadPoolExecutor(max_workers=max_workers) as exc:
+            return list(exc.map(self.run, claims))
 
 
 default_feature_pipeline = FeaturePipeline([extract_features])

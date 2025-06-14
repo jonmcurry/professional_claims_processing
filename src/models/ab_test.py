@@ -1,12 +1,13 @@
 from __future__ import annotations
+
 import random
 from typing import Any, Dict, Protocol
+
 from ..monitoring.metrics import metrics
 
 
 class _Predictor(Protocol):
-    def predict(self, claim: Dict[str, Any]) -> int:
-        ...
+    def predict(self, claim: Dict[str, Any]) -> int: ...
 
 
 class ABTestModel:
@@ -24,6 +25,10 @@ class ABTestModel:
             return self.model_a.predict(claim)
         return self.model_b.predict(claim)
 
+    def predict_batch(self, claims: list[Dict[str, Any]]) -> list[int]:
+        """Predict a batch by routing each claim individually."""
+        return [self.predict(c) for c in claims]
+
 
 class ABTestManager:
     """Wrapper that tracks variant exposure metrics."""
@@ -39,3 +44,9 @@ class ABTestManager:
         metrics.inc(f"ab_exposure_{variant}")
         model = self.ab_model.model_a if use_a else self.ab_model.model_b
         return model.predict(claim)
+
+    def predict_batch(self, claims: list[Dict[str, Any]]) -> list[int]:
+        results = []
+        for c in claims:
+            results.append(self.predict(c))
+        return results
