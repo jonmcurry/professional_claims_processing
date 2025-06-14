@@ -149,13 +149,44 @@ class ClaimService:
 
     async def _process_audit_entries(self, entries: List) -> None:
         """Process audit entries asynchronously."""
-        for entry in entries:
+        if not entries:
+            return
+
+        container = self._memory_pool.acquire("audit_entries", list)
+
+        try:
+            container.clear()
+            container.extend(entries)
+
             try:
-                # Process each audit entry
-                # This is a simplified implementation
-                pass
+                await self.sql.execute_many_optimized(
+                    """INSERT INTO audit_log (
+                            table_name, record_id, operation, user_id,
+                            old_values, new_values, operation_timestamp, reason
+                        ) VALUES (?, ?, ?, ?, ?, ?, GETDATE(), ?)""",
+                    container,
+                    concurrency=4,
+                    batch_size=500,
+                )
             except Exception as e:
-                print(f"Audit entry processing failed: {e}")
+                print(f"Warning: Bulk audit log insert failed: {e}")
+                for row in container:
+                    try:
+                        await record_audit_event(
+                            self.sql,
+                            row[0],
+                            row[1],
+                            row[2],
+                            user_id=row[3] if len(row) > 3 else None,
+                            old_values=row[4] if len(row) > 4 else None,
+                            new_values=row[5] if len(row) > 5 else None,
+                            reason=row[6] if len(row) > 6 else None,
+                        )
+                    except Exception as e2:
+                        print(f"Audit entry processing failed: {e2}")
+
+        finally:
+            self._memory_pool.release("audit_entries", container)
 
     def _register_container(self, container: Any) -> None:
         """Register a container for lifecycle tracking."""
