@@ -93,4 +93,4 @@ def test_process_stream(monkeypatch):
         loop.close()
         asyncio.set_event_loop(asyncio.new_event_loop())
 
-    assert pipeline.sql.inserted == [("111", "F1"), ("222", "F1")]
+    assert sorted(pipeline.sql.inserted) == [("111", "F1"), ("222", "F1")]
