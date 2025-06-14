@@ -23,3 +23,12 @@ This project processes Protected Health Information (PHI). The following checkli
 - Document breach notification procedures and test them periodically.
 
 This checklist is not exhaustive but provides a baseline for integrating HIPAA requirements into the claims processing workflow.
+
+## Configuration Validation
+Run the automated HIPAA configuration check to ensure encryption and audit logging are enabled.
+
+```bash
+python -m src.security.hipaa_check
+```
+
+The command exits with an error if the active `config.yaml` does not meet the baseline security requirements.
