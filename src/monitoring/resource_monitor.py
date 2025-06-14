@@ -1,5 +1,7 @@
 from __future__ import annotations
 import asyncio
+import logging
+import time
 from typing import Optional
 
 try:
@@ -14,7 +16,9 @@ _task: Optional[asyncio.Task] = None
 _trending = TrendingTracker(window=60)
 
 
-async def _collect(interval: float) -> None:
+async def _collect(interval: float, log_interval: float) -> None:
+    logger = logging.getLogger("claims_processor")
+    last_log = time.time()
     while True:
         if psutil:
             cpu = float(psutil.cpu_percent())
@@ -27,16 +31,22 @@ async def _collect(interval: float) -> None:
             metrics.set("memory_usage_avg", _trending.moving_average("mem"))
             metrics.set("cpu_usage_trend", _trending.trend("cpu"))
             metrics.set("memory_usage_trend", _trending.trend("mem"))
+            now = time.time()
+            if now - last_log >= log_interval:
+                logger.info(
+                    "CPU usage: %.2f%%, Memory usage: %.2f MB", cpu, mem
+                )
+                last_log = now
         await asyncio.sleep(interval)
 
 
-def start(interval: float = 1.0) -> None:
+def start(interval: float = 1.0, log_interval: float = 60.0) -> None:
     """Start background resource monitoring."""
     global _task
     if _task:
         return
     loop = asyncio.get_event_loop()
-    _task = loop.create_task(_collect(interval))
+    _task = loop.create_task(_collect(interval, log_interval))
 
 
 def stop() -> None:

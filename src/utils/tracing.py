@@ -4,6 +4,7 @@ from contextlib import contextmanager
 
 trace_id_var: ContextVar[str] = ContextVar("trace_id", default="")
 span_id_var: ContextVar[str] = ContextVar("span_id", default="")
+correlation_id_var: ContextVar[str] = ContextVar("correlation_id", default="")
 
 
 def start_trace(trace_id: str | None = None) -> str:
@@ -37,3 +38,12 @@ def start_span(span_id: str | None = None):
         yield
     finally:
         span_id_var.reset(token)
+
+
+def get_traceparent() -> str:
+    """Return the current W3C traceparent header value."""
+    trace_id = trace_id_var.get("")
+    span_id = span_id_var.get("")
+    if trace_id and span_id:
+        return f"00-{trace_id}-{span_id}-01"
+    return ""

@@ -2,6 +2,7 @@ import gc
 import time
 import asyncio
 import os
+import logging
 from typing import Any, Dict, Iterable, List, Optional
 import weakref
 
@@ -22,8 +23,10 @@ from ..config.config import SQLServerConfig
 from ..monitoring.metrics import metrics
 from ..analysis.query_tracker import record as record_query
 from ..monitoring.stats import latencies
+from ..utils.tracing import get_traceparent
 from ..memory.memory_pool import sql_memory_pool
 
+logger = logging.getLogger("claims_processor")
 
 class MemoryMonitor:
     """SQL Server specific memory monitoring."""
@@ -130,6 +133,12 @@ class SQLServerDatabase(BaseDatabase):
         
         # Memory cleanup references
         self._cleanup_refs: List[weakref.ref] = []
+
+    def _with_traceparent(self, query: str, traceparent: str | None) -> str:
+        tp = traceparent or get_traceparent()
+        if tp:
+            return f"/* traceparent={tp} */ {query}"
+        return query
 
     async def connect(self, size: int | None = None) -> None:
         """Enhanced connection with aggressive pre-warming and optimization."""
@@ -327,6 +336,7 @@ class SQLServerDatabase(BaseDatabase):
         *,
         concurrency: int = 1,
         batch_size: int = 1000,
+        traceparent: str | None = None,
     ) -> int:
         """Execute many with adaptive memory management."""
         params_list = list(params_seq)
@@ -341,8 +351,10 @@ class SQLServerDatabase(BaseDatabase):
         
         # Calculate memory-safe batch size
         safe_batch_size = await self._calculate_safe_batch_size(len(params_list), batch_size)
-        
+
         total_processed = 0
+
+        query = self._with_traceparent(query, traceparent)
         
         # Process with memory monitoring
         for i in range(0, len(params_list), safe_batch_size):
@@ -389,8 +401,10 @@ class SQLServerDatabase(BaseDatabase):
 
     async def _process_chunk_with_memory_monitoring(self, query: str, chunk: List) -> int:
         """Process chunk with comprehensive memory monitoring."""
+        query = self._with_traceparent(query, traceparent)
         conn = await self._acquire()
         initial_memory = self._get_process_memory()
+        start = time.perf_counter()
         
         try:
             cursor = conn.cursor()
@@ -399,6 +413,16 @@ class SQLServerDatabase(BaseDatabase):
             conn.commit()
             row_count = cursor.rowcount if cursor.rowcount != -1 else len(chunk)
             cursor.close()
+
+            duration = (time.perf_counter() - start) * 1000
+            metrics.inc("sqlserver_query_ms", duration)
+            metrics.inc("sqlserver_query_count")
+            latencies.record("sqlserver_query", duration)
+            if duration > self.cfg.threshold_ms:
+                logger.warning(
+                    "slow_query",
+                    extra={"query": query, "duration_ms": duration},
+                )
             
             # Check memory growth
             final_memory = self._get_process_memory()
@@ -566,7 +590,11 @@ class SQLServerDatabase(BaseDatabase):
             return 0.0
 
     async def fetch_optimized_with_memory_management(
-        self, query: str, *params: Any, is_prepared: bool = False
+        self,
+        query: str,
+        *params: Any,
+        is_prepared: bool = False,
+        traceparent: str | None = None,
     ) -> Iterable[dict]:
         """Optimized fetch with comprehensive memory management."""
         self._operation_count += 1
@@ -578,6 +606,8 @@ class SQLServerDatabase(BaseDatabase):
         if not await self.circuit_breaker.allow():
             raise CircuitBreakerOpenError("SQLServer circuit open")
         
+        query = self._with_traceparent(query, traceparent)
+
         # Check cache first with memory management
         cache_key = f"query:{query}:{str(params)}"
         cached = await self._get_from_cache_with_memory_check(cache_key)
@@ -613,6 +643,11 @@ class SQLServerDatabase(BaseDatabase):
             if is_prepared:
                 metrics.inc("sqlserver_prepared_queries")
             latencies.record("sqlserver_query", duration)
+            if duration > self.cfg.threshold_ms:
+                logger.warning(
+                    "slow_query",
+                    extra={"query": query, "duration_ms": duration},
+                )
             record_query(query, duration)
             await self.circuit_breaker.record_success()
             
@@ -741,11 +776,21 @@ class SQLServerDatabase(BaseDatabase):
             metrics.set("sqlserver_pool_size", float(len(self.pool)))
 
     # Enhanced versions of existing methods with memory management
-    async def fetch(self, query: str, *params: Any) -> Iterable[dict]:
+    async def fetch(
+        self, query: str, *params: Any, traceparent: str | None = None
+    ) -> Iterable[dict]:
         """Enhanced fetch with memory management."""
-        return await self.fetch_optimized_with_memory_management(query, *params, is_prepared=False)
+        return await self.fetch_optimized_with_memory_management(
+            query, *params, is_prepared=False, traceparent=traceparent
+        )
 
-    async def execute_optimized(self, query: str, *params: Any, is_prepared: bool = False) -> int:
+    async def execute_optimized(
+        self,
+        query: str,
+        *params: Any,
+        is_prepared: bool = False,
+        traceparent: str | None = None,
+    ) -> int:
         """Optimized execute with performance tracking and memory management."""
         self._operation_count += 1
         
@@ -771,6 +816,11 @@ class SQLServerDatabase(BaseDatabase):
             if is_prepared:
                 metrics.inc("sqlserver_prepared_queries")
             latencies.record("sqlserver_query", duration)
+            if duration > self.cfg.threshold_ms:
+                logger.warning(
+                    "slow_query",
+                    extra={"query": query, "duration_ms": duration},
+                )
             await self.circuit_breaker.record_success()
             return row_count
             
@@ -793,9 +843,13 @@ class SQLServerDatabase(BaseDatabase):
         finally:
             await self._release(conn)
 
-    async def execute(self, query: str, *params: Any) -> int:
+    async def execute(
+        self, query: str, *params: Any, traceparent: str | None = None
+    ) -> int:
         """Enhanced execute with optimization detection."""
-        return await self.execute_optimized(query, *params, is_prepared=False)
+        return await self.execute_optimized(
+            query, *params, is_prepared=False, traceparent=traceparent
+        )
 
     async def execute_many(
         self,
@@ -803,10 +857,15 @@ class SQLServerDatabase(BaseDatabase):
         params_seq: Iterable[Iterable[Any]],
         *,
         concurrency: int = 1,
+        traceparent: str | None = None,
     ) -> int:
         """Execute many with memory management."""
         return await self.execute_many_with_memory_management(
-            query, params_seq, concurrency=concurrency, batch_size=1000
+            query,
+            params_seq,
+            concurrency=concurrency,
+            batch_size=1000,
+            traceparent=traceparent,
         )
 
     async def execute_many_optimized(
@@ -816,10 +875,15 @@ class SQLServerDatabase(BaseDatabase):
         *,
         concurrency: int = 1,
         batch_size: int = 1000,
+        traceparent: str | None = None,
     ) -> int:
         """Optimized execute_many with batching and parallel processing."""
         return await self.execute_many_with_memory_management(
-            query, params_seq, concurrency=concurrency, batch_size=batch_size
+            query,
+            params_seq,
+            concurrency=concurrency,
+            batch_size=batch_size,
+            traceparent=traceparent,
         )
 
     async def bulk_insert_tvp_optimized(
@@ -879,6 +943,11 @@ class SQLServerDatabase(BaseDatabase):
                 metrics.inc("sqlserver_query_count")
                 metrics.inc("sqlserver_tvp_operations")
                 latencies.record("sqlserver_query", duration)
+                if duration > self.cfg.threshold_ms:
+                    logger.warning(
+                        "slow_query",
+                        extra={"query": query, "duration_ms": duration},
+                    )
                 await self.circuit_breaker.record_success()
                 
                 total_inserted += len(chunk)

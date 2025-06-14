@@ -1,6 +1,7 @@
 import gc
 import time
 import asyncio
+import logging
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 import weakref
 
@@ -15,12 +16,15 @@ from ..analysis.query_tracker import record as record_query
 from ..config.config import PostgresConfig
 from ..monitoring.metrics import metrics
 from ..monitoring.stats import latencies
+from ..utils.tracing import get_traceparent
 from ..utils.cache import InMemoryCache
 from ..utils.circuit_breaker import CircuitBreaker
 from ..utils.errors import CircuitBreakerOpenError, DatabaseConnectionError, QueryError
 from .connection_utils import connect_with_retry, report_pool_metrics
 from .base import BaseDatabase
 from .memory_pool import memory_pool
+
+logger = logging.getLogger("claims_processor")
 
 
 class MemoryMonitor:
@@ -146,6 +150,13 @@ class PostgresDatabase(BaseDatabase):
         # Memory cleanup references
         self._cleanup_refs: List[weakref.ref] = []
 
+    def _with_traceparent(self, query: str, traceparent: str | None) -> str:
+        """Prepend a traceparent comment to the query when provided."""
+        tp = traceparent or get_traceparent()
+        if tp:
+            return f"/* traceparent={tp} */ {query}"
+        return query
+
     async def _init_connection(self, conn: "asyncpg.Connection") -> None:
         """Initialize a new connection with prepared statements and optimizations."""
         # Set connection-level optimizations
@@ -228,7 +239,11 @@ class PostgresDatabase(BaseDatabase):
         )
 
     async def fetch_optimized_with_memory_management(
-        self, query: str, *params: Any, use_replica: bool = True
+        self,
+        query: str,
+        *params: Any,
+        use_replica: bool = True,
+        traceparent: str | None = None,
     ) -> Iterable[dict]:
         """Optimized fetch with comprehensive memory management."""
         self._operation_count += 1
@@ -242,6 +257,8 @@ class PostgresDatabase(BaseDatabase):
             # For unlimited queries, add memory protection
             query = self._add_memory_protection_to_query(query)
         
+        query = self._with_traceparent(query, traceparent)
+
         # Check cache first with memory-aware eviction
         cache_key = f"query:{query}:{str(params)}"
         cached = await self._get_from_cache_with_memory_check(cache_key)
@@ -286,6 +303,11 @@ class PostgresDatabase(BaseDatabase):
             metrics.inc("postgres_query_count")
             latencies.record("postgres_query", duration)
             record_query(query, duration)
+            if duration > self.cfg.threshold_ms:
+                logger.warning(
+                    "slow_query",
+                    extra={"query": query, "duration_ms": duration},
+                )
             await self.circuit_breaker.record_success()
             
             # Convert to dictionaries using memory pool
@@ -471,6 +493,7 @@ class PostgresDatabase(BaseDatabase):
         *,
         concurrency: int = 4,
         batch_size: int = 1000,
+        traceparent: str | None = None,
     ) -> int:
         """Execute many with memory management and adaptive batching."""
         params_list = list(params_seq)
@@ -480,6 +503,8 @@ class PostgresDatabase(BaseDatabase):
         # Calculate memory-aware batch size
         memory_aware_batch_size = await self._calculate_memory_aware_batch_size(len(params_list))
         actual_batch_size = min(batch_size, memory_aware_batch_size)
+
+        query = self._with_traceparent(query, traceparent)
         
         total_processed = 0
         
@@ -560,9 +585,17 @@ class PostgresDatabase(BaseDatabase):
             return 0.0
 
     # Enhanced versions of existing methods with memory management
-    async def fetch(self, query: str, *params: Any, use_replica: bool = True) -> Iterable[dict]:
+    async def fetch(
+        self,
+        query: str,
+        *params: Any,
+        use_replica: bool = True,
+        traceparent: str | None = None,
+    ) -> Iterable[dict]:
         """Enhanced fetch with memory management."""
-        return await self.fetch_optimized_with_memory_management(query, *params, use_replica=use_replica)
+        return await self.fetch_optimized_with_memory_management(
+            query, *params, use_replica=use_replica, traceparent=traceparent
+        )
 
     async def execute_many(
         self,
@@ -570,10 +603,15 @@ class PostgresDatabase(BaseDatabase):
         params_seq: Iterable[Iterable[Any]],
         *,
         concurrency: int = 1,
+        traceparent: str | None = None,
     ) -> int:
         """Execute many with memory management."""
         return await self.execute_many_with_memory_management(
-            query, params_seq, concurrency=concurrency, batch_size=1000
+            query,
+            params_seq,
+            concurrency=concurrency,
+            batch_size=1000,
+            traceparent=traceparent,
         )
 
     async def close_with_cleanup(self) -> None:

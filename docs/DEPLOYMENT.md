@@ -32,6 +32,17 @@ This document outlines the basic steps to deploy the claims processing service i
    uvicorn src.web.app:app --host 0.0.0.0 --port 8000
    ```
 
+### Trace Context
+All database and outgoing HTTP requests include a W3C `traceparent` header when
+`trace_id` and `span_id` are available. The header format is:
+
+```
+traceparent: 00-<trace-id>-<span-id>-01
+```
+
+Providing this header on incoming requests allows request tracing across
+services.
+
 For containerized deployments you can base your Docker image on the official Python image and copy the application code into it. Make sure the working directory contains the model file and configuration prior to starting the service.
 
 ## Docker and Kubernetes
