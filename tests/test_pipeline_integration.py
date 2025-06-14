@@ -66,6 +66,17 @@ class DummyModel:
     def predict(self, claim):
         return 1
 
+
+class DummyRvuCache:
+    def __init__(self):
+        self.prefetched: list[set[str]] = []
+
+    async def warm_cache(self, codes):
+        self.prefetched.append(set(codes))
+
+    async def get(self, code):
+        return {"total_rvu": 1}
+
 def test_pipeline_process_batch(monkeypatch):
     cfg = AppConfig(
         postgres=PostgresConfig("", 0, "", "", ""),
@@ -96,6 +107,35 @@ def test_pipeline_process_batch(monkeypatch):
     assert pipeline.sql.inserted == [("111", "F1")]
     from src.monitoring.metrics import metrics
     assert metrics.get("batch_processing_rate_per_sec") > 0
+
+
+def test_batch_prefetches_rvu(monkeypatch):
+    cfg = AppConfig(
+        postgres=PostgresConfig("", 0, "", "", ""),
+        sqlserver=SQLServerConfig("", 0, "", "", ""),
+        processing=ProcessingConfig(batch_size=1),
+        security=SecurityConfig(api_key="k"),
+        cache=CacheConfig(),
+        model=ModelConfig(path="model.joblib"),
+    )
+    pipeline = ClaimsPipeline(cfg)
+    pipeline.pg = DummyPostgres()
+    pipeline.sql = DummySQL()
+    pipeline.model = DummyModel()
+    pipeline.rules_engine = RulesEngine([])
+    pipeline.validator = ClaimValidator({"F1"}, {"A"})
+    pipeline.service = ClaimService(pipeline.pg, pipeline.sql)
+    pipeline.rvu_cache = DummyRvuCache()
+    monkeypatch.setattr("src.utils.audit.record_audit_event", noop)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(pipeline.process_batch())
+    finally:
+        loop.close()
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+    assert {"P1"} in pipeline.rvu_cache.prefetched
 
 class DummyFilterModel:
     def __init__(self, path: str, version: str = "1"):
