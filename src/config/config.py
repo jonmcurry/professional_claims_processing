@@ -106,6 +106,7 @@ class PostgresConfig:
     replica_port: Optional[int] = None
     min_pool_size: int = 25
     max_pool_size: int = 150
+    threshold_ms: int = 1000
 
 
 @dataclass
@@ -119,6 +120,7 @@ class SQLServerConfig:
     pool_size: int = 40
     min_pool_size: int = 25
     max_pool_size: int = 80
+    threshold_ms: int = 1000
 
 
 @dataclass
@@ -495,7 +497,8 @@ def save_config(cfg: AppConfig, path: str = "config.yaml") -> None:
             "replica_host": cfg.postgres.replica_host,
             "replica_port": cfg.postgres.replica_port,
             "min_pool_size": cfg.postgres.min_pool_size,
-            "max_pool_size": cfg.postgres.max_pool_size
+            "max_pool_size": cfg.postgres.max_pool_size,
+            "threshold_ms": cfg.postgres.threshold_ms
         },
         "sqlserver": {
             "host": cfg.sqlserver.host,
@@ -505,7 +508,8 @@ def save_config(cfg: AppConfig, path: str = "config.yaml") -> None:
             "database": cfg.sqlserver.database,
             "pool_size": cfg.sqlserver.pool_size,
             "min_pool_size": cfg.sqlserver.min_pool_size,
-            "max_pool_size": cfg.sqlserver.max_pool_size
+            "max_pool_size": cfg.sqlserver.max_pool_size,
+            "threshold_ms": cfg.sqlserver.threshold_ms
         },
         "processing": {
             "batch_size": cfg.processing.batch_size,

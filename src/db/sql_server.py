@@ -2,6 +2,7 @@ import gc
 import time
 import asyncio
 import os
+import logging
 from typing import Any, Dict, Iterable, List, Optional
 import weakref
 
@@ -25,6 +26,7 @@ from ..monitoring.stats import latencies
 from ..utils.tracing import get_traceparent
 from ..memory.memory_pool import sql_memory_pool
 
+logger = logging.getLogger("claims_processor")
 
 class MemoryMonitor:
     """SQL Server specific memory monitoring."""
@@ -402,6 +404,7 @@ class SQLServerDatabase(BaseDatabase):
         query = self._with_traceparent(query, traceparent)
         conn = await self._acquire()
         initial_memory = self._get_process_memory()
+        start = time.perf_counter()
         
         try:
             cursor = conn.cursor()
@@ -410,6 +413,16 @@ class SQLServerDatabase(BaseDatabase):
             conn.commit()
             row_count = cursor.rowcount if cursor.rowcount != -1 else len(chunk)
             cursor.close()
+
+            duration = (time.perf_counter() - start) * 1000
+            metrics.inc("sqlserver_query_ms", duration)
+            metrics.inc("sqlserver_query_count")
+            latencies.record("sqlserver_query", duration)
+            if duration > self.cfg.threshold_ms:
+                logger.warning(
+                    "slow_query",
+                    extra={"query": query, "duration_ms": duration},
+                )
             
             # Check memory growth
             final_memory = self._get_process_memory()
@@ -630,6 +643,11 @@ class SQLServerDatabase(BaseDatabase):
             if is_prepared:
                 metrics.inc("sqlserver_prepared_queries")
             latencies.record("sqlserver_query", duration)
+            if duration > self.cfg.threshold_ms:
+                logger.warning(
+                    "slow_query",
+                    extra={"query": query, "duration_ms": duration},
+                )
             record_query(query, duration)
             await self.circuit_breaker.record_success()
             
@@ -798,6 +816,11 @@ class SQLServerDatabase(BaseDatabase):
             if is_prepared:
                 metrics.inc("sqlserver_prepared_queries")
             latencies.record("sqlserver_query", duration)
+            if duration > self.cfg.threshold_ms:
+                logger.warning(
+                    "slow_query",
+                    extra={"query": query, "duration_ms": duration},
+                )
             await self.circuit_breaker.record_success()
             return row_count
             
@@ -920,6 +943,11 @@ class SQLServerDatabase(BaseDatabase):
                 metrics.inc("sqlserver_query_count")
                 metrics.inc("sqlserver_tvp_operations")
                 latencies.record("sqlserver_query", duration)
+                if duration > self.cfg.threshold_ms:
+                    logger.warning(
+                        "slow_query",
+                        extra={"query": query, "duration_ms": duration},
+                    )
                 await self.circuit_breaker.record_success()
                 
                 total_inserted += len(chunk)
