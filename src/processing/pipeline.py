@@ -166,44 +166,79 @@ class ClaimsPipeline:
         )
 
     async def process_stream(self) -> None:
-        """Continuously process claims using a parallel pipeline."""
+        """Continuously process claims using a staged parallel pipeline."""
         if not self.request_filter:
             self.request_filter = RequestContextFilter()
             self.logger.addFilter(self.request_filter)
         start_trace()
         batch_size = self.calculate_batch_size()
-        queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue(maxsize=batch_size * 2)
-        results: list[tuple[str, str]] = []
-        stop = asyncio.Event()
 
-        async def producer() -> None:
+        fetch_to_validate: asyncio.Queue[Dict[str, Any]] = asyncio.Queue(maxsize=batch_size)
+        validate_to_predict: asyncio.Queue[Dict[str, Any] | None] = asyncio.Queue(maxsize=batch_size)
+        predict_to_insert: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue(maxsize=batch_size)
+
+        validate_workers = self.cfg.processing.max_workers
+        predict_workers = self.cfg.processing.max_workers
+        insert_workers = self.cfg.processing.insert_workers
+
+        async def fetcher() -> None:
             async for claim in self.service.stream_claims(batch_size, priority=True):
-                await queue.put(claim)
-            stop.set()
+                await fetch_to_validate.put(claim)
+            for _ in range(validate_workers):
+                await fetch_to_validate.put(None)  # type: ignore
 
-        async def worker() -> None:
-            while not (stop.is_set() and queue.empty()):
-                try:
-                    claim = await asyncio.wait_for(queue.get(), timeout=0.1)
-                except asyncio.TimeoutError:
-                    continue
-                res = await self.process_claim(claim)
-                if res:
-                    results.append(res)
-                queue.task_done()
+        async def validate_worker() -> None:
+            while True:
+                claim = await fetch_to_validate.get()
+                if claim is None:
+                    fetch_to_validate.task_done()
+                    await validate_to_predict.put(None)
+                    break
+                res = await self._validate_stage(claim)
+                fetch_to_validate.task_done()
+                if res is not None:
+                    await validate_to_predict.put(res)
 
-        prod_task = asyncio.create_task(producer())
-        workers = [asyncio.create_task(worker()) for _ in range(batch_size)]
-        await prod_task
-        await queue.join()
-        for w in workers:
-            w.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await w
-        if results:
-            await self.service.insert_claims(
-                results, concurrency=self.cfg.processing.insert_workers
-            )
+        async def predict_worker() -> None:
+            while True:
+                claim = await validate_to_predict.get()
+                if claim is None:
+                    validate_to_predict.task_done()
+                    await predict_to_insert.put(None)
+                    break
+                res = await self._predict_stage(claim)
+                validate_to_predict.task_done()
+                await predict_to_insert.put(res)
+
+        async def insert_worker() -> None:
+            buffer: list[tuple[str, str]] = []
+            while True:
+                item = await predict_to_insert.get()
+                if item is None:
+                    predict_to_insert.task_done()
+                    if buffer:
+                        await self.service.insert_claims(
+                            buffer, concurrency=self.cfg.processing.insert_workers
+                        )
+                        processing_status["processed"] += len(buffer)
+                        metrics.inc("claims_processed", len(buffer))
+                    break
+                buffer.append(item)
+                predict_to_insert.task_done()
+                if len(buffer) >= batch_size:
+                    await self.service.insert_claims(
+                        buffer, concurrency=self.cfg.processing.insert_workers
+                    )
+                    processing_status["processed"] += len(buffer)
+                    metrics.inc("claims_processed", len(buffer))
+                    buffer = []
+
+        tasks = [asyncio.create_task(fetcher())]
+        tasks += [asyncio.create_task(validate_worker()) for _ in range(validate_workers)]
+        tasks += [asyncio.create_task(predict_worker()) for _ in range(predict_workers)]
+        tasks += [asyncio.create_task(insert_worker()) for _ in range(insert_workers)]
+
+        await asyncio.gather(*tasks)
 
     @retry_async()
     async def process_claim(
@@ -274,6 +309,74 @@ class ClaimsPipeline:
             )
             await self._checkpoint(claim.get("claim_id", ""), "completed")
             return (claim["patient_account_number"], claim["facility_id"])
+
+    async def _validate_stage(self, claim: Dict[str, Any]) -> Dict[str, Any] | None:
+        """Run validation and rules stage."""
+        assert self.validator and self.rules_engine
+        await self._checkpoint(claim.get("claim_id", ""), "start")
+        validation_errors = self.validator.validate(claim)
+        rule_errors = self.rules_engine.evaluate(claim)
+        await self._checkpoint(claim.get("claim_id", ""), "validated")
+        if validation_errors or rule_errors:
+            processing_status["failed"] += 1
+            metrics.inc("claims_failed")
+            suggestions = self.repair_suggester.suggest(validation_errors + rule_errors)
+            await self.service.record_failed_claim(
+                claim,
+                "validation",
+                suggestions,
+                category=ErrorCategory.VALIDATION.value,
+            )
+            await self._checkpoint(claim.get("claim_id", ""), "failed")
+            self.logger.error(
+                f"Claim {claim['claim_id']} failed validation",
+                extra={
+                    "event": "claim_failed",
+                    "claim_id": claim.get("claim_id"),
+                    "reason": "validation",
+                    "claim": mask_claim_data(claim),
+                },
+            )
+            return None
+        return claim
+
+    async def _predict_stage(self, claim: Dict[str, Any]) -> tuple[str, str]:
+        """Run prediction and enrichment stage."""
+        assert self.model
+        prediction = self.model.predict(claim)
+        if self.model_monitor:
+            self.model_monitor.record_prediction(prediction)
+        await self._checkpoint(claim.get("claim_id", ""), "predicted")
+        claim["filter_number"] = prediction
+        if self.rvu_cache:
+            rvu = await self.rvu_cache.get(claim.get("procedure_code", ""))
+            if rvu:
+                claim["rvu_value"] = rvu.get("total_rvu")
+                units = float(claim.get("units", 1) or 1)
+                conv = float(self.cfg.processing.conversion_factor)
+                try:
+                    rvu_total = float(rvu.get("total_rvu", 0))
+                    claim["reimbursement_amount"] = rvu_total * units * conv
+                except Exception:
+                    claim["reimbursement_amount"] = None
+        self.logger.info(
+            f"Processed claim {claim['claim_id']}",
+            extra={
+                "event": "claim_processed",
+                "claim_id": claim.get("claim_id"),
+                "prediction": prediction,
+                "claim": mask_claim_data(claim),
+            },
+        )
+        await record_audit_event(
+            self.sql,
+            "claims",
+            claim["claim_id"],
+            "insert",
+            new_values=claim,
+        )
+        await self._checkpoint(claim.get("claim_id", ""), "completed")
+        return (claim["patient_account_number"], claim["facility_id"])
 
     async def process_partial_claim(
         self, claim_id: str, updates: Dict[str, Any]
