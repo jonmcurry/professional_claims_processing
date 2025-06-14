@@ -40,7 +40,8 @@ def test_status_endpoint(client):
     processing_status["failed"] = 2
     resp = client.get("/status", headers={"X-API-Key": "test"})
     assert resp.status_code == 200
-    assert resp.json() == {"processed": 5, "failed": 2}
+    data = resp.json()
+    assert data["processing"] == {"processed": 5, "failed": 2}
 
 
 def test_batch_status_endpoint(client):

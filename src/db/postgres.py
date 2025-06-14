@@ -2,6 +2,7 @@ try:
     import asyncpg
 except Exception:  # pragma: no cover - allow missing dependency in tests
     asyncpg = None
+import os
 from typing import Iterable, Any
 import time
 
@@ -194,6 +195,21 @@ class PostgresDatabase(BaseDatabase):
             metrics.set("postgres_pool_max", float(max_size))
         except Exception:
             pass
+
+    async def adjust_pool_size(self) -> None:
+        if not self.pool:
+            return
+        try:
+            load = os.getloadavg()[0]
+        except Exception:
+            load = 0
+        max_size = self.pool._maxsize  # type: ignore[attr-defined]
+        if load > 4 and max_size > self.cfg.min_pool_size:
+            new_size = max(self.cfg.min_pool_size, max_size - 1)
+            self.pool._maxsize = new_size  # type: ignore[attr-defined]
+        elif load < 1 and max_size < self.cfg.max_pool_size:
+            new_size = min(self.cfg.max_pool_size, max_size + 1)
+            self.pool._maxsize = new_size  # type: ignore[attr-defined]
 
     async def close(self) -> None:
         if self.pool:

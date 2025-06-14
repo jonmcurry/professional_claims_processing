@@ -15,8 +15,12 @@ async def _collect(interval: float) -> None:
     while True:
         if _pg:
             _pg.report_pool_status()
+            if hasattr(_pg, "adjust_pool_size"):
+                await _pg.adjust_pool_size()
         if _sql:
             _sql.report_pool_status()
+            if hasattr(_sql, "adjust_pool_size"):
+                await _sql.adjust_pool_size()
         await asyncio.sleep(interval)
 
 

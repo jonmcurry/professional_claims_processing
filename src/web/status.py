@@ -10,3 +10,9 @@ batch_status: Dict[str, Optional[Any]] = {
     "total": 0,
 }
 
+# Real-time synchronization progress
+sync_status: Dict[str, Optional[Any]] = {
+    "last_id": None,
+    "last_polled_at": None,
+}
+

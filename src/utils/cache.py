@@ -39,25 +39,37 @@ class DistributedCache:
     def __init__(self, url: str, ttl: int = 3600) -> None:
         self.url = url
         self.ttl = ttl
-        self.client = aioredis.from_url(url) if aioredis else None
+        try:
+            self.client = aioredis.from_url(url) if aioredis else None
+        except Exception:
+            self.client = None
 
     async def get(self, key: str) -> Optional[Any]:
         if not self.client:
             return None
-        raw = await self.client.get(key)
-        if raw is None:
+        try:
+            raw = await self.client.get(key)
+            if raw is None:
+                return None
+            return json.loads(raw)
+        except Exception:
             return None
-        return json.loads(raw)
 
     async def set(self, key: str, value: Any) -> None:
         if not self.client:
             return
-        await self.client.set(key, json.dumps(value), ex=self.ttl)
+        try:
+            await self.client.set(key, json.dumps(value), ex=self.ttl)
+        except Exception:
+            pass
 
     async def delete(self, key: str) -> None:
         if not self.client:
             return
-        await self.client.delete(key)
+        try:
+            await self.client.delete(key)
+        except Exception:
+            pass
 
 
 class RvuCache:
@@ -91,6 +103,8 @@ class RvuCache:
             metrics.inc("rvu_cache_hits")
             if not _prefetch:
                 self.access_history.append(code)
+                if len(self.access_history) % 10 == 0:
+                    await self._prefetch_trending()
             self._update_ratio()
             return item
 
@@ -107,6 +121,8 @@ class RvuCache:
             if not _prefetch:
                 self.access_history.append(code)
                 await self._predictive_warm(code)
+                if len(self.access_history) % 10 == 0:
+                    await self._prefetch_trending()
             self._update_ratio()
             return rows[0]
         self._update_ratio()
@@ -129,6 +145,12 @@ class RvuCache:
         if total:
             metrics.set("rvu_cache_hit_ratio", self.hits / total)
             metrics.set("rvu_cache_miss_ratio", self.misses / total)
+
+    async def _prefetch_trending(self) -> None:
+        if not self.access_history:
+            return
+        common = Counter(self.access_history).most_common(1)[0][0]
+        await self._predictive_warm(common)
 
     @staticmethod
     def _split_code(code: str) -> tuple[str, int] | None:

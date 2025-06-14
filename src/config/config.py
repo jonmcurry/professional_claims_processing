@@ -55,6 +55,8 @@ class SQLServerConfig:
     password: str
     database: str
     pool_size: int = 5
+    min_pool_size: int = 5
+    max_pool_size: int = 10
 
 
 @dataclass
