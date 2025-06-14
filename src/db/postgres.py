@@ -1,6 +1,7 @@
 import gc
 import time
 import asyncio
+import logging
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 import weakref
 
@@ -21,6 +22,8 @@ from ..utils.errors import CircuitBreakerOpenError, DatabaseConnectionError, Que
 from .connection_utils import connect_with_retry, report_pool_metrics
 from .base import BaseDatabase
 from .memory_pool import memory_pool
+
+logger = logging.getLogger("claims_processor")
 
 
 class MemoryMonitor:
@@ -286,6 +289,11 @@ class PostgresDatabase(BaseDatabase):
             metrics.inc("postgres_query_count")
             latencies.record("postgres_query", duration)
             record_query(query, duration)
+            if duration > self.cfg.threshold_ms:
+                logger.warning(
+                    "slow_query",
+                    extra={"query": query, "duration_ms": duration},
+                )
             await self.circuit_breaker.record_success()
             
             # Convert to dictionaries using memory pool

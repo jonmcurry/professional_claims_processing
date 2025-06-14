@@ -10,6 +10,7 @@ postgresql:
   replica_port: null
   min_pool_size: 25
   max_pool_size: 150
+  threshold_ms: 1000
 
 sqlserver:
   host: "localhost"
@@ -20,6 +21,7 @@ sqlserver:
   min_pool_size: 25
   max_pool_size: 80
   pool_size: 40
+  threshold_ms: 1000
 
 processing:
   batch_size: 1500
