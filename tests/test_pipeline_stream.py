@@ -36,6 +36,9 @@ class DummyPostgres:
     async def connect(self):
         pass
 
+    async def execute_many(self, query, params_seq, concurrency=1):
+        return len(list(params_seq))
+
 
 class DummySQL:
     def __init__(self):

@@ -17,12 +17,15 @@ class ClaimService:
         pg: PostgresDatabase,
         sql: SQLServerDatabase,
         encryption_key: str | None = None,
+        checkpoint_buffer_size: int = 100,
     ) -> None:
         self.pg = pg
         self.sql = sql
         self.encryption_key = encryption_key or ""
         self.priority_queue = PriorityClaimQueue()
         self.retry_queue = PriorityClaimQueue()
+        self._checkpoint_buffer: list[tuple[str, str]] = []
+        self._checkpoint_buffer_size = checkpoint_buffer_size
 
     async def fetch_claims(
         self, batch_size: int, offset: int = 0, priority: bool = False
@@ -115,13 +118,57 @@ class ClaimService:
             facility,
         )
 
-    async def record_checkpoint(self, claim_id: str, stage: str) -> None:
+    async def load_validation_sets(self) -> tuple[set[str], set[str]]:
+        """Load valid facility and financial class identifiers."""
+        fac_rows = await self.sql.fetch(
+            "SELECT DISTINCT facility_id FROM facilities WHERE facility_id IS NOT NULL"
+        )
+        class_rows = await self.sql.fetch(
+            "SELECT DISTINCT financial_class_id FROM facility_financial_classes WHERE financial_class_id IS NOT NULL"
+        )
+        facilities = {
+            str(r.get("facility_id"))
+            for r in fac_rows
+            if r.get("facility_id") is not None
+        }
+        classes = {
+            str(r.get("financial_class_id"))
+            for r in class_rows
+            if r.get("financial_class_id") is not None
+        }
+        return facilities, classes
+
+    async def top_rvu_codes(self, limit: int = 1000) -> list[str]:
+        """Return procedure codes for the top RVU records."""
+        rows = await self.pg.fetch(
+            "SELECT procedure_code FROM rvu_data LIMIT $1",
+            limit,
+        )
+        return [str(r.get("procedure_code")) for r in rows if r.get("procedure_code")]
+
+    async def record_checkpoint(
+        self, claim_id: str, stage: str, *, buffered: bool = True
+    ) -> None:
         """Persist a processing checkpoint for a claim."""
+        if buffered:
+            self._checkpoint_buffer.append((claim_id, stage))
+            if len(self._checkpoint_buffer) >= self._checkpoint_buffer_size:
+                await self.flush_checkpoints()
+            return
         await self.pg.execute(
             "INSERT INTO processing_checkpoints (claim_id, stage) VALUES ($1, $2)",
             claim_id,
             stage,
         )
+
+    async def flush_checkpoints(self) -> None:
+        if not self._checkpoint_buffer:
+            return
+        await self.pg.execute_many(
+            "INSERT INTO processing_checkpoints (claim_id, stage) VALUES ($1, $2)",
+            self._checkpoint_buffer,
+        )
+        self._checkpoint_buffer.clear()
 
     async def record_failed_claim(
         self,

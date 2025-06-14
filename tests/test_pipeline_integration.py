@@ -36,6 +36,10 @@ class DummyPostgres:
         pass
 
     async def fetch(self, query: str, *params):
+        if "rvu_data" in query and params:
+            return [{"procedure_code": params[0], "total_rvu": 1}]
+        if "rvu_data" in query:
+            return [{"procedure_code": "X2"}]
         return [
             {
                 "claim_id": "1",
@@ -59,6 +63,13 @@ class DummySQL:
 
     async def connect(self):
         pass
+
+    async def fetch(self, query: str, *params):
+        if "FROM facilities" in query:
+            return [{"facility_id": "F1"}]
+        if "FROM facility_financial_classes" in query:
+            return [{"financial_class_id": "A"}]
+        return []
 
     async def execute(self, query: str, *params):
         return 1
@@ -193,9 +204,11 @@ async def test_pipeline_startup(monkeypatch):
 
     class DummyPG(DummyPostgres):
         async def fetch(self, query: str, *params):
-            if "rvu_data" in query:
+            if "rvu_data" in query and params:
                 return [{"procedure_code": params[0], "total_rvu": 1}]
-            return []
+            if "rvu_data" in query:
+                return [{"procedure_code": "X2"}]
+            return await super().fetch(query, *params)
 
     pipeline.pg = DummyPG()
     pipeline.sql = DummySQL()
@@ -205,3 +218,6 @@ async def test_pipeline_startup(monkeypatch):
     await pipeline.startup()
     assert pipeline.model
     assert pipeline.rvu_cache.get("X1") is not None
+    assert pipeline.rvu_cache.get("X2") is not None
+    assert "F1" in pipeline.validator.valid_facilities
+    assert "A" in pipeline.validator.valid_financial_classes
