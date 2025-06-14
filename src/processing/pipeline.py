@@ -660,30 +660,18 @@ class ClaimsPipeline:
     ) -> list[tuple[str, str]]:
         """Process an already fetched batch of claims using bulk operations."""
 
-        validations: dict[str, list[str]] = {}
-        rules: dict[str, list[str]] = {}
-        if self.validator:
-            validations = await self.validator.validate_batch(claims)
-        if self.rules_engine:
-            rules = self.rules_engine.evaluate_batch(claims)
-
-        codes = [c.get("procedure_code", "") for c in claims]
-        rvu_map = await self.rvu_cache.get_many(codes) if self.rvu_cache else {}
-
-        predictions: list[int] = []
-        if self.model:
-            if hasattr(self.model, "predict_batch"):
-                predictions = self.model.predict_batch(claims)
-            else:
-                predictions = [self.model.predict(c) for c in claims]
-        else:
-            predictions = [0 for _ in claims]
+        # OPTIMIZED - True batch processing
+        validation_results = await self.validator.validate_batch(claims)
+        rules_results = self.rules_engine.evaluate_batch(claims)
+        predictions = self.model.predict_batch(claims)
+        procedure_codes = [c.get("procedure_code") for c in claims]
+        rvu_data = await self.rvu_cache.get_many(procedure_codes)
 
         rows: list[tuple[str, str]] = []
         for claim, prediction in zip(claims, predictions):
             cid = claim.get("claim_id", "")
-            v_err = validations.get(cid, [])
-            r_err = rules.get(cid, [])
+            v_err = validation_results.get(cid, [])
+            r_err = rules_results.get(cid, [])
             if v_err or r_err:
                 processing_status["failed"] += 1
                 metrics.inc("claims_failed")
@@ -698,7 +686,7 @@ class ClaimsPipeline:
 
             claim["filter_number"] = prediction
             if self.rvu_cache:
-                rvu = rvu_map.get(claim.get("procedure_code", ""))
+                rvu = rvu_data.get(claim.get("procedure_code"))
                 if rvu:
                     claim["rvu_value"] = rvu.get("total_rvu")
                     units = float(claim.get("units", 1) or 1)
