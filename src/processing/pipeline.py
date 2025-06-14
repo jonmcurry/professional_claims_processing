@@ -409,6 +409,53 @@ class ClaimsPipeline:
         await predict_to_insert.join()
         await self.service.flush_checkpoints()
 
+    async def process_stream_parallel(self) -> None:
+        """Process claims using true parallel stages controlled by semaphores."""
+        if not self.request_filter:
+            self.request_filter = RequestContextFilter()
+            self.logger.addFilter(self.request_filter)
+        start_trace()
+        batch_size = self.calculate_batch_size()
+
+        validation_pool = asyncio.Semaphore(50)
+        rules_pool = asyncio.Semaphore(50)
+        ml_pool = asyncio.Semaphore(25)
+        insert_pool = asyncio.Semaphore(10)
+
+        async def insert_row(row: tuple[str, str]) -> None:
+            async with insert_pool:
+                await self.service.insert_claims(
+                    [row], concurrency=self.cfg.processing.insert_workers
+                )
+                processing_status["processed"] += 1
+                metrics.inc("claims_processed")
+
+        async def handle_claim(claim: Dict[str, Any]) -> None:
+            res = await self.validate_claim_async(claim, validation_pool)
+            if res is None:
+                return
+            res = await self.evaluate_rules_async(res, rules_pool)
+            if res is None:
+                return
+            row = await self.predict_async(res, ml_pool)
+            await insert_row(row)
+
+        async def process_batch_parallel(claims_batch: list[Dict[str, Any]]) -> None:
+            await asyncio.gather(*(handle_claim(c) for c in claims_batch))
+
+        offset = 0
+        while True:
+            batch = await self.service.fetch_claims(
+                batch_size, offset=offset, priority=True
+            )
+            if not batch:
+                break
+            await self._prefetch_rvu(batch)
+            await process_batch_parallel(batch)
+            offset += batch_size
+
+        await self.service.flush_checkpoints()
+
     @retry_async()
     async def process_claim(self, claim: Dict[str, Any]) -> tuple[str, str] | None:
         assert self.rules_engine and self.validator and self.model
@@ -493,6 +540,26 @@ class ClaimsPipeline:
             )
             await self._checkpoint(claim.get("claim_id", ""), "completed")
             return (claim["patient_account_number"], claim["facility_id"])
+
+    async def validate_claim_async(
+        self, claim: Dict[str, Any], sem: asyncio.Semaphore
+    ) -> Dict[str, Any] | None:
+        async with sem:
+            return await self._validate_stage(claim)
+
+    async def evaluate_rules_async(
+        self, claim: Dict[str, Any], sem: asyncio.Semaphore
+    ) -> Dict[str, Any] | None:
+        if claim is None:
+            return None
+        async with sem:
+            return await self._rules_stage(claim)
+
+    async def predict_async(
+        self, claim: Dict[str, Any], sem: asyncio.Semaphore
+    ) -> tuple[str, str]:
+        async with sem:
+            return await self._predict_stage(claim)
 
     async def _validate_stage(self, claim: Dict[str, Any]) -> Dict[str, Any] | None:
         """Run the validation stage."""
