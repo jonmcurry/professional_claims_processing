@@ -10,6 +10,8 @@ The application exposes metrics from the `/metrics` endpoint of the FastAPI serv
 - `postgres_pool_max`: max connections allowed
 - `sqlserver_pool_size`: number of available SQL Server connections
 - `logging_overhead_ms`: time spent writing a log entry
+- `rvu_cache_hit_ratio`: proportion of RVU cache lookups served from cache
+- `rvu_cache_miss_ratio`: proportion of lookups resulting in a database fetch
 
 Create dashboards to track CPU, memory, error rates, request latency, and log metrics. Logs are forwarded to Logstash for ingestion into Elasticsearch and Kibana.
 

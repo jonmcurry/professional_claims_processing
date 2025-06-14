@@ -81,6 +81,7 @@ class ClaimsPipeline:
             distributed=(
                 self.distributed_cache if self.features.enable_cache else None
             ),
+            predictive_ahead=self.cfg.cache.predictive_ahead,
         )
         if self.features.enable_cache and self.cfg.cache.warm_rvu_codes:
             await self.rvu_cache.warm_cache(self.cfg.cache.warm_rvu_codes)

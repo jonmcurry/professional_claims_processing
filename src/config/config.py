@@ -75,6 +75,7 @@ class SecurityConfig:
 class CacheConfig:
     redis_url: Optional[str] = None
     warm_rvu_codes: List[str] | None = None
+    predictive_ahead: int = 2
 
 
 @dataclass

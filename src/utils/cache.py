@@ -1,6 +1,9 @@
 import json
 import time
+from collections import Counter, deque
 from typing import Any, Dict, Iterable, Optional
+
+from ..monitoring.metrics import metrics
 
 try:
     import redis.asyncio as aioredis  # type: ignore
@@ -26,6 +29,9 @@ class InMemoryCache:
     def set(self, key: str, value: Any) -> None:
         self.store[key] = (time.time(), value)
 
+    def delete(self, key: str) -> None:
+        self.store.pop(key, None)
+
 
 class DistributedCache:
     """Simple Redis-based distributed cache."""
@@ -48,6 +54,11 @@ class DistributedCache:
             return
         await self.client.set(key, json.dumps(value), ex=self.ttl)
 
+    async def delete(self, key: str) -> None:
+        if not self.client:
+            return
+        await self.client.delete(key)
+
 
 class RvuCache:
     """Cache RVU data looked up from a database."""
@@ -57,22 +68,34 @@ class RvuCache:
         db: "BaseDatabase",
         ttl: int = 3600,
         distributed: Optional[DistributedCache] = None,
+        predictive_ahead: int = 2,
     ) -> None:
         from ..db.base import BaseDatabase
 
         self.db = db
         self.cache = InMemoryCache(ttl)
         self.distributed = distributed
+        self.predictive_ahead = predictive_ahead
+        self.access_history: deque[str] = deque(maxlen=100)
+        self.hits = 0
+        self.misses = 0
 
-    async def get(self, code: str) -> Optional[Dict[str, Any]]:
+    async def get(self, code: str, *, _prefetch: bool = False) -> Optional[Dict[str, Any]]:
         item = self.cache.get(code)
         if not item and self.distributed:
             item = await self.distributed.get(code)
             if item:
                 self.cache.set(code, item)
         if item:
+            self.hits += 1
+            metrics.inc("rvu_cache_hits")
+            if not _prefetch:
+                self.access_history.append(code)
+            self._update_ratio()
             return item
 
+        self.misses += 1
+        metrics.inc("rvu_cache_misses")
         rows = await self.db.fetch(
             "SELECT * FROM rvu_data WHERE procedure_code = $1",
             code,
@@ -81,12 +104,57 @@ class RvuCache:
             self.cache.set(code, rows[0])
             if self.distributed:
                 await self.distributed.set(code, rows[0])
+            if not _prefetch:
+                self.access_history.append(code)
+                await self._predictive_warm(code)
+            self._update_ratio()
             return rows[0]
+        self._update_ratio()
         return None
 
     async def warm_cache(self, codes: Iterable[str]) -> None:
         for code in codes:
             try:
-                await self.get(code)
+                await self.get(code, _prefetch=True)
             except Exception:
                 continue
+
+    async def invalidate(self, code: str) -> None:
+        self.cache.delete(code)
+        if self.distributed:
+            await self.distributed.delete(code)
+
+    def _update_ratio(self) -> None:
+        total = self.hits + self.misses
+        if total:
+            metrics.set("rvu_cache_hit_ratio", self.hits / total)
+            metrics.set("rvu_cache_miss_ratio", self.misses / total)
+
+    @staticmethod
+    def _split_code(code: str) -> tuple[str, int] | None:
+        prefix = ""
+        number = ""
+        for ch in code:
+            if ch.isdigit():
+                number += ch
+            else:
+                prefix += ch
+        if not number:
+            return None
+        try:
+            return prefix, int(number)
+        except ValueError:
+            return None
+
+    async def _predictive_warm(self, code: str) -> None:
+        parsed = self._split_code(code)
+        if not parsed:
+            return
+        prefix, num = parsed
+        for i in range(1, self.predictive_ahead + 1):
+            next_code = f"{prefix}{num + i}"
+            if self.cache.get(next_code) is None:
+                try:
+                    await self.get(next_code, _prefetch=True)
+                except Exception:
+                    continue

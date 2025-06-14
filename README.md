@@ -48,7 +48,9 @@ Set the `APP_ENV` environment variable to load `config.<environment>.yaml` or
 
 The `cache` section can enable Redis for distributed RVU caching. Set `redis_url`
 to your server and list common `warm_rvu_codes` to pre-populate the cache during
-startup.
+startup. Predictive warming uses recent access patterns to prefetch the next few
+codes as defined by `predictive_ahead`. Cached RVU entries can be invalidated on
+data updates and cache hit/miss ratios are exported via the metrics endpoint.
 The `features` section allows toggling optional functionality like caching and model monitoring.
 
 ## ML Model
