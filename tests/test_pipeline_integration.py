@@ -56,6 +56,11 @@ class DummySQL:
         self.inserted.extend(items)
         return len(items)
 
+    async def bulk_insert_tvp(self, table, columns, rows):
+        items = list(rows)
+        self.inserted.extend(items)
+        return len(items)
+
     async def prepare(self, query: str):
         pass
 
