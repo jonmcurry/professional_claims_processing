@@ -9,11 +9,16 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     psutil = None
 
+from collections import deque
 from .metrics import metrics
 from ..analysis.trending import TrendingTracker
+from ..analysis.capacity import predict_resource_usage, predict_throughput
 
 _task: Optional[asyncio.Task] = None
 _trending = TrendingTracker(window=60)
+_cpu_history: deque[float] = deque(maxlen=60)
+_mem_history: deque[float] = deque(maxlen=60)
+_throughput_history: deque[float] = deque(maxlen=60)
 
 
 async def _collect(interval: float, log_interval: float) -> None:
@@ -25,6 +30,16 @@ async def _collect(interval: float, log_interval: float) -> None:
             metrics.set("cpu_usage_percent", cpu)
             mem = psutil.virtual_memory().used / (1024 * 1024)
             metrics.set("memory_usage_mb", float(mem))
+            _cpu_history.append(cpu)
+            _mem_history.append(mem)
+            metrics.set(
+                "cpu_capacity_forecast",
+                predict_resource_usage(list(_cpu_history)),
+            )
+            metrics.set(
+                "memory_capacity_forecast",
+                predict_resource_usage(list(_mem_history)),
+            )
             _trending.record("cpu", cpu)
             _trending.record("mem", mem)
             metrics.set("cpu_usage_avg", _trending.moving_average("cpu"))
@@ -37,6 +52,13 @@ async def _collect(interval: float, log_interval: float) -> None:
                     "CPU usage: %.2f%%, Memory usage: %.2f MB", cpu, mem
                 )
                 last_log = now
+        tp = metrics.get("batch_processing_rate_per_sec")
+        if tp:
+            _throughput_history.append(tp)
+            metrics.set(
+                "throughput_forecast",
+                predict_throughput(list(_throughput_history)),
+            )
         await asyncio.sleep(interval)
 
 

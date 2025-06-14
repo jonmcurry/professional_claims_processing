@@ -20,6 +20,9 @@ The application exposes metrics from the `/metrics` endpoint of the FastAPI serv
 - `memory_usage_avg`: moving average memory usage
 - `batch_processing_rate_per_sec`: processed claims per second for last batch
 - `dynamic_batch_size`: batch size chosen based on system load
+- `cpu_capacity_forecast`: predicted CPU utilization for the next interval
+- `memory_capacity_forecast`: predicted memory usage for the next interval
+- `throughput_forecast`: predicted claims throughput
 
 Create dashboards to track CPU, memory, error rates, request latency, and log metrics. Logs are forwarded to Logstash for ingestion into Elasticsearch and Kibana.
 
