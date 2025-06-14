@@ -133,8 +133,11 @@ This project includes basic security features to protect sensitive claim data.
 The system now features a global exception handler for the FastAPI application.
 Errors are categorized and recorded in the `failure_category` field for easier
 analysis. Failed operations are routed to a dead letter queue with automatic
-reprocessing attempts. Database inserts employ compensation transactions to
-remove partially inserted records when an error occurs.
+reprocessing attempts. Failed claims enter a priority based retry queue where
+automated repair is attempted before re‑insertion. Manual review workflows can
+assign claims to users and record resolution actions. Resolution metrics are
+tracked via the `/metrics` endpoint. Database inserts employ compensation
+transactions to remove partially inserted records when an error occurs.
 
 ## Claim Processing Enhancements
 The system now supports claim amendments using the `amend_claim` method and a
