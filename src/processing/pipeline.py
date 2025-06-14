@@ -147,19 +147,84 @@ class ClaimsPipeline:
         batch_status["total"] = len(claims)
 
         await self._prefetch_rvu(claims)
-        tasks = [self.process_claim(claim) for claim in claims]
-        results = await asyncio.gather(*tasks)
-        valid = [r for r in results if r]
-        if valid:
+
+        validations = {}
+        rules = {}
+        if self.validator:
+            validations = await self.validator.validate_batch(claims)
+        if self.rules_engine:
+            rules = self.rules_engine.evaluate_batch(claims)
+
+        codes = [c.get("procedure_code", "") for c in claims]
+        rvu_map = await self.rvu_cache.get_many(codes) if self.rvu_cache else {}
+
+        valid_rows: list[tuple[str, str]] = []
+        for claim in claims:
+            cid = claim.get("claim_id", "")
+            await self._checkpoint(cid, "start")
+            v_err = validations.get(cid, [])
+            r_err = rules.get(cid, [])
+            if v_err or r_err:
+                processing_status["failed"] += 1
+                metrics.inc("claims_failed")
+                suggestions = self.repair_suggester.suggest(v_err + r_err)
+                await self.service.record_failed_claim(
+                    claim,
+                    "validation",
+                    suggestions,
+                    category=ErrorCategory.VALIDATION.value,
+                )
+                await self._checkpoint(cid, "failed")
+                self.logger.error(
+                    f"Claim {cid} failed validation",
+                    extra={
+                        "event": "claim_failed",
+                        "claim_id": cid,
+                        "reason": "validation",
+                        "claim": mask_claim_data(claim),
+                    },
+                )
+                continue
+
+            prediction = self.model.predict(claim) if self.model else 0
+            if self.model_monitor:
+                self.model_monitor.record_prediction(prediction)
+            await self._checkpoint(cid, "predicted")
+            claim["filter_number"] = prediction
+            if self.rvu_cache:
+                rvu = rvu_map.get(claim.get("procedure_code", ""))
+                if rvu:
+                    claim["rvu_value"] = rvu.get("total_rvu")
+                    units = float(claim.get("units", 1) or 1)
+                    conv = float(self.cfg.processing.conversion_factor)
+                    try:
+                        rvu_total = float(rvu.get("total_rvu", 0))
+                        claim["reimbursement_amount"] = rvu_total * units * conv
+                    except Exception:
+                        claim["reimbursement_amount"] = None
+
+            await record_audit_event(
+                self.sql,
+                "claims",
+                cid,
+                "insert",
+                new_values=claim,
+            )
+            await self._checkpoint(cid, "completed")
+            pr = (claim.get("patient_account_number"), claim.get("facility_id"))
+            if pr[0] and pr[1]:
+                valid_rows.append(pr)  # type: ignore
+
+        if valid_rows:
             try:
                 await self.service.insert_claims(
-                    valid, concurrency=self.cfg.processing.insert_workers
+                    valid_rows, concurrency=self.cfg.processing.insert_workers
                 )
-                processing_status["processed"] += len(valid)
-                metrics.inc("claims_processed", len(valid))
+                processing_status["processed"] += len(valid_rows)
+                metrics.inc("claims_processed", len(valid_rows))
             except Exception as exc:
                 category = categorize_exception(exc)
-                for acct, facility in valid:
+                for acct, facility in valid_rows:
                     await self.service.enqueue_dead_letter(
                         {
                             "patient_account_number": acct,
@@ -172,8 +237,8 @@ class ClaimsPipeline:
                     exc_info=exc,
                     extra={"category": category.value},
                 )
-                metrics.inc("claims_failed", len(valid))
-                metrics.inc(f"errors_{category.value}", len(valid))
+                metrics.inc("claims_failed", len(valid_rows))
+                metrics.inc(f"errors_{category.value}", len(valid_rows))
 
         duration = time.perf_counter() - start_time
         if duration > 0:

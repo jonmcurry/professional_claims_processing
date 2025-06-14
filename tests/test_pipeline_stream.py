@@ -18,14 +18,24 @@ sys.modules.setdefault("durable", durable_module)
 sys.modules.setdefault("durable.lang", durable_lang)
 
 from src.processing.pipeline import ClaimsPipeline
-from src.config.config import AppConfig, PostgresConfig, SQLServerConfig, ProcessingConfig, SecurityConfig, CacheConfig, ModelConfig
+from src.config.config import (
+    AppConfig,
+    PostgresConfig,
+    SQLServerConfig,
+    ProcessingConfig,
+    SecurityConfig,
+    CacheConfig,
+    ModelConfig,
+)
 from src.services.claim_service import ClaimService
 from src.rules.engine import RulesEngine
 from src.validation.validator import ClaimValidator
 
+
 class DummyPostgres:
     async def connect(self):
         pass
+
 
 class DummySQL:
     def __init__(self):
@@ -45,8 +55,10 @@ class DummySQL:
         self.inserted.extend(list(rows))
         return len(self.inserted)
 
+
 async def noop(*args, **kwargs):
     pass
+
 
 class DummyModel:
     def predict(self, claim):
@@ -62,6 +74,10 @@ class DummyRvuCache:
 
     async def get(self, code):
         return {"total_rvu": 1}
+
+    async def get_many(self, codes):
+        return {c: {"total_rvu": 1} for c in codes}
+
 
 async def fetch_claims(batch_size, offset=0, priority=False):
     if offset == 0:

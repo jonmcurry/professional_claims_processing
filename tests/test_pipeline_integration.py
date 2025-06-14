@@ -16,30 +16,42 @@ sys.modules.setdefault("durable", durable_module)
 sys.modules.setdefault("durable.lang", durable_lang)
 
 from src.processing.pipeline import ClaimsPipeline
-from src.config.config import AppConfig, PostgresConfig, SQLServerConfig, ProcessingConfig, SecurityConfig, CacheConfig, ModelConfig
+from src.config.config import (
+    AppConfig,
+    PostgresConfig,
+    SQLServerConfig,
+    ProcessingConfig,
+    SecurityConfig,
+    CacheConfig,
+    ModelConfig,
+)
 from src.services.claim_service import ClaimService
 from src.rules.engine import RulesEngine
 from src.validation.validator import ClaimValidator
 from src.web.status import processing_status
+
 
 class DummyPostgres:
     async def connect(self):
         pass
 
     async def fetch(self, query: str, *params):
-        return [{
-            "claim_id": "1",
-            "patient_account_number": "111",
-            "facility_id": "F1",
-            "procedure_code": "P1",
-            "financial_class": "A"
-        }]
+        return [
+            {
+                "claim_id": "1",
+                "patient_account_number": "111",
+                "facility_id": "F1",
+                "procedure_code": "P1",
+                "financial_class": "A",
+            }
+        ]
 
     async def execute(self, query: str, *params):
         return 1
 
     async def execute_many(self, query: str, params_seq):
         return len(list(params_seq))
+
 
 class DummySQL:
     def __init__(self):
@@ -64,8 +76,10 @@ class DummySQL:
     async def prepare(self, query: str):
         pass
 
+
 async def noop(*args, **kwargs):
     pass
+
 
 class DummyModel:
     def predict(self, claim):
@@ -81,6 +95,10 @@ class DummyRvuCache:
 
     async def get(self, code):
         return {"total_rvu": 1}
+
+    async def get_many(self, codes):
+        return {c: {"total_rvu": 1} for c in codes}
+
 
 def test_pipeline_process_batch(monkeypatch):
     cfg = AppConfig(
@@ -111,6 +129,7 @@ def test_pipeline_process_batch(monkeypatch):
     assert processing_status["processed"] == 1
     assert pipeline.sql.inserted == [("111", "F1")]
     from src.monitoring.metrics import metrics
+
     assert metrics.get("batch_processing_rate_per_sec") > 0
 
 
@@ -142,6 +161,7 @@ def test_batch_prefetches_rvu(monkeypatch):
 
     assert {"P1"} in pipeline.rvu_cache.prefetched
 
+
 class DummyFilterModel:
     def __init__(self, path: str, version: str = "1"):
         self.path = path
@@ -150,12 +170,14 @@ class DummyFilterModel:
     def predict(self, claim):
         return 0
 
+
 class DummyModelMonitor:
     def __init__(self, version: str):
         self.version = version
 
     def record_prediction(self, label: int) -> None:
         pass
+
 
 @pytest.mark.asyncio
 async def test_pipeline_startup(monkeypatch):
@@ -183,5 +205,3 @@ async def test_pipeline_startup(monkeypatch):
     await pipeline.startup()
     assert pipeline.model
     assert pipeline.rvu_cache.get("X1") is not None
-
-

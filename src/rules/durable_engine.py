@@ -15,6 +15,7 @@ class DurableRulesEngine:
         self.ruleset_name = f"claims_{uuid.uuid4().hex}"
         engine = self
         with ruleset(self.ruleset_name):
+
             @when_all(+m)
             def evaluate(c):  # type: ignore
                 engine._failures = []
@@ -27,3 +28,10 @@ class DurableRulesEngine:
         self._failures = []
         post(self.ruleset_name, claim)
         return list(self._failures)
+
+    def evaluate_batch(self, claims: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+        """Evaluate a batch of claims."""
+        results: Dict[str, List[str]] = {}
+        for claim in claims:
+            results[claim.get("claim_id", "")] = self.evaluate(claim)
+        return results

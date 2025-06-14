@@ -51,3 +51,10 @@ class RulesEngine:
             if not rule.apply(claim):
                 failures.append(rule.name)
         return failures
+
+    def evaluate_batch(self, claims: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+        """Evaluate a batch of claims."""
+        results: Dict[str, List[str]] = {}
+        for claim in claims:
+            results[claim.get("claim_id", "")] = self.evaluate(claim)
+        return results

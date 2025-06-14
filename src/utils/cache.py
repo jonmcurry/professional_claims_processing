@@ -92,7 +92,9 @@ class RvuCache:
         self.hits = 0
         self.misses = 0
 
-    async def get(self, code: str, *, _prefetch: bool = False) -> Optional[Dict[str, Any]]:
+    async def get(
+        self, code: str, *, _prefetch: bool = False
+    ) -> Optional[Dict[str, Any]]:
         item = self.cache.get(code)
         if not item and self.distributed:
             item = await self.distributed.get(code)
@@ -127,6 +129,44 @@ class RvuCache:
             return rows[0]
         self._update_ratio()
         return None
+
+    async def get_many(
+        self, codes: Iterable[str]
+    ) -> Dict[str, Optional[Dict[str, Any]]]:
+        """Retrieve multiple RVU records with a single database query."""
+        unique = [c for c in set(codes) if c]
+        result: Dict[str, Optional[Dict[str, Any]]] = {c: None for c in unique}
+        missing: list[str] = []
+        for code in unique:
+            item = self.cache.get(code)
+            if not item and self.distributed:
+                item = await self.distributed.get(code)
+                if item:
+                    self.cache.set(code, item)
+            if item:
+                self.hits += 1
+                metrics.inc("rvu_cache_hits")
+                result[code] = item
+            else:
+                missing.append(code)
+                self.misses += 1
+                metrics.inc("rvu_cache_misses")
+        if missing:
+            placeholders = ", ".join(f"${i+1}" for i in range(len(missing)))
+            rows = await self.db.fetch(
+                f"SELECT * FROM rvu_data WHERE procedure_code IN ({placeholders})",
+                *missing,
+            )
+            for row in rows:
+                code = row.get("procedure_code")
+                if not code:
+                    continue
+                result[code] = row
+                self.cache.set(code, row)
+                if self.distributed:
+                    await self.distributed.set(code, row)
+        self._update_ratio()
+        return result
 
     async def warm_cache(self, codes: Iterable[str]) -> None:
         for code in codes:
