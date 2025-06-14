@@ -9,6 +9,7 @@ from ..security.compliance import (
 )
 from ..utils.audit import record_audit_event
 from ..utils.priority_queue import PriorityClaimQueue
+from ..monitoring.metrics import metrics
 
 
 class ClaimService:
@@ -106,6 +107,7 @@ class ClaimService:
             ),
             suggestions,
         )
+        metrics.inc(f"errors_{category}")
         await record_audit_event(
             self.sql,
             "failed_claims",
