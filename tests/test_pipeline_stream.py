@@ -137,3 +137,36 @@ def test_process_stream(monkeypatch):
 
     assert sorted(pipeline.sql.inserted) == [("111", "F1"), ("222", "F1")]
     assert pipeline.rvu_cache.prefetched == [{"P1"}, {"P1"}]
+
+
+def test_process_stream_parallel(monkeypatch):
+    cfg = AppConfig(
+        postgres=PostgresConfig("", 0, "", "", ""),
+        sqlserver=SQLServerConfig("", 0, "", "", ""),
+        processing=ProcessingConfig(batch_size=1, max_workers=1),
+        security=SecurityConfig(api_key="k"),
+        cache=CacheConfig(),
+        model=ModelConfig(path="model.joblib"),
+    )
+    pipeline = ClaimsPipeline(cfg)
+    pipeline.pg = DummyPostgres()
+    pipeline.sql = DummySQL()
+    pipeline.model = DummyModel()
+    pipeline.rules_engine = RulesEngine([])
+    pipeline.validator = ClaimValidator({"F1"}, {"A"})
+    pipeline.service = ClaimService(pipeline.pg, pipeline.sql)
+    pipeline.service.fetch_claims = fetch_claims
+    pipeline.rvu_cache = DummyRvuCache()
+    monkeypatch.setattr("src.utils.audit.record_audit_event", noop)
+    monkeypatch.setattr("src.processing.pipeline.record_audit_event", noop)
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(pipeline.process_stream_parallel())
+    finally:
+        loop.close()
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+    assert sorted(pipeline.sql.inserted) == [("111", "F1"), ("222", "F1")]
+    assert pipeline.rvu_cache.prefetched == [{"P1"}, {"P1"}]
