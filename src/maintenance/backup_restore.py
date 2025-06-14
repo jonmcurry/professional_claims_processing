@@ -1,45 +1,76 @@
 import asyncio
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 from ..config.config import load_config
 
 
 async def backup() -> Path:
     cfg = load_config()
-    outfile = Path(f"backup_{cfg.postgres.database}.sql")
-    subprocess.run(
-        [
-            "pg_dump",
-            f"--host={cfg.postgres.host}",
-            f"--port={cfg.postgres.port}",
-            f"--username={cfg.postgres.user}",
-            "-F",
-            "plain",
-            "-f",
-            str(outfile),
-            cfg.postgres.database,
-        ],
-        check=True,
-    )
+    key = cfg.security.encryption_key
+    outfile = Path(f"backup_{cfg.postgres.database}.sql.gpg")
+
+    pg_cmd = [
+        "pg_dump",
+        f"--host={cfg.postgres.host}",
+        f"--port={cfg.postgres.port}",
+        f"--username={cfg.postgres.user}",
+        cfg.postgres.database,
+    ]
+
+    gpg_cmd = [
+        "gpg",
+        "--batch",
+        "--yes",
+        "--passphrase",
+        key,
+        "--symmetric",
+        "--cipher-algo",
+        "AES256",
+        "-o",
+        str(outfile),
+    ]
+
+    dump_proc = subprocess.Popen(pg_cmd, stdout=subprocess.PIPE)
+    try:
+        subprocess.run(gpg_cmd, stdin=dump_proc.stdout, check=True)
+    finally:
+        if dump_proc.stdout:
+            dump_proc.stdout.close()
+        dump_proc.wait()
+
     return outfile
 
 
 async def restore(path: Path) -> None:
     cfg = load_config()
-    subprocess.run(
-        [
-            "psql",
-            f"--host={cfg.postgres.host}",
-            f"--port={cfg.postgres.port}",
-            f"--username={cfg.postgres.user}",
-            cfg.postgres.database,
-            "-f",
-            str(path),
-        ],
-        check=True,
-    )
+    key = cfg.security.encryption_key
+
+    gpg_cmd = [
+        "gpg",
+        "--batch",
+        "--yes",
+        "--passphrase",
+        key,
+        "-d",
+        str(path),
+    ]
+
+    psql_cmd = [
+        "psql",
+        f"--host={cfg.postgres.host}",
+        f"--port={cfg.postgres.port}",
+        f"--username={cfg.postgres.user}",
+        cfg.postgres.database,
+    ]
+
+    decrypt_proc = subprocess.Popen(gpg_cmd, stdout=subprocess.PIPE)
+    try:
+        subprocess.run(psql_cmd, stdin=decrypt_proc.stdout, check=True)
+    finally:
+        if decrypt_proc.stdout:
+            decrypt_proc.stdout.close()
+        decrypt_proc.wait()
 
 
 if __name__ == "__main__":
