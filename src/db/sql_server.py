@@ -240,25 +240,44 @@ class SQLServerDatabase(BaseDatabase):
         rows_list = list(rows)
         if not rows_list:
             return 0
-        placeholders = ", ".join(["?"] * len(columns))
-        query = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})"
         conn = await self._acquire()
+        placeholders = ", ".join(["?"] * len(columns))
+        tvp_insert = f"INSERT INTO {table} ({', '.join(columns)}) SELECT * FROM ?"
+        fallback_insert = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})"
         try:
             cursor = conn.cursor()
-            cursor.fast_executemany = True
-            cursor.executemany(query, rows_list)
+            try:
+                if hasattr(cursor, "setinputsizes") and hasattr(pyodbc, "SQL_STRUCTURED"):
+                    tvp_name = f"{table}_type"
+                    cursor.setinputsizes([(pyodbc.SQL_STRUCTURED, tvp_name)])
+                    cursor.fast_executemany = True
+                    cursor.execute(tvp_insert, (rows_list,))
+                else:
+                    raise AttributeError("TVP not supported")
+            except Exception:
+                cursor.fast_executemany = True
+                cursor.executemany(fallback_insert, rows_list)
             conn.commit()
             await self.circuit_breaker.record_success()
-            return cursor.rowcount
+            return len(rows_list)
         except pyodbc.Error:
             conn.close()
             conn = self._create_connection()
             cursor = conn.cursor()
-            cursor.fast_executemany = True
-            cursor.executemany(query, rows_list)
+            try:
+                if hasattr(cursor, "setinputsizes") and hasattr(pyodbc, "SQL_STRUCTURED"):
+                    tvp_name = f"{table}_type"
+                    cursor.setinputsizes([(pyodbc.SQL_STRUCTURED, tvp_name)])
+                    cursor.fast_executemany = True
+                    cursor.execute(tvp_insert, (rows_list,))
+                else:
+                    raise AttributeError("TVP not supported")
+            except Exception:
+                cursor.fast_executemany = True
+                cursor.executemany(fallback_insert, rows_list)
             conn.commit()
             await self.circuit_breaker.record_success()
-            return cursor.rowcount
+            return len(rows_list)
         except Exception as e:
             await self.circuit_breaker.record_failure()
             raise QueryError(str(e)) from e

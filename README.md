@@ -6,12 +6,17 @@ This project builds a high-performance claims processing system with an integrat
 ### Performance Optimizations
 - The pipeline processes streamed claims in parallel using worker tasks.
 - Bulk inserts utilize multiple connections for higher throughput.
+- SQL Server bulk inserts use table-valued parameters to minimize
+  network overhead.
+- PostgreSQL COPY is leveraged for high-volume reads.
 - Query plans can be inspected via `src/analysis/query_plan.py` for tuning.
 - Connection pools are pre-warmed and configured with larger defaults
   (PostgreSQL 20-100, SQL Server pool size 20) for improved multiplexing.
 - Connection pool metrics are monitored by `pool_monitor` to spot saturation.
 - Query timings are tracked with `query_tracker` for performance analysis.
 - Slow queries can be fed to the `index_recommender` to generate index suggestions.
+- Proper indexes and columnstore indexes are included in the
+  provided schema scripts for optimized analytics queries.
 - The `partition_historical_data` script partitions old claim records by year.
 
 ### Scaling Enhancements
