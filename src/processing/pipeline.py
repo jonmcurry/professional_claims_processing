@@ -20,6 +20,7 @@ from ..utils.errors import ErrorCategory, categorize_exception
 from ..utils.logging import RequestContextFilter, setup_logging
 from ..utils.retries import retry_async
 from ..utils.tracing import start_span, start_trace
+from ..monitoring import resource_monitor, pool_monitor
 from ..validation.validator import ClaimValidator
 from ..web.status import batch_status, processing_status
 from .repair import ClaimRepairSuggester
@@ -83,6 +84,8 @@ class ClaimsPipeline:
         )
         if self.features.enable_cache and self.cfg.cache.warm_rvu_codes:
             await self.rvu_cache.warm_cache(self.cfg.cache.warm_rvu_codes)
+        resource_monitor.start()
+        pool_monitor.start(self.pg, self.sql)
 
     def calculate_batch_size(self) -> int:
         """Adjust batch size based on system load."""

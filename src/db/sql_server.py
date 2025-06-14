@@ -9,6 +9,7 @@ from ..utils.errors import DatabaseConnectionError, QueryError, CircuitBreakerOp
 from .base import BaseDatabase
 from ..config.config import SQLServerConfig
 from ..monitoring.metrics import metrics
+from ..analysis.query_tracker import record as record_query
 
 
 class SQLServerDatabase(BaseDatabase):
@@ -93,6 +94,9 @@ class SQLServerDatabase(BaseDatabase):
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("sqlserver_query_ms", duration)
             metrics.inc("sqlserver_query_count")
+            record_query(query, duration)
+            record_query(query, duration)
+            record_query(query, duration)
             await self.circuit_breaker.record_success()
             return rows
         except pyodbc.Error:

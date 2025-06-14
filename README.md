@@ -8,6 +8,10 @@ This project builds a high-performance claims processing system with an integrat
 - Bulk inserts utilize multiple connections for higher throughput.
 - Query plans can be inspected via `src/analysis/query_plan.py` for tuning.
 - Connection pool sizes are configurable for improved multiplexing.
+- Connection pool metrics are monitored by `pool_monitor` to spot saturation.
+- Query timings are tracked with `query_tracker` for performance analysis.
+- Slow queries can be fed to the `index_recommender` to generate index suggestions.
+- The `partition_historical_data` script partitions old claim records by year.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a high-level system diagram.
 
