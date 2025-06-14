@@ -131,6 +131,32 @@ class ClaimService:
             rows,
         )
 
+    async def bulk_insert_sqlserver_tvp(
+        self, claims: Iterable[Dict[str, Any]]
+    ) -> int:
+        """Bulk insert claims into SQL Server using TVP."""
+        tvp_data: list[tuple[Any, Any, Any]] = []
+        for claim in claims:
+            acct = claim.get("patient_account_number")
+            if self.encryption_key and acct is not None:
+                acct = encrypt_text(str(acct), self.encryption_key)
+            tvp_data.append(
+                (
+                    acct,
+                    claim.get("facility_id"),
+                    claim.get("procedure_code"),
+                )
+            )
+
+        bulk = getattr(self.sql, "bulk_insert_tvp", None)
+        if not callable(bulk):
+            raise AttributeError("SQLServer bulk_insert_tvp not available")
+        return await bulk(
+            "claims",
+            ["patient_account_number", "facility_id", "procedure_code"],
+            tvp_data,
+        )
+
     async def delete_claim(self, account: str, facility: str) -> None:
         await self.sql.execute(
             "DELETE FROM claims WHERE patient_account_number = ? AND facility_id = ?",
