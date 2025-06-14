@@ -28,10 +28,12 @@ except Exception:  # pragma: no cover - allow running without starlette
 
 import logging
 import re
+import time
 
 from fastapi.responses import JSONResponse
 
 from ..monitoring.profiling import start_profiling, stop_profiling
+from ..utils.logging import RequestContextFilter
 
 
 def create_app(
@@ -121,6 +123,37 @@ def create_app(
             return response
 
     app.add_middleware(SanitizeMiddleware)
+
+    class RequestLoggingMiddleware(BaseHTTPMiddleware):
+        """Log incoming requests and responses with context."""
+
+        def __init__(self, app: FastAPI) -> None:  # type: ignore[override]
+            super().__init__(app)
+            self.logger = logging.getLogger("claims_processor")
+            if not any(
+                isinstance(f, RequestContextFilter) for f in self.logger.filters
+            ):
+                self.logger.addFilter(RequestContextFilter())
+
+        async def dispatch(self, request: Request, call_next):
+            start = time.perf_counter()
+            self.logger.info(
+                "request", extra={"path": request.url.path, "method": request.method}
+            )
+            response = await call_next(request)
+            latency_ms = (time.perf_counter() - start) * 1000
+            self.logger.info(
+                "response",
+                extra={
+                    "path": request.url.path,
+                    "method": request.method,
+                    "status": response.status_code,
+                    "latency_ms": latency_ms,
+                },
+            )
+            return response
+
+    app.add_middleware(RequestLoggingMiddleware)
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):

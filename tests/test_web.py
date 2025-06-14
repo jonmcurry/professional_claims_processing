@@ -1,9 +1,13 @@
 import asyncio
+import logging
+
 import pytest
+
 from fastapi.testclient import TestClient
-from src.web.app import create_app
-from src.web.status import processing_status, batch_status
 from src.monitoring.metrics import metrics
+from src.web.app import create_app
+from src.web.status import batch_status, processing_status
+
 
 class DummyDB:
     async def connect(self):
@@ -18,6 +22,7 @@ class DummyDB:
     async def health_check(self):
         return True
 
+
 class DummyPG(DummyDB):
     pass
 
@@ -26,7 +31,9 @@ class DummyPG(DummyDB):
 def client():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    app = create_app(sql_db=DummyDB(), pg_db=DummyPG(), api_key="test", rate_limit_per_sec=1)
+    app = create_app(
+        sql_db=DummyDB(), pg_db=DummyPG(), api_key="test", rate_limit_per_sec=1
+    )
     with TestClient(app) as client:
         yield client
     loop.close()
@@ -80,12 +87,16 @@ def test_metrics_endpoint(client):
 
 
 def test_auditor_role_allowed_on_user_endpoints(client):
-    resp = client.get("/status", headers={"X-API-Key": "test", "X-User-Role": "auditor"})
+    resp = client.get(
+        "/status", headers={"X-API-Key": "test", "X-User-Role": "auditor"}
+    )
     assert resp.status_code == 200
 
 
 def test_auditor_role_denied_on_admin_endpoint(client):
-    resp = client.get("/metrics", headers={"X-API-Key": "test", "X-User-Role": "auditor"})
+    resp = client.get(
+        "/metrics", headers={"X-API-Key": "test", "X-User-Role": "auditor"}
+    )
     assert resp.status_code == 403
 
 
@@ -95,3 +106,16 @@ def test_rate_limit(client):
     resp2 = client.get("/liveness")
     assert resp2.status_code == 429
 
+
+def test_request_logging_middleware(client, caplog):
+    with caplog.at_level(logging.INFO):
+        resp = client.get("/liveness")
+    assert resp.status_code == 200
+    assert any(
+        r.message == "request" and getattr(r, "path", None) == "/liveness"
+        for r in caplog.records
+    )
+    assert any(
+        r.message == "response" and getattr(r, "status", None) == 200
+        for r in caplog.records
+    )
