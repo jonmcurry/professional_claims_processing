@@ -173,6 +173,44 @@ def test_batch_prefetches_rvu(monkeypatch):
     assert {"P1"} in pipeline.rvu_cache.prefetched
 
 
+def test_process_claims_batch(monkeypatch):
+    cfg = AppConfig(
+        postgres=PostgresConfig("", 0, "", "", ""),
+        sqlserver=SQLServerConfig("", 0, "", "", ""),
+        processing=ProcessingConfig(batch_size=1),
+        security=SecurityConfig(api_key="k"),
+        cache=CacheConfig(),
+        model=ModelConfig(path="model.joblib"),
+    )
+    pipeline = ClaimsPipeline(cfg)
+    pipeline.pg = DummyPostgres()
+    pipeline.sql = DummySQL()
+    pipeline.model = DummyModel()
+    pipeline.rules_engine = RulesEngine([])
+    pipeline.validator = ClaimValidator({"F1"}, {"A"})
+    pipeline.service = ClaimService(pipeline.pg, pipeline.sql)
+    pipeline.rvu_cache = DummyRvuCache()
+    monkeypatch.setattr("src.utils.audit.record_audit_event", noop)
+    claims = [
+        {
+            "claim_id": "1",
+            "patient_account_number": "111",
+            "facility_id": "F1",
+            "procedure_code": "P1",
+            "financial_class": "A",
+        }
+    ]
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        res = loop.run_until_complete(pipeline.process_claims_batch(claims))
+    finally:
+        loop.close()
+        asyncio.set_event_loop(asyncio.new_event_loop())
+    assert res == [("111", "F1")]
+    assert pipeline.sql.inserted == [("111", "F1")]
+
+
 class DummyFilterModel:
     def __init__(self, path: str, version: str = "1"):
         self.path = path

@@ -655,6 +655,83 @@ class ClaimsPipeline:
         await self._checkpoint(claim.get("claim_id", ""), "completed")
         return (claim["patient_account_number"], claim["facility_id"])
 
+    async def process_claims_batch(
+        self, claims: list[Dict[str, Any]]
+    ) -> list[tuple[str, str]]:
+        """Process an already fetched batch of claims using bulk operations."""
+
+        validations: dict[str, list[str]] = {}
+        rules: dict[str, list[str]] = {}
+        if self.validator:
+            validations = await self.validator.validate_batch(claims)
+        if self.rules_engine:
+            rules = self.rules_engine.evaluate_batch(claims)
+
+        codes = [c.get("procedure_code", "") for c in claims]
+        rvu_map = await self.rvu_cache.get_many(codes) if self.rvu_cache else {}
+
+        predictions: list[int] = []
+        if self.model:
+            if hasattr(self.model, "predict_batch"):
+                predictions = self.model.predict_batch(claims)
+            else:
+                predictions = [self.model.predict(c) for c in claims]
+        else:
+            predictions = [0 for _ in claims]
+
+        rows: list[tuple[str, str]] = []
+        for claim, prediction in zip(claims, predictions):
+            cid = claim.get("claim_id", "")
+            v_err = validations.get(cid, [])
+            r_err = rules.get(cid, [])
+            if v_err or r_err:
+                processing_status["failed"] += 1
+                metrics.inc("claims_failed")
+                suggestions = self.repair_suggester.suggest(v_err + r_err)
+                await self.service.record_failed_claim(
+                    claim,
+                    "validation",
+                    suggestions,
+                    category=ErrorCategory.VALIDATION.value,
+                )
+                continue
+
+            claim["filter_number"] = prediction
+            if self.rvu_cache:
+                rvu = rvu_map.get(claim.get("procedure_code", ""))
+                if rvu:
+                    claim["rvu_value"] = rvu.get("total_rvu")
+                    units = float(claim.get("units", 1) or 1)
+                    conv = float(self.cfg.processing.conversion_factor)
+                    try:
+                        rvu_total = float(rvu.get("total_rvu", 0))
+                        claim["reimbursement_amount"] = rvu_total * units * conv
+                    except Exception:
+                        claim["reimbursement_amount"] = None
+
+            await record_audit_event(
+                self.sql,
+                "claims",
+                cid,
+                "insert",
+                new_values=claim,
+            )
+            row = (
+                claim.get("patient_account_number", ""),
+                claim.get("facility_id", ""),
+            )
+            if row[0] and row[1]:
+                rows.append(row)  # type: ignore
+
+        if rows:
+            await self.service.insert_claims(
+                rows, concurrency=self.cfg.processing.insert_workers
+            )
+            processing_status["processed"] += len(rows)
+            metrics.inc("claims_processed", len(rows))
+
+        return rows
+
     async def process_partial_claim(
         self, claim_id: str, updates: Dict[str, Any]
     ) -> None:
