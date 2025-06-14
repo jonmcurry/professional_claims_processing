@@ -35,6 +35,7 @@ from fastapi.responses import JSONResponse
 
 from ..monitoring.profiling import start_profiling, stop_profiling
 from ..utils.logging import RequestContextFilter
+from ..utils.audit import record_audit_event
 
 
 def create_app(
@@ -111,7 +112,7 @@ def create_app(
         "/profiling/stop": {"admin"},
     }
 
-    def _check_role(path: str, role: str | None) -> None:
+    async def _check_role(request: Request, path: str, role: str | None) -> None:
         """Validate that the provided role can access the given path."""
         if role is None:
             # When no role header is provided, allow access for backward
@@ -120,6 +121,17 @@ def create_app(
         allowed = role_permissions.get(path, {"auditor", "user", "admin"})
         current = role or "user"
         if current not in allowed:
+            ip = (
+                getattr(getattr(request, "client", None), "host", None)
+                or request.headers.get("X-Forwarded-For", "unknown")
+            )
+            await record_audit_event(
+                sql,
+                "auth",
+                ip,
+                "unauthorized",
+                new_values={"path": path, "role": role, "headers": dict(request.headers)},
+            )
             raise HTTPException(status_code=403, detail="Forbidden")
 
     @app.middleware("http")
@@ -198,8 +210,19 @@ def create_app(
         response.headers.setdefault("Content-Security-Policy", "default-src 'self'")
         return response
 
-    def _check_key(x_api_key: str) -> None:
+    async def _check_key(request: Request, x_api_key: str) -> None:
         if required_key and x_api_key != required_key:
+            ip = (
+                getattr(getattr(request, "client", None), "host", None)
+                or request.headers.get("X-Forwarded-For", "unknown")
+            )
+            await record_audit_event(
+                sql,
+                "auth",
+                ip,
+                "invalid_api_key",
+                new_values={"path": request.url.path, "headers": dict(request.headers)},
+            )
             raise HTTPException(status_code=401, detail="Invalid API key")
 
     @app.on_event("startup")
@@ -219,8 +242,8 @@ def create_app(
         x_user_role: str | None = Header(None),
     ):
         role = x_user_role or request.headers.get("X-User-Role")
-        _check_key(x_api_key)
-        _check_role(request.url.path, role)
+        await _check_key(request, x_api_key)
+        await _check_role(request, request.url.path, role)
         rows = await sql.fetch(
             "SELECT TOP 100 * FROM failed_claims ORDER BY failed_at DESC"
         )
@@ -233,8 +256,8 @@ def create_app(
         x_user_role: str | None = Header(None),
     ):
         role = x_user_role or request.headers.get("X-User-Role")
-        _check_key(x_api_key)
-        _check_role(request.url.path, role)
+        await _check_key(request, x_api_key)
+        await _check_role(request, request.url.path, role)
         rows = await sql.fetch(
             "SELECT TOP 100 * FROM failed_claims ORDER BY failed_at DESC"
         )
@@ -263,8 +286,8 @@ def create_app(
         x_user_role: str | None = Header(None),
     ):
         role = x_user_role or request.headers.get("X-User-Role")
-        _check_key(x_api_key)
-        _check_role(request.url.path, role)
+        await _check_key(request, x_api_key)
+        await _check_role(request, request.url.path, role)
         from .status import sync_status
 
         return {"processing": processing_status, "sync": sync_status}
@@ -276,8 +299,8 @@ def create_app(
         x_user_role: str | None = Header(None),
     ):
         role = x_user_role or request.headers.get("X-User-Role")
-        _check_key(x_api_key)
-        _check_role(request.url.path, role)
+        await _check_key(request, x_api_key)
+        await _check_role(request, request.url.path, role)
         return batch_status
 
     @app.get("/health")
@@ -287,8 +310,8 @@ def create_app(
         x_user_role: str | None = Header(None),
     ):
         role = x_user_role or request.headers.get("X-User-Role")
-        _check_key(x_api_key)
-        _check_role(request.url.path, role)
+        await _check_key(request, x_api_key)
+        await _check_role(request, request.url.path, role)
         status = {"sqlserver": await sql.health_check()}
         if redis:
             status["redis"] = await redis.health_check()
@@ -303,8 +326,8 @@ def create_app(
         x_user_role: str | None = Header(None),
     ):
         role = x_user_role or request.headers.get("X-User-Role")
-        _check_key(x_api_key)
-        _check_role(request.url.path, role)
+        await _check_key(request, x_api_key)
+        await _check_role(request, request.url.path, role)
         status = {
             "postgres": await pg.health_check(),
             "sqlserver": await sql.health_check(),
@@ -326,8 +349,8 @@ def create_app(
         x_user_role: str | None = Header(None),
     ):
         role = x_user_role or request.headers.get("X-User-Role")
-        _check_key(x_api_key)
-        _check_role(request.url.path, role)
+        await _check_key(request, x_api_key)
+        await _check_role(request, request.url.path, role)
         return metrics.as_dict()
 
     @app.get("/profiling/start")
@@ -337,8 +360,8 @@ def create_app(
         x_user_role: str | None = Header(None),
     ):
         role = x_user_role or request.headers.get("X-User-Role")
-        _check_key(x_api_key)
-        _check_role(request.url.path, role)
+        await _check_key(request, x_api_key)
+        await _check_role(request, request.url.path, role)
         start_profiling()
         return {"profiling": "started"}
 
@@ -349,8 +372,8 @@ def create_app(
         x_user_role: str | None = Header(None),
     ):
         role = x_user_role or request.headers.get("X-User-Role")
-        _check_key(x_api_key)
-        _check_role(request.url.path, role)
+        await _check_key(request, x_api_key)
+        await _check_role(request, request.url.path, role)
         stats = stop_profiling()
         return {"profiling": "stopped", "stats": stats}
 
