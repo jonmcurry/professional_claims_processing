@@ -16,9 +16,9 @@ from ..config.config import PostgresConfig
 from ..monitoring.metrics import metrics
 from ..monitoring.stats import latencies
 from ..utils.cache import InMemoryCache
-from ..utils.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
-from ..utils.errors import (CircuitBreakerOpenError, DatabaseConnectionError,
-                            QueryError)
+from ..utils.circuit_breaker import CircuitBreaker
+from ..utils.errors import CircuitBreakerOpenError, DatabaseConnectionError, QueryError
+from .connection_utils import connect_with_retry, report_pool_metrics
 from .base import BaseDatabase
 from .memory_pool import memory_pool
 
@@ -172,10 +172,8 @@ class PostgresDatabase(BaseDatabase):
 
     async def connect(self) -> None:
         """Enhanced connection with pre-warming and health monitoring."""
-        if not await self.circuit_breaker.allow():
-            raise CircuitBreakerOpenError("Postgres circuit open")
-        
-        try:
+
+        async def _open() -> None:
             # Create main pool with optimizations
             self.pool = await asyncpg.create_pool(
                 host=self.cfg.host,
@@ -198,7 +196,7 @@ class PostgresDatabase(BaseDatabase):
                     'work_mem': '256MB',
                 }
             )
-            
+
             # Create replica pool if configured
             if self.cfg.replica_host:
                 self.replica_pool = await asyncpg.create_pool(
@@ -219,14 +217,15 @@ class PostgresDatabase(BaseDatabase):
 
             # Aggressive connection pool pre-warming
             await self._warm_connection_pools()
-            
+
             # Pre-prepare common queries
             await self._prepare_common_queries()
-            
-        except Exception as e:
-            await self.circuit_breaker.record_failure()
-            raise DatabaseConnectionError(str(e)) from e
-        await self.circuit_breaker.record_success()
+
+        await connect_with_retry(
+            self.circuit_breaker,
+            CircuitBreakerOpenError("Postgres circuit open"),
+            _open,
+        )
 
     async def fetch_optimized_with_memory_management(
         self, query: str, *params: Any, use_replica: bool = True
@@ -731,4 +730,27 @@ class PostgresDatabase(BaseDatabase):
         if self.cfg.replica_host and not self.replica_pool:
             await self.connect()
 
-    async def _health_check_pools(self) -> None
+    async def _health_check_pools(self) -> None:
+        """Health check for connection pools."""
+        try:
+            healthy = bool(self.pool)
+            if healthy and self.replica_pool:
+                healthy = True
+            if healthy:
+                await self.circuit_breaker.record_success()
+            else:
+                await self.circuit_breaker.record_failure()
+        except Exception:
+            await self.circuit_breaker.record_failure()
+
+    def report_pool_status(self) -> None:
+        """Report connection pool metrics."""
+        main_size = self.pool._queue.qsize() if self.pool else 0  # type: ignore[attr-defined]
+        report_pool_metrics(
+            "postgres",
+            size=main_size,
+            min_size=self.cfg.min_pool_size,
+            max_size=self.cfg.max_pool_size,
+            prepared_statements=len(self._prepared),
+            cache_memory=self._current_cache_memory,
+        )
