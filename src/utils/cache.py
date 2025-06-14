@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import psutil
 
 from ..monitoring.metrics import metrics
+from ..utils.circuit_breaker import CircuitBreaker
 from ..utils.memory import memory_pool
 
 try:
@@ -132,6 +133,7 @@ class DistributedCache:
         self._connection_pool = None
         self._last_health_check = 0
         self._health_check_interval = 30
+        self.circuit_breaker = CircuitBreaker(name="redis")
 
         try:
             if aioredis:
@@ -175,6 +177,7 @@ class DistributedCache:
                 return dict(data_container)
 
             except Exception:
+                await self.circuit_breaker.record_failure()
                 return None
             finally:
                 self._memory_pool.release("redis_data", data_container)
@@ -197,6 +200,7 @@ class DistributedCache:
                 await self.client.set(key, json.dumps(data_container), ex=self.ttl)
 
             except Exception:
+                await self.circuit_breaker.record_failure()
                 pass
             finally:
                 self._memory_pool.release("redis_data", data_container)
@@ -210,6 +214,7 @@ class DistributedCache:
             try:
                 await self.client.delete(key)
             except Exception:
+                await self.circuit_breaker.record_failure()
                 pass
 
     async def get_many(self, keys: List[str]) -> Dict[str, Optional[Any]]:
@@ -243,6 +248,7 @@ class DistributedCache:
                     results[key] = None
 
         except Exception:
+            await self.circuit_breaker.record_failure()
             # Fallback to individual gets
             for key in keys:
                 results[key] = await self.get(key)
@@ -275,6 +281,7 @@ class DistributedCache:
             await pipe.execute()
 
         except Exception:
+            await self.circuit_breaker.record_failure()
             # Fallback to individual sets
             for key, value in items.items():
                 await self.set(key, value)
@@ -282,7 +289,10 @@ class DistributedCache:
             self._memory_pool.release("redis_data", data_container)
 
     async def _health_check(self) -> bool:
-        """Check Redis connection health."""
+        """Check Redis connection health with circuit breaker."""
+        if not await self.circuit_breaker.allow():
+            return False
+
         current_time = time.time()
 
         if current_time - self._last_health_check < self._health_check_interval:
@@ -291,8 +301,10 @@ class DistributedCache:
         try:
             await self.client.ping()
             self._last_health_check = current_time
+            await self.circuit_breaker.record_success()
             return True
         except Exception:
+            await self.circuit_breaker.record_failure()
             return False
 
     async def cleanup_expired(self) -> int:
