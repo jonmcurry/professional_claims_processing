@@ -4,6 +4,7 @@ from contextlib import contextmanager
 
 trace_id_var: ContextVar[str] = ContextVar("trace_id", default="")
 span_id_var: ContextVar[str] = ContextVar("span_id", default="")
+correlation_id_var: ContextVar[str] = ContextVar("correlation_id", default="")
 
 
 def start_trace(trace_id: str | None = None) -> str:
