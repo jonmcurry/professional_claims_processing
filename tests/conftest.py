@@ -25,6 +25,29 @@ if 'psutil' not in sys.modules:
             return types.SimpleNamespace(rss=0)
     psutil_mod.Process = lambda *a, **k: _Proc()
     sys.modules['psutil'] = psutil_mod
+
+# Minimal cryptography stub so tests run without the dependency
+if 'cryptography' not in sys.modules:
+    crypto_mod = types.ModuleType('cryptography')
+    fernet_mod = types.ModuleType('fernet')
+
+    import base64
+
+    class _Fernet:
+        def __init__(self, key: bytes):
+            self._key = key
+
+        def encrypt(self, data: bytes) -> bytes:
+            return base64.b64encode(self._key + data)
+
+        def decrypt(self, token: bytes) -> bytes:
+            decoded = base64.b64decode(token)
+            return decoded[len(self._key) :]
+
+    fernet_mod.Fernet = _Fernet
+    crypto_mod.fernet = fernet_mod
+    sys.modules['cryptography'] = crypto_mod
+    sys.modules['cryptography.fernet'] = fernet_mod
 import importlib
 if 'src.utils.memory' not in sys.modules:
     mp = importlib.import_module('src.utils.memory_pool')
@@ -41,3 +64,14 @@ if 'src.memory.memory_pool' not in sys.modules:
     mem_pkg = types.ModuleType('src.memory.memory_pool')
     mem_pkg.sql_memory_pool = mp.memory_pool
     sys.modules['src.memory.memory_pool'] = mem_pkg
+
+# Provide compatibility helper for older monkeypatch API used in tests
+import pytest
+if not hasattr(pytest.MonkeyPatch, "dict"):
+    def _dict(self, mapping, values):
+        if mapping is sys.modules and values.get("cryptography") is None:
+            mapping.pop("cryptography.fernet", None)
+        for k, v in values.items():
+            self.setitem(mapping, k, v)
+
+    pytest.MonkeyPatch.dict = _dict
