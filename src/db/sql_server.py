@@ -12,8 +12,9 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     psutil = None
 
-from ..utils.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
-from ..utils.errors import DatabaseConnectionError, QueryError
+from ..utils.circuit_breaker import CircuitBreaker
+from ..utils.errors import CircuitBreakerOpenError, DatabaseConnectionError, QueryError
+from .connection_utils import connect_with_retry, report_pool_metrics
 from ..utils.cache import InMemoryCache
 
 from .base import BaseDatabase
@@ -132,29 +133,28 @@ class SQLServerDatabase(BaseDatabase):
 
     async def connect(self, size: int | None = None) -> None:
         """Enhanced connection with aggressive pre-warming and optimization."""
-        if not await self.circuit_breaker.allow():
-            raise CircuitBreakerOpenError("SQLServer circuit open")
-        
-        try:
+
+        async def _open() -> None:
             pool_size = size or self.cfg.pool_size
             self.pool.clear()  # Clear any existing connections
-            
+
             # Create connections with optimizations
-            for i in range(pool_size):
+            for _ in range(pool_size):
                 conn = self._create_connection_optimized()
                 self.pool.append(conn)
                 self.current_pool_size += 1
-            
+
             # Pre-warm connections and prepare common statements
             await self._warm_connection_pool()
             await self._prepare_common_statements()
-            
+
             metrics.set("sqlserver_pool_initial_size", float(len(self.pool)))
-            
-        except Exception as e:
-            await self.circuit_breaker.record_failure()
-            raise DatabaseConnectionError(str(e)) from e
-        await self.circuit_breaker.record_success()
+
+        await connect_with_retry(
+            self.circuit_breaker,
+            CircuitBreakerOpenError("SQLServer circuit open"),
+            _open,
+        )
 
     def _create_connection_optimized(self) -> pyodbc.Connection:
         """Create an optimized connection with performance and memory settings."""
@@ -965,17 +965,15 @@ class SQLServerDatabase(BaseDatabase):
 
     def report_pool_status(self) -> None:
         """Enhanced pool status reporting with optimization metrics."""
-        metrics.set("sqlserver_pool_size", float(len(self.pool)))
-        metrics.set("sqlserver_pool_max_size", float(self.max_pool))
-        metrics.set("sqlserver_pool_min_size", float(self.min_pool))
-        metrics.set("sqlserver_connections_created", float(self._connection_create_count))
-        metrics.set("sqlserver_prepared_statements", float(len(self._prepared)))
-        metrics.set("sqlserver_cache_memory_mb", self._current_cache_memory / 1024 / 1024)
-        
-        # Calculate pool utilization
-        if self.max_pool > 0:
-            utilization = (self.max_pool - len(self.pool)) / self.max_pool
-            metrics.set("sqlserver_pool_utilization", utilization)
+        report_pool_metrics(
+            "sqlserver",
+            size=len(self.pool),
+            min_size=self.min_pool,
+            max_size=self.max_pool,
+            connections_created=self._connection_create_count,
+            prepared_statements=len(self._prepared),
+            cache_memory=self._current_cache_memory,
+        )
 
     async def adjust_pool_size(self) -> None:
         """Enhanced dynamic pool adjustment based on load and performance."""
