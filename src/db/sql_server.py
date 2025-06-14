@@ -107,8 +107,6 @@ class SQLServerDatabase(BaseDatabase):
             metrics.inc("sqlserver_query_count")
             latencies.record("sqlserver_query", duration)
             record_query(query, duration)
-            record_query(query, duration)
-            record_query(query, duration)
             await self.circuit_breaker.record_success()
             self.query_cache.set(cache_key, rows)
             return rows

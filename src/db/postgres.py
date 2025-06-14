@@ -80,8 +80,6 @@ class PostgresDatabase(BaseDatabase):
             metrics.inc("postgres_query_count")
             latencies.record("postgres_query", duration)
             record_query(query, duration)
-            record_query(query, duration)
-            record_query(query, duration)
             await self.circuit_breaker.record_success()
             result = [dict(row) for row in rows]
             self.query_cache.set(cache_key, result)
