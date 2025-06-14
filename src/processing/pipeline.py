@@ -14,6 +14,7 @@ from ..models.ab_test import ABTestModel
 from ..models.filter_model import FilterModel
 from ..models.monitor import ModelMonitor
 from ..monitoring import pool_monitor, resource_monitor
+from ..alerting import AlertManager, EmailNotifier
 from ..monitoring.metrics import metrics, sla_monitor
 from ..rules.durable_engine import DurableRulesEngine
 from ..security.compliance import mask_claim_data
@@ -505,10 +506,13 @@ class ClaimsPipeline:
         # Phase 6: Monitoring and Resource Management
         monitoring_start = time.perf_counter()
         
-        # Start resource monitoring
+        # Start resource monitoring and alerting
+        notifier = EmailNotifier()
+        alert_manager = AlertManager(self.cfg, notifier)
         resource_monitor.start(
             interval=self.cfg.monitoring.resource_check_interval,
             log_interval=self.cfg.monitoring.resource_log_interval,
+            alert_manager=alert_manager,
         )
         pool_monitor.start(self.pg, self.sql, interval=2.0)
         

@@ -13,8 +13,10 @@ from collections import deque
 from .metrics import metrics
 from ..analysis.trending import TrendingTracker
 from ..analysis.capacity import predict_resource_usage, predict_throughput
+from ..alerting import AlertManager
 
 _task: Optional[asyncio.Task] = None
+_alert_manager: Optional[AlertManager] = None
 _trending = TrendingTracker(window=60)
 _cpu_history: deque[float] = deque(maxlen=60)
 _mem_history: deque[float] = deque(maxlen=60)
@@ -28,8 +30,10 @@ async def _collect(interval: float, log_interval: float) -> None:
         if psutil:
             cpu = float(psutil.cpu_percent())
             metrics.set("cpu_usage_percent", cpu)
-            mem = psutil.virtual_memory().used / (1024 * 1024)
+            mem_info = psutil.virtual_memory()
+            mem = mem_info.used / (1024 * 1024)
             metrics.set("memory_usage_mb", float(mem))
+            metrics.set("memory_usage_percent", float(mem_info.percent))
             _cpu_history.append(cpu)
             _mem_history.append(mem)
             metrics.set(
@@ -59,21 +63,29 @@ async def _collect(interval: float, log_interval: float) -> None:
                 "throughput_forecast",
                 predict_throughput(list(_throughput_history)),
             )
+        if _alert_manager:
+            _alert_manager.evaluate()
         await asyncio.sleep(interval)
 
 
-def start(interval: float = 1.0, log_interval: float = 60.0) -> None:
+def start(
+    interval: float = 1.0,
+    log_interval: float = 60.0,
+    alert_manager: Optional[AlertManager] = None,
+) -> None:
     """Start background resource monitoring."""
-    global _task
+    global _task, _alert_manager
     if _task:
         return
+    _alert_manager = alert_manager
     loop = asyncio.get_event_loop()
     _task = loop.create_task(_collect(interval, log_interval))
 
 
 def stop() -> None:
     """Stop background resource monitoring."""
-    global _task
+    global _task, _alert_manager
     if _task:
         _task.cancel()
         _task = None
+    _alert_manager = None

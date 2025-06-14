@@ -15,3 +15,11 @@ Example Prometheus alert rules:
 ```
 
 Configure alerts to notify on-call engineers via email or messaging channels when thresholds are exceeded.
+
+## Escalation Policies
+
+1. Notifications are sent to the recipients listed in `config.yaml`.
+2. If an alert persists for more than 30 minutes, escalate to the engineering
+   manager and open a high priority incident.
+3. Critical alerts, such as sustained CPU usage above 90%, require an immediate
+   phone call to the on-call engineer.
