@@ -505,7 +505,10 @@ class ClaimsPipeline:
         monitoring_start = time.perf_counter()
         
         # Start resource monitoring
-        resource_monitor.start(interval=0.5)  # More frequent monitoring
+        resource_monitor.start(
+            interval=self.cfg.monitoring.resource_check_interval,
+            log_interval=self.cfg.monitoring.resource_log_interval,
+        )
         pool_monitor.start(self.pg, self.sql, interval=2.0)
         
         # Start memory monitoring
