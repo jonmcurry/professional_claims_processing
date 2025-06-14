@@ -10,6 +10,8 @@ class Cursor:
         return []
     def prepare(self, query):
         self._prepared = query
+    def setinputsizes(self, sizes):
+        pass
     fast_executemany = False
 
 class Connection:
@@ -19,6 +21,8 @@ class Connection:
         return Cursor()
     def commit(self):
         pass
+
+SQL_STRUCTURED = object()
 
 def connect(*args, **kwargs):
     return Connection()

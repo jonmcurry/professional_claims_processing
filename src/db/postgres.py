@@ -3,9 +3,9 @@ try:
 except Exception:  # pragma: no cover - allow missing dependency in tests
     asyncpg = None
 import asyncio
+import csv
+import io
 import os
-import asyncio
-from typing import Iterable, Any
 import time
 from typing import Any, Iterable
 
@@ -274,6 +274,49 @@ class PostgresDatabase(BaseDatabase):
                 await conn.copy_records_to_table(table, records=rows, columns=list(columns))
             await self.circuit_breaker.record_success()
             return len(rows)
+        except Exception as e:
+            await self.circuit_breaker.record_failure()
+            raise QueryError(str(e)) from e
+
+    async def copy_query(self, query: str, *params: Any) -> Iterable[dict]:
+        """Fetch records using PostgreSQL COPY for fast reads."""
+        if not await self.circuit_breaker.allow():
+            raise CircuitBreakerOpenError("Postgres circuit open")
+        cache_key = query + str(params)
+        cached = self.query_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        await self._ensure_pool()
+        assert self.pool
+        pool = self.replica_pool or self.pool
+        assert pool
+        try:
+            start = time.perf_counter()
+            async with pool.acquire() as conn:
+                buf = io.StringIO()
+                await conn.copy_from_query(query, *params, output=buf, format="csv", header=True)
+            duration = (time.perf_counter() - start) * 1000
+            metrics.inc("postgres_query_ms", duration)
+            metrics.inc("postgres_query_count")
+            latencies.record("postgres_query", duration)
+            await self.circuit_breaker.record_success()
+            buf.seek(0)
+            reader = csv.DictReader(buf)
+            result = [dict(row) for row in reader]
+            self.query_cache.set(cache_key, result)
+            return result
+        except asyncpg.PostgresError:
+            await self.circuit_breaker.record_failure()
+            await self.connect()
+            async with pool.acquire() as conn:
+                buf = io.StringIO()
+                await conn.copy_from_query(query, *params, output=buf, format="csv", header=True)
+            buf.seek(0)
+            reader = csv.DictReader(buf)
+            result = [dict(row) for row in reader]
+            self.query_cache.set(cache_key, result)
+            await self.circuit_breaker.record_success()
+            return result
         except Exception as e:
             await self.circuit_breaker.record_failure()
             raise QueryError(str(e)) from e
