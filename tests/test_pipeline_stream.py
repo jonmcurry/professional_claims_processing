@@ -41,6 +41,10 @@ class DummySQL:
         self.inserted.extend(list(params_seq))
         return len(self.inserted)
 
+    async def bulk_insert_tvp(self, table, columns, rows):
+        self.inserted.extend(list(rows))
+        return len(self.inserted)
+
 async def noop(*args, **kwargs):
     pass
 
@@ -48,21 +52,39 @@ class DummyModel:
     def predict(self, claim):
         return 1
 
-async def stream_claims(batch_size, priority=False):
-    yield {
-        "claim_id": "1",
-        "patient_account_number": "111",
-        "facility_id": "F1",
-        "procedure_code": "P1",
-        "financial_class": "A",
-    }
-    yield {
-        "claim_id": "2",
-        "patient_account_number": "222",
-        "facility_id": "F1",
-        "procedure_code": "P1",
-        "financial_class": "A",
-    }
+
+class DummyRvuCache:
+    def __init__(self):
+        self.prefetched: list[set[str]] = []
+
+    async def warm_cache(self, codes):
+        self.prefetched.append(set(codes))
+
+    async def get(self, code):
+        return {"total_rvu": 1}
+
+async def fetch_claims(batch_size, offset=0, priority=False):
+    if offset == 0:
+        return [
+            {
+                "claim_id": "1",
+                "patient_account_number": "111",
+                "facility_id": "F1",
+                "procedure_code": "P1",
+                "financial_class": "A",
+            }
+        ]
+    if offset == batch_size:
+        return [
+            {
+                "claim_id": "2",
+                "patient_account_number": "222",
+                "facility_id": "F1",
+                "procedure_code": "P1",
+                "financial_class": "A",
+            }
+        ]
+    return []
 
 
 def test_process_stream(monkeypatch):
@@ -81,7 +103,8 @@ def test_process_stream(monkeypatch):
     pipeline.rules_engine = RulesEngine([])
     pipeline.validator = ClaimValidator({"F1"}, {"A"})
     pipeline.service = ClaimService(pipeline.pg, pipeline.sql)
-    pipeline.service.stream_claims = stream_claims
+    pipeline.service.fetch_claims = fetch_claims
+    pipeline.rvu_cache = DummyRvuCache()
     monkeypatch.setattr("src.utils.audit.record_audit_event", noop)
     monkeypatch.setattr("src.processing.pipeline.record_audit_event", noop)
 
@@ -94,3 +117,5 @@ def test_process_stream(monkeypatch):
         asyncio.set_event_loop(asyncio.new_event_loop())
 
     assert sorted(pipeline.sql.inserted) == [("111", "F1"), ("222", "F1")]
+    assert pipeline.sql.inserted == [("111", "F1"), ("222", "F1")]
+    assert pipeline.rvu_cache.prefetched == [{"P1"}, {"P1"}]

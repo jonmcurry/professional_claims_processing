@@ -44,7 +44,20 @@ class FastAPI:
         return decorator
 
     def add_middleware(self, cls, **kwargs):
-        instance = cls(**kwargs)
+        """Register a middleware class with the application.
+
+        The real FastAPI/Starlette implementation instantiates middleware
+        with the application instance as the first argument. Some of the
+        tests rely on this behaviour when they provide middleware classes
+        compatible with ``BaseHTTPMiddleware``.  Previously the minimal
+        ``FastAPI`` stub here instantiated middleware without passing the
+        application which resulted in a ``TypeError`` once a middleware's
+        ``__init__`` required the ``app`` parameter.  To mirror the behaviour
+        more closely and avoid such errors we now pass ``self`` when
+        instantiating middleware classes.
+        """
+
+        instance = cls(self, **kwargs)
         self.middleware_handlers.append(instance.dispatch)
 
     def exception_handler(self, exc_cls):

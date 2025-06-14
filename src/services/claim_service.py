@@ -1,4 +1,5 @@
 from typing import Any, Dict, Iterable, List
+import json
 
 from ..db.postgres import PostgresDatabase
 from ..db.sql_server import SQLServerDatabase
@@ -50,7 +51,14 @@ class ClaimService:
                 acct = encrypt_text(str(acct), self.encryption_key)
             processed.append((acct, facility))
         try:
-            if "concurrency" in self.sql.execute_many.__code__.co_varnames:
+            bulk = getattr(self.sql, "bulk_insert_tvp", None)
+            if callable(bulk):
+                await bulk(
+                    "claims",
+                    ["patient_account_number", "facility_id"],
+                    processed,
+                )
+            elif "concurrency" in self.sql.execute_many.__code__.co_varnames:
                 await self.sql.execute_many(
                     "INSERT INTO claims (patient_account_number, facility_id) VALUES (?, ?)",
                     processed,
@@ -160,7 +168,7 @@ class ClaimService:
                 except Exception:
                     continue
             try:
-                claim = eval(claim_str)
+                claim = json.loads(claim_str)
             except Exception:
                 continue
             pr = int(claim.get("priority", 0) or 0)
