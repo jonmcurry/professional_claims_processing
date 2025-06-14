@@ -1,8 +1,16 @@
+import gc
+import time
 import asyncio
 import os
-import time
+from typing import Any, Dict, Iterable, List, Optional
+import weakref
+
 import pyodbc
-from typing import Iterable, Any, Dict, List, Optional
+
+try:
+    import psutil
+except Exception:  # pragma: no cover - optional dependency
+    psutil = None
 
 from ..utils.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
 from ..utils.errors import DatabaseConnectionError, QueryError
@@ -13,27 +21,114 @@ from ..config.config import SQLServerConfig
 from ..monitoring.metrics import metrics
 from ..analysis.query_tracker import record as record_query
 from ..monitoring.stats import latencies
+from ..memory.memory_pool import sql_memory_pool
+
+
+class MemoryMonitor:
+    """SQL Server specific memory monitoring."""
+    
+    def __init__(self, warning_threshold_mb: int = 1000, critical_threshold_mb: int = 1500):
+        self.warning_threshold = warning_threshold_mb
+        self.critical_threshold = critical_threshold_mb
+        self.last_warning = 0
+        self.last_critical = 0
+        self.warning_interval = 60  # 1 minute between warnings
+        self.critical_interval = 30  # 30 seconds between critical alerts
+    
+    def check_memory(self) -> Dict[str, Any]:
+        """Check current memory usage and return status."""
+        try:
+            if not psutil:
+                return {"status": "unknown", "alerts": [], "error": "psutil not available"}
+                
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            memory_mb = memory_info.rss / 1024 / 1024
+            
+            system_memory = psutil.virtual_memory()
+            available_mb = system_memory.available / 1024 / 1024
+            
+            current_time = time.time()
+            alerts = []
+            
+            # Check critical threshold
+            if memory_mb > self.critical_threshold:
+                if current_time - self.last_critical > self.critical_interval:
+                    alerts.append({
+                        "level": "critical",
+                        "message": f"Critical SQL Server memory usage: {memory_mb:.1f}MB",
+                        "memory_mb": memory_mb
+                    })
+                    self.last_critical = current_time
+            
+            # Check warning threshold
+            elif memory_mb > self.warning_threshold:
+                if current_time - self.last_warning > self.warning_interval:
+                    alerts.append({
+                        "level": "warning",
+                        "message": f"High SQL Server memory usage: {memory_mb:.1f}MB",
+                        "memory_mb": memory_mb
+                    })
+                    self.last_warning = current_time
+            
+            return {
+                "memory_mb": memory_mb,
+                "available_mb": available_mb,
+                "status": "critical" if memory_mb > self.critical_threshold else 
+                         "warning" if memory_mb > self.warning_threshold else "ok",
+                "alerts": alerts
+            }
+        
+        except Exception as e:
+            return {
+                "error": str(e),
+                "status": "unknown",
+                "alerts": []
+            }
+
+
+# Global SQL Server memory monitor
+sql_memory_monitor = MemoryMonitor()
 
 
 class SQLServerDatabase(BaseDatabase):
+    """Enhanced SQL Server database with comprehensive memory management."""
+
     def __init__(self, cfg: SQLServerConfig):
         self.cfg = cfg
         self.pool: list[pyodbc.Connection] = []
         self._lock = asyncio.Lock()
+        
         # Enhanced prepared statement management
         self._prepared: Dict[str, str] = {}  # statement_name -> query
         self._prepared_on_connections: set[int] = set()  # connection IDs with prepared statements
         self.circuit_breaker = CircuitBreaker()
+        
         # Enhanced query result cache with TTL and size limits
         self.query_cache = InMemoryCache(ttl=60)
+        self._cache_max_memory = 30 * 1024 * 1024  # 30MB max for result cache
+        self._current_cache_memory = 0
+        
         # Connection pool configuration
         self.min_pool = cfg.min_pool_size
         self.max_pool = cfg.max_pool_size
         self.current_pool_size = 0
+        
         # Performance tracking
         self._connection_create_count = 0
         self._last_health_check = 0.0
         self._health_check_interval = 30.0
+        
+        # Memory management additions
+        self._memory_pool = sql_memory_pool
+        self._connection_memory_limit = 100 * 1024 * 1024  # 100MB per connection
+        self._total_memory_limit = 500 * 1024 * 1024  # 500MB total
+        self._memory_check_frequency = 50  # Check every 50 operations
+        self._operation_count = 0
+        self._connection_memory_tracking: Dict[int, float] = {}
+        
+        # Memory cleanup references
+        self._cleanup_refs: List[weakref.ref] = []
 
     async def connect(self, size: int | None = None) -> None:
         """Enhanced connection with aggressive pre-warming and optimization."""
@@ -62,7 +157,7 @@ class SQLServerDatabase(BaseDatabase):
         await self.circuit_breaker.record_success()
 
     def _create_connection_optimized(self) -> pyodbc.Connection:
-        """Create an optimized connection with performance settings."""
+        """Create an optimized connection with performance and memory settings."""
         connection_string = (
             f"DRIVER={{ODBC Driver 17 for SQL Server}};"
             f"SERVER={self.cfg.host},{self.cfg.port};"
@@ -74,6 +169,9 @@ class SQLServerDatabase(BaseDatabase):
             f"Command Timeout=60;"
             f"MultipleActiveResultSets=true;"
             f"TrustServerCertificate=yes;"
+            # Memory optimization settings
+            f"Packet Size=32767;"  # Maximum packet size for better throughput
+            f"LoginTimeout=15;"
         )
         
         conn = pyodbc.connect(connection_string, autocommit=False)
@@ -88,25 +186,41 @@ class SQLServerDatabase(BaseDatabase):
             cursor.execute("SET ANSI_NULLS ON")  # Standard NULL handling
             cursor.execute("SET QUOTED_IDENTIFIER ON")  # Standard identifier quoting
             cursor.execute("SET IMPLICIT_TRANSACTIONS OFF")  # Explicit transaction control
+            
+            # Memory-specific optimizations
+            cursor.execute("SET LOCK_TIMEOUT 30000")  # 30 second lock timeout
+            cursor.execute("SET DEADLOCK_PRIORITY LOW")  # Lower deadlock priority
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")  # Standard isolation
+            
             # Enable fast_executemany for bulk operations
             cursor.fast_executemany = True
         except Exception as e:
             print(f"Warning: Failed to set connection optimizations: {e}")
+        finally:
+            cursor.close()
         
         return conn
 
     async def _warm_connection_pool(self) -> None:
-        """Pre-warm connections by executing simple queries."""
+        """Pre-warm connections by executing simple queries with memory monitoring."""
         warmed_count = 0
         failed_count = 0
         
         for i, conn in enumerate(self.pool):
             try:
+                # Monitor memory before warming
+                initial_memory = self._get_process_memory()
+                
                 cursor = conn.cursor()
                 # Execute a simple query to warm the connection
                 cursor.execute("SELECT 1 as test_query")
                 cursor.fetchone()
                 cursor.close()
+                
+                # Track connection memory usage
+                final_memory = self._get_process_memory()
+                self._connection_memory_tracking[id(conn)] = final_memory - initial_memory
+                
                 warmed_count += 1
             except Exception as e:
                 print(f"Warning: Failed to warm connection {i}: {e}")
@@ -178,40 +292,6 @@ class SQLServerDatabase(BaseDatabase):
                 FROM failed_claims 
                 ORDER BY failed_at DESC
             """,
-            
-            # Audit logging
-            "insert_audit_log": """
-                INSERT INTO audit_log (
-                    table_name, record_id, operation, user_id,
-                    old_values, new_values, operation_timestamp, reason
-                ) VALUES (?, ?, ?, ?, ?, ?, GETDATE(), ?)
-            """,
-            
-            # Performance metrics
-            "insert_performance_metrics": """
-                INSERT INTO performance_metrics (
-                    metric_date, metric_type, facility_id, claims_per_second,
-                    records_per_minute, cpu_usage_percent, memory_usage_mb,
-                    database_response_time_ms, queue_depth, error_rate,
-                    processing_accuracy, revenue_per_claim
-                ) VALUES (GETDATE(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            
-            # RVU data queries
-            "get_rvu_data": """
-                SELECT procedure_code, description, total_rvu, work_rvu,
-                       practice_expense_rvu, malpractice_rvu, conversion_factor
-                FROM rvu_data 
-                WHERE procedure_code = ? AND status = 'active'
-            """,
-            
-            # Batch processing queries
-            "update_batch_status": """
-                UPDATE batch_metadata 
-                SET status = ?, updated_at = GETDATE(), 
-                    processed_claims = ?, failed_claims = ?
-                WHERE batch_id = ?
-            """,
         }
         
         # Prepare statements on all connections
@@ -240,21 +320,383 @@ class SQLServerDatabase(BaseDatabase):
             
             metrics.set(f"sqlserver_prepared_{statement_name}", float(prepared_count))
 
-    async def execute_prepared(self, statement_name: str, *params: Any) -> int:
-        """Execute a prepared statement by name."""
-        if statement_name not in self._prepared:
-            raise ValueError(f"Statement {statement_name} not prepared")
+    async def execute_many_with_memory_management(
+        self,
+        query: str,
+        params_seq: Iterable[Iterable[Any]],
+        *,
+        concurrency: int = 1,
+        batch_size: int = 1000,
+    ) -> int:
+        """Execute many with adaptive memory management."""
+        params_list = list(params_seq)
+        if not params_list:
+            return 0
         
-        query = self._prepared[statement_name]
-        return await self.execute_optimized(query, *params, is_prepared=True)
+        self._operation_count += 1
+        
+        # Periodic memory check
+        if self._operation_count % self._memory_check_frequency == 0:
+            await self._check_database_memory()
+        
+        # Calculate memory-safe batch size
+        safe_batch_size = await self._calculate_safe_batch_size(len(params_list), batch_size)
+        
+        total_processed = 0
+        
+        # Process with memory monitoring
+        for i in range(0, len(params_list), safe_batch_size):
+            batch = params_list[i:i + safe_batch_size]
+            
+            # Use memory pool for processing
+            processing_containers = []
+            try:
+                # Acquire containers for batch processing
+                for _ in range(min(100, len(batch))):  # Limit container allocation
+                    container = self._memory_pool.acquire("sql_containers", dict)
+                    processing_containers.append(container)
+                
+                # Process batch
+                batch_result = await self._execute_batch_with_containers(
+                    query, batch, processing_containers, concurrency
+                )
+                total_processed += batch_result
+                
+            finally:
+                # Return containers to pool
+                for container in processing_containers:
+                    self._memory_pool.release("sql_containers", container)
+        
+        return total_processed
 
-    async def fetch_prepared(self, statement_name: str, *params: Any) -> Iterable[dict]:
-        """Fetch results using a prepared statement."""
-        if statement_name not in self._prepared:
-            raise ValueError(f"Statement {statement_name} not prepared")
+    async def _execute_batch_with_containers(
+        self, query: str, batch: List, containers: List[Dict], concurrency: int
+    ) -> int:
+        """Execute batch using memory-pooled containers."""
+        if concurrency > 1 and len(batch) > 100:
+            # Parallel processing with memory management
+            chunk_size = len(batch) // concurrency + 1
+            chunks = [batch[j:j + chunk_size] for j in range(0, len(batch), chunk_size)]
+
+            async def run_chunk_with_memory(chunk: list) -> int:
+                return await self._process_chunk_with_memory_monitoring(query, chunk)
+
+            results = await asyncio.gather(*[run_chunk_with_memory(c) for c in chunks])
+            return sum(results)
+        else:
+            # Sequential processing with memory monitoring
+            return await self._process_chunk_with_memory_monitoring(query, batch)
+
+    async def _process_chunk_with_memory_monitoring(self, query: str, chunk: List) -> int:
+        """Process chunk with comprehensive memory monitoring."""
+        conn = await self._acquire()
+        initial_memory = self._get_process_memory()
         
-        query = self._prepared[statement_name]
-        return await self.fetch_optimized(query, *params, is_prepared=True)
+        try:
+            cursor = conn.cursor()
+            cursor.fast_executemany = True
+            cursor.executemany(query, chunk)
+            conn.commit()
+            row_count = cursor.rowcount if cursor.rowcount != -1 else len(chunk)
+            cursor.close()
+            
+            # Check memory growth
+            final_memory = self._get_process_memory()
+            memory_growth = final_memory - initial_memory
+            
+            if memory_growth > 50:  # More than 50MB growth
+                print(f"High memory growth in SQL batch: {memory_growth:.1f}MB")
+                # Trigger cleanup
+                await self._routine_memory_cleanup()
+                metrics.inc("sql_high_memory_growth")
+            
+            return row_count
+            
+        except Exception as e:
+            if "memory" in str(e).lower() or "out of" in str(e).lower():
+                print(f"SQL Server memory error: {e}")
+                metrics.inc("sql_memory_errors")
+                
+                # Try with smaller batch
+                if len(chunk) > 10:
+                    smaller_chunks = [chunk[i:i+10] for i in range(0, len(chunk), 10)]
+                    total_processed = 0
+                    
+                    for small_chunk in smaller_chunks:
+                        try:
+                            cursor = conn.cursor()
+                            cursor.fast_executemany = True
+                            cursor.executemany(query, small_chunk)
+                            conn.commit()
+                            chunk_count = cursor.rowcount if cursor.rowcount != -1 else len(small_chunk)
+                            total_processed += chunk_count
+                            cursor.close()
+                        except Exception:
+                            continue
+                    
+                    return total_processed
+            raise
+        finally:
+            await self._release(conn)
+
+    async def _calculate_safe_batch_size(self, total_records: int, requested_batch_size: int) -> int:
+        """Calculate safe batch size based on memory constraints."""
+        try:
+            process_memory = self._get_process_memory()
+            available_memory = psutil.virtual_memory().available / 1024 / 1024 if psutil else 1000  # MB
+            
+            # Adjust batch size based on memory pressure
+            if process_memory > 1000:  # Over 1GB
+                return min(500, requested_batch_size, total_records)
+            elif process_memory > 500:  # Over 500MB
+                return min(1000, requested_batch_size, total_records)
+            elif available_memory < 200:  # Less than 200MB available
+                return min(100, requested_batch_size, total_records)
+            else:
+                return min(requested_batch_size, total_records)
+                
+        except Exception:
+            return min(1000, requested_batch_size, total_records)
+
+    async def _check_database_memory(self) -> None:
+        """Check database connection memory usage and take corrective action."""
+        try:
+            memory_status = sql_memory_monitor.check_memory()
+            
+            for alert in memory_status.get("alerts", []):
+                print(f"SQL Server Memory Alert: {alert['message']}")
+                metrics.inc(f"sql_memory_alert_{alert['level']}")
+            
+            # Take action based on memory status
+            if memory_status["status"] == "critical":
+                await self._emergency_sql_cleanup()
+            elif memory_status["status"] == "warning":
+                await self._routine_memory_cleanup()
+            
+            # Update memory metrics
+            if "memory_mb" in memory_status:
+                metrics.set("sql_process_memory_mb", memory_status["memory_mb"])
+        
+        except Exception as e:
+            print(f"SQL memory check failed: {e}")
+
+    async def _routine_memory_cleanup(self) -> None:
+        """Routine memory cleanup operations."""
+        # Clean old cache entries
+        await self._cleanup_cache_by_memory()
+        
+        # Clean prepared statements cache
+        self._cleanup_unused_prepared_statements()
+        
+        # Schedule garbage collection
+        collected = gc.collect()
+        metrics.set("sql_routine_gc_collected", collected)
+
+    async def _emergency_sql_cleanup(self) -> None:
+        """Emergency cleanup for SQL Server memory issues."""
+        print("SQL Server: Emergency memory cleanup initiated")
+        
+        # Clear query cache
+        if hasattr(self.query_cache, 'store'):
+            cache_size = len(self.query_cache.store)
+            self.query_cache.store.clear()
+            self._current_cache_memory = 0
+            print(f"SQL Emergency: cleared {cache_size} cached queries")
+        
+        # Close idle connections
+        async with self._lock:
+            if len(self.pool) > self.min_pool:
+                excess_connections = len(self.pool) - self.min_pool
+                for _ in range(excess_connections):
+                    if self.pool:
+                        conn = self.pool.pop()
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+        
+        # Clear prepared statements cache
+        self._prepared.clear()
+        
+        # Clear memory pool
+        pool_cleanup_stats = self._memory_pool.cleanup_all()
+        print(f"SQL Emergency: cleared memory pools: {pool_cleanup_stats}")
+        
+        # Clear connection memory tracking
+        self._connection_memory_tracking.clear()
+        
+        # Force garbage collection
+        collected = gc.collect()
+        
+        metrics.inc("sql_emergency_cleanups")
+        metrics.set("sql_emergency_gc_collected", collected)
+
+    async def _cleanup_cache_by_memory(self) -> None:
+        """Clean up cache based on memory usage."""
+        if hasattr(self.query_cache, 'store'):
+            # Remove half the cache entries (LRU would be better)
+            cache_items = list(self.query_cache.store.items())
+            items_to_remove = len(cache_items) // 2
+            
+            for i in range(items_to_remove):
+                if cache_items and i < len(cache_items):
+                    key = cache_items[i][0]
+                    del self.query_cache.store[key]
+        
+        # Reset memory tracking
+        self._current_cache_memory = 0
+
+    def _cleanup_unused_prepared_statements(self) -> None:
+        """Clean up unused prepared statements."""
+        # Simple cleanup - remove temporary statements
+        temp_statements = [name for name in self._prepared.keys() 
+                          if name.startswith(('temp_', 'test_', 'debug_'))]
+        
+        for stmt_name in temp_statements:
+            del self._prepared[stmt_name]
+
+    def _get_process_memory(self) -> float:
+        """Get current process memory usage in MB."""
+        try:
+            if not psutil:
+                return 0.0
+            process = psutil.Process()
+            return process.memory_info().rss / 1024 / 1024
+        except Exception:
+            return 0.0
+
+    async def fetch_optimized_with_memory_management(
+        self, query: str, *params: Any, is_prepared: bool = False
+    ) -> Iterable[dict]:
+        """Optimized fetch with comprehensive memory management."""
+        self._operation_count += 1
+        
+        # Periodic memory check
+        if self._operation_count % self._memory_check_frequency == 0:
+            await self._check_database_memory()
+        
+        if not await self.circuit_breaker.allow():
+            raise CircuitBreakerOpenError("SQLServer circuit open")
+        
+        # Check cache first with memory management
+        cache_key = f"query:{query}:{str(params)}"
+        cached = await self._get_from_cache_with_memory_check(cache_key)
+        if cached is not None:
+            metrics.inc("sqlserver_cache_hits")
+            return cached
+        
+        # Use memory pool for result containers
+        result_container = self._memory_pool.acquire("sql_results", list)
+        
+        try:
+            conn = await self._acquire()
+            initial_memory = self._get_process_memory()
+            
+            start = time.perf_counter()
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            columns = [col[0] for col in cursor.description]
+            rows = cursor.fetchall()
+            cursor.close()
+            
+            # Check memory growth
+            final_memory = self._get_process_memory()
+            memory_growth = final_memory - initial_memory
+            
+            if memory_growth > 50:  # More than 50MB growth
+                print(f"Warning: High memory growth in SQL fetch: {memory_growth:.1f}MB")
+                await self._routine_memory_cleanup()
+            
+            duration = (time.perf_counter() - start) * 1000
+            metrics.inc("sqlserver_query_ms", duration)
+            metrics.inc("sqlserver_query_count")
+            if is_prepared:
+                metrics.inc("sqlserver_prepared_queries")
+            latencies.record("sqlserver_query", duration)
+            record_query(query, duration)
+            await self.circuit_breaker.record_success()
+            
+            # Convert to dictionaries using memory pool
+            result_container.clear()
+            for row in rows:
+                row_dict = self._memory_pool.acquire("sql_row_dict", dict)
+                row_dict.clear()
+                row_dict.update(dict(zip(columns, row)))
+                result_container.append(row_dict)
+            
+            # Cache results with memory management
+            await self._cache_with_memory_management(cache_key, result_container.copy())
+            metrics.inc("sqlserver_cache_misses")
+            
+            return result_container
+            
+        except pyodbc.Error as e:
+            # Handle connection issues
+            try:
+                conn.close()
+            except Exception:
+                pass
+            conn = self._create_connection_optimized()
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            columns = [col[0] for col in cursor.description]
+            rows = cursor.fetchall()
+            cursor.close()
+            await self.circuit_breaker.record_success()
+            
+            # Convert results
+            result_container.clear()
+            for row in rows:
+                row_dict = self._memory_pool.acquire("sql_row_dict", dict)
+                row_dict.clear()
+                row_dict.update(dict(zip(columns, row)))
+                result_container.append(row_dict)
+            
+            await self._cache_with_memory_management(cache_key, result_container.copy())
+            return result_container
+        except Exception as e:
+            await self.circuit_breaker.record_failure()
+            raise QueryError(str(e)) from e
+        finally:
+            await self._release(conn)
+            # Return container to pool
+            self._memory_pool.release("sql_results", result_container)
+
+    async def _get_from_cache_with_memory_check(self, cache_key: str) -> Optional[Any]:
+        """Get from cache with memory usage check."""
+        # Check if cache memory usage is too high
+        if self._current_cache_memory > self._cache_max_memory:
+            await self._cleanup_cache_by_memory()
+        
+        return self.query_cache.get(cache_key)
+
+    async def _cache_with_memory_management(self, cache_key: str, data: Any) -> None:
+        """Cache data with memory management."""
+        # Estimate memory usage of the data
+        estimated_size = self._estimate_data_size(data)
+        
+        # Only cache if within memory limits
+        if self._current_cache_memory + estimated_size <= self._cache_max_memory:
+            self.query_cache.set(cache_key, data)
+            self._current_cache_memory += estimated_size
+        else:
+            # Clean cache and try again
+            await self._cleanup_cache_by_memory()
+            if estimated_size <= self._cache_max_memory // 2:  # Only cache if less than half limit
+                self.query_cache.set(cache_key, data)
+                self._current_cache_memory += estimated_size
+
+    def _estimate_data_size(self, data: Any) -> int:
+        """Estimate memory size of data (simplified)."""
+        try:
+            if isinstance(data, (list, tuple)):
+                return len(data) * 500  # Rough estimate: 500 bytes per item
+            elif isinstance(data, dict):
+                return len(str(data))
+            else:
+                return len(str(data))
+        except Exception:
+            return 500  # Default estimate
 
     async def _acquire(self) -> pyodbc.Connection:
         """Enhanced connection acquisition with health checking."""
@@ -298,86 +740,19 @@ class SQLServerDatabase(BaseDatabase):
             
             metrics.set("sqlserver_pool_size", float(len(self.pool)))
 
-    async def prepare(self, query: str) -> None:
-        """Prepare a statement on all existing connections."""
-        async with self._lock:
-            query_hash = str(hash(query))
-            if query_hash in self._prepared:
-                return
-            
-            self._prepared[query_hash] = query
-            
-            # SQL Server doesn't have explicit prepare, but we cache the query
-            # for faster execution
-            for conn in self.pool:
-                try:
-                    cursor = conn.cursor()
-                    cursor.close()
-                except Exception:
-                    continue
-
-    async def fetch_optimized(self, query: str, *params: Any, is_prepared: bool = False) -> Iterable[dict]:
-        """Optimized fetch with caching and connection reuse."""
-        if not await self.circuit_breaker.allow():
-            raise CircuitBreakerOpenError("SQLServer circuit open")
-        
-        # Check cache first
-        cache_key = f"query:{query}:{str(params)}"
-        cached = self.query_cache.get(cache_key)
-        if cached is not None:
-            metrics.inc("sqlserver_cache_hits")
-            return cached
-        
-        conn = await self._acquire()
-        try:
-            start = time.perf_counter()
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            columns = [col[0] for col in cursor.description]
-            rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
-            cursor.close()
-            
-            duration = (time.perf_counter() - start) * 1000
-            metrics.inc("sqlserver_query_ms", duration)
-            metrics.inc("sqlserver_query_count")
-            if is_prepared:
-                metrics.inc("sqlserver_prepared_queries")
-            latencies.record("sqlserver_query", duration)
-            record_query(query, duration)
-            await self.circuit_breaker.record_success()
-            
-            # Cache results
-            self.query_cache.set(cache_key, rows)
-            metrics.inc("sqlserver_cache_misses")
-            return rows
-            
-        except pyodbc.Error as e:
-            # Handle connection issues
-            try:
-                conn.close()
-            except Exception:
-                pass
-            conn = self._create_connection_optimized()
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            columns = [col[0] for col in cursor.description]
-            rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
-            cursor.close()
-            await self.circuit_breaker.record_success()
-            self.query_cache.set(cache_key, rows)
-            return rows
-        except Exception as e:
-            await self.circuit_breaker.record_failure()
-            raise QueryError(str(e)) from e
-        finally:
-            await self._release(conn)
-
+    # Enhanced versions of existing methods with memory management
     async def fetch(self, query: str, *params: Any) -> Iterable[dict]:
-        """Enhanced fetch with optimization detection."""
-        return await self.fetch_optimized(query, *params, is_prepared=False)
+        """Enhanced fetch with memory management."""
+        return await self.fetch_optimized_with_memory_management(query, *params, is_prepared=False)
 
     async def execute_optimized(self, query: str, *params: Any, is_prepared: bool = False) -> int:
-        """Optimized execute with performance tracking."""
+        """Optimized execute with performance tracking and memory management."""
+        self._operation_count += 1
+        
+        # Periodic memory check
+        if self._operation_count % self._memory_check_frequency == 0:
+            await self._check_database_memory()
+        
         if not await self.circuit_breaker.allow():
             raise CircuitBreakerOpenError("SQLServer circuit open")
         
@@ -387,7 +762,7 @@ class SQLServerDatabase(BaseDatabase):
             cursor = conn.cursor()
             cursor.execute(query, params)
             conn.commit()
-            row_count = cursor.rowcount
+            row_count = cursor.rowcount if cursor.rowcount != -1 else 1
             cursor.close()
             
             duration = (time.perf_counter() - start) * 1000
@@ -408,7 +783,7 @@ class SQLServerDatabase(BaseDatabase):
             cursor = conn.cursor()
             cursor.execute(query, params)
             conn.commit()
-            row_count = cursor.rowcount
+            row_count = cursor.rowcount if cursor.rowcount != -1 else 1
             cursor.close()
             await self.circuit_breaker.record_success()
             return row_count
@@ -422,6 +797,18 @@ class SQLServerDatabase(BaseDatabase):
         """Enhanced execute with optimization detection."""
         return await self.execute_optimized(query, *params, is_prepared=False)
 
+    async def execute_many(
+        self,
+        query: str,
+        params_seq: Iterable[Iterable[Any]],
+        *,
+        concurrency: int = 1,
+    ) -> int:
+        """Execute many with memory management."""
+        return await self.execute_many_with_memory_management(
+            query, params_seq, concurrency=concurrency, batch_size=1000
+        )
+
     async def execute_many_optimized(
         self,
         query: str,
@@ -431,94 +818,8 @@ class SQLServerDatabase(BaseDatabase):
         batch_size: int = 1000,
     ) -> int:
         """Optimized execute_many with batching and parallel processing."""
-        if not await self.circuit_breaker.allow():
-            raise CircuitBreakerOpenError("SQLServer circuit open")
-        
-        params_list = list(params_seq)
-        if not params_list:
-            return 0
-        
-        total_processed = 0
-        
-        # Process in optimized batches
-        for i in range(0, len(params_list), batch_size):
-            batch = params_list[i:i + batch_size]
-            
-            if concurrency > 1 and len(batch) > 100:
-                # Parallel processing for large batches
-                chunk_size = len(batch) // concurrency + 1
-                chunks = [
-                    batch[j : j + chunk_size]
-                    for j in range(0, len(batch), chunk_size)
-                ]
-
-                async def run_chunk(chunk: list[Iterable[Any]]) -> int:
-                    conn = await self._acquire()
-                    try:
-                        cursor = conn.cursor()
-                        cursor.fast_executemany = True
-                        cursor.executemany(query, chunk)
-                        conn.commit()
-                        row_count = cursor.rowcount
-                        cursor.close()
-                        return row_count
-                    finally:
-                        await self._release(conn)
-
-                results = await asyncio.gather(*[run_chunk(c) for c in chunks])
-                total_processed += sum(results)
-            else:
-                # Sequential processing for smaller batches
-                conn = await self._acquire()
-                try:
-                    start = time.perf_counter()
-                    cursor = conn.cursor()
-                    cursor.fast_executemany = True
-                    cursor.executemany(query, batch)
-                    conn.commit()
-                    row_count = cursor.rowcount
-                    cursor.close()
-                    
-                    duration = (time.perf_counter() - start) * 1000
-                    metrics.inc("sqlserver_query_ms", duration)
-                    metrics.inc("sqlserver_query_count")
-                    metrics.inc("sqlserver_bulk_operations")
-                    latencies.record("sqlserver_query", duration)
-                    await self.circuit_breaker.record_success()
-                    total_processed += row_count
-                    
-                except pyodbc.Error:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-                    conn = self._create_connection_optimized()
-                    cursor = conn.cursor()
-                    cursor.fast_executemany = True
-                    cursor.executemany(query, batch)
-                    conn.commit()
-                    row_count = cursor.rowcount
-                    cursor.close()
-                    await self.circuit_breaker.record_success()
-                    total_processed += row_count
-                except Exception as e:
-                    await self.circuit_breaker.record_failure()
-                    raise QueryError(str(e)) from e
-                finally:
-                    await self._release(conn)
-        
-        return total_processed
-
-    async def execute_many(
-        self,
-        query: str,
-        params_seq: Iterable[Iterable[Any]],
-        *,
-        concurrency: int = 1,
-    ) -> int:
-        """Override to use optimized version."""
-        return await self.execute_many_optimized(
-            query, params_seq, concurrency=concurrency, batch_size=1000
+        return await self.execute_many_with_memory_management(
+            query, params_seq, concurrency=concurrency, batch_size=batch_size
         )
 
     async def bulk_insert_tvp_optimized(
@@ -529,7 +830,7 @@ class SQLServerDatabase(BaseDatabase):
         *,
         chunk_size: int = 5000,
     ) -> int:
-        """Enhanced TVP bulk insert with chunking and optimization."""
+        """Enhanced TVP bulk insert with chunking and memory optimization."""
         if not await self.circuit_breaker.allow():
             raise CircuitBreakerOpenError("SQLServer circuit open")
         
@@ -543,6 +844,9 @@ class SQLServerDatabase(BaseDatabase):
         # Process in chunks for memory efficiency
         for i in range(0, len(rows_list), chunk_size):
             chunk = rows_list[i:i + chunk_size]
+            
+            # Monitor memory before processing
+            initial_memory = self._get_process_memory()
             
             conn = await self._acquire()
             placeholders = ", ".join(["?"] * len(columns_list))
@@ -578,6 +882,14 @@ class SQLServerDatabase(BaseDatabase):
                 await self.circuit_breaker.record_success()
                 
                 total_inserted += len(chunk)
+                
+                # Check memory growth
+                final_memory = self._get_process_memory()
+                memory_growth = final_memory - initial_memory
+                
+                if memory_growth > 50:  # More than 50MB growth
+                    print(f"High memory growth in TVP insert: {memory_growth:.1f}MB")
+                    await self._routine_memory_cleanup()
                 
             except pyodbc.Error:
                 try:
@@ -633,7 +945,7 @@ class SQLServerDatabase(BaseDatabase):
                     pass
             
             # Health check passes if majority of tested connections work
-            is_healthy = healthy_connections >= (total_connections // 2 + 1)
+            is_healthy = healthy_connections >= (total_connections // 2 + 1) if total_connections > 0 else False
             
             if is_healthy:
                 await self.circuit_breaker.record_success()
@@ -658,6 +970,7 @@ class SQLServerDatabase(BaseDatabase):
         metrics.set("sqlserver_pool_min_size", float(self.min_pool))
         metrics.set("sqlserver_connections_created", float(self._connection_create_count))
         metrics.set("sqlserver_prepared_statements", float(len(self._prepared)))
+        metrics.set("sqlserver_cache_memory_mb", self._current_cache_memory / 1024 / 1024)
         
         # Calculate pool utilization
         if self.max_pool > 0:
@@ -667,17 +980,21 @@ class SQLServerDatabase(BaseDatabase):
     async def adjust_pool_size(self) -> None:
         """Enhanced dynamic pool adjustment based on load and performance."""
         try:
-            load = os.getloadavg()[0]
+            load = os.getloadavg()[0] if hasattr(os, 'getloadavg') else 0
         except Exception:
             load = 0
+        
+        # Get memory status
+        memory_status = sql_memory_monitor.check_memory()
+        memory_mb = memory_status.get("memory_mb", 0)
         
         async with self._lock:
             current_size = len(self.pool)
             target_size = current_size
             
-            # Adjust based on system load
-            if load > 4 and current_size > self.min_pool:
-                # High load - reduce pool size
+            # Adjust based on system load and memory
+            if (load > 4 or memory_mb > 1000) and current_size > self.min_pool:
+                # High load or memory - reduce pool size
                 target_size = max(self.min_pool, current_size - 2)
                 excess = current_size - target_size
                 for _ in range(excess):
@@ -689,8 +1006,8 @@ class SQLServerDatabase(BaseDatabase):
                             pass
                 metrics.inc("sqlserver_pool_size_decreased")
                 
-            elif load < 1 and current_size < self.max_pool:
-                # Low load - potentially increase pool size
+            elif load < 1 and memory_mb < 500 and current_size < self.max_pool:
+                # Low load and memory - potentially increase pool size
                 pool_utilization = (self.max_pool - current_size) / self.max_pool
                 if pool_utilization < 0.5:  # Pool is more than 50% utilized
                     target_size = min(self.max_pool, current_size + 1)
@@ -703,225 +1020,48 @@ class SQLServerDatabase(BaseDatabase):
             
             metrics.set("sqlserver_pool_adjusted_size", float(len(self.pool)))
 
-    async def optimize_connection_settings(self, conn: pyodbc.Connection) -> None:
-        """Apply connection-specific optimizations."""
-        try:
-            cursor = conn.cursor()
-            
-            # Query-specific optimizations
-            optimization_queries = [
-                "SET LOCK_TIMEOUT 30000",  # 30 second lock timeout
-                "SET DEADLOCK_PRIORITY LOW",  # Lower deadlock priority
-                "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",  # Standard isolation
-                "SET ANSI_WARNINGS OFF",  # Reduce warnings for bulk operations
-                "SET XACT_ABORT ON",  # Abort transaction on error
-            ]
-            
-            for query in optimization_queries:
-                try:
-                    cursor.execute(query)
-                except Exception:
-                    continue  # Skip failed optimizations
-            
-            cursor.close()
-        except Exception as e:
-            print(f"Warning: Failed to apply connection optimizations: {e}")
-
-    async def bulk_validate_facilities(self, facility_ids: list[str]) -> Dict[str, bool]:
-        """Optimized bulk facility validation."""
-        if not facility_ids:
-            return {}
+    async def close_with_memory_cleanup(self) -> None:
+        """Close with comprehensive memory cleanup."""
+        # Clear all caches and prepared statements
+        if hasattr(self.query_cache, 'store'):
+            self.query_cache.store.clear()
         
-        # Check cache first
-        results = {}
-        uncached_ids = []
+        self._prepared.clear()
+        self._prepared_on_connections.clear()
+        self._connection_memory_tracking.clear()
         
-        for fid in facility_ids:
-            cache_key = f"facility_valid:{fid}"
-            cached = self.query_cache.get(cache_key)
-            if cached is not None:
-                results[fid] = cached
-            else:
-                uncached_ids.append(fid)
+        # Clear memory pool
+        self._memory_pool.cleanup_all()
         
-        # Bulk query for uncached IDs
-        if uncached_ids:
-            try:
-                # Use IN clause for bulk validation
-                placeholders = ",".join("?" * len(uncached_ids))
-                query = f"""
-                    SELECT facility_id 
-                    FROM facilities 
-                    WHERE facility_id IN ({placeholders}) 
-                    AND facility_id IS NOT NULL
-                """
-                
-                rows = await self.fetch_optimized(query, *uncached_ids)
-                valid_ids = {row["facility_id"] for row in rows}
-                
-                # Cache results and build response
-                for fid in uncached_ids:
-                    is_valid = fid in valid_ids
-                    results[fid] = is_valid
-                    cache_key = f"facility_valid:{fid}"
-                    self.query_cache.set(cache_key, is_valid)
-                
-                metrics.inc("sqlserver_bulk_facility_validations")
-                
-            except Exception as e:
-                print(f"Warning: Bulk facility validation failed: {e}")
-                # Fallback to individual validations
-                for fid in uncached_ids:
-                    results[fid] = False
-        
-        return results
-
-    async def bulk_validate_financial_classes(self, class_ids: list[str]) -> Dict[str, bool]:
-        """Optimized bulk financial class validation."""
-        if not class_ids:
-            return {}
-        
-        # Check cache first
-        results = {}
-        uncached_ids = []
-        
-        for cid in class_ids:
-            cache_key = f"financial_class_valid:{cid}"
-            cached = self.query_cache.get(cache_key)
-            if cached is not None:
-                results[cid] = cached
-            else:
-                uncached_ids.append(cid)
-        
-        # Bulk query for uncached IDs
-        if uncached_ids:
-            try:
-                placeholders = ",".join("?" * len(uncached_ids))
-                query = f"""
-                    SELECT financial_class_id 
-                    FROM facility_financial_classes 
-                    WHERE financial_class_id IN ({placeholders}) 
-                    AND financial_class_id IS NOT NULL AND active = 1
-                """
-                
-                rows = await self.fetch_optimized(query, *uncached_ids)
-                valid_ids = {row["financial_class_id"] for row in rows}
-                
-                # Cache results and build response
-                for cid in uncached_ids:
-                    is_valid = cid in valid_ids
-                    results[cid] = is_valid
-                    cache_key = f"financial_class_valid:{cid}"
-                    self.query_cache.set(cache_key, is_valid)
-                
-                metrics.inc("sqlserver_bulk_financial_class_validations")
-                
-            except Exception as e:
-                print(f"Warning: Bulk financial class validation failed: {e}")
-                # Fallback to individual validations
-                for cid in uncached_ids:
-                    results[cid] = False
-        
-        return results
-
-    async def get_performance_insights(self) -> Dict[str, Any]:
-        """Get performance insights and optimization recommendations."""
-        try:
-            conn = await self._acquire()
-            cursor = conn.cursor()
-            
-            insights = {}
-            
-            # Check for missing indexes
-            cursor.execute("""
-                SELECT TOP 5 
-                    d.object_id,
-                    OBJECT_NAME(d.object_id) AS TableName,
-                    d.equality_columns,
-                    d.inequality_columns,
-                    d.included_columns,
-                    d.user_seeks,
-                    d.user_scans,
-                    d.avg_total_user_cost,
-                    d.avg_user_impact
-                FROM sys.dm_db_missing_index_details d
-                INNER JOIN sys.dm_db_missing_index_groups g ON d.index_handle = g.index_handle
-                INNER JOIN sys.dm_db_missing_index_group_stats s ON g.index_group_handle = s.group_handle
-                WHERE d.database_id = DB_ID()
-                ORDER BY d.avg_user_impact DESC
-            """)
-            
-            missing_indexes = []
-            for row in cursor.fetchall():
-                missing_indexes.append({
-                    "table": row[1],
-                    "equality_columns": row[2],
-                    "inequality_columns": row[3],
-                    "included_columns": row[4],
-                    "user_seeks": row[5],
-                    "avg_user_impact": row[8]
-                })
-            insights["missing_indexes"] = missing_indexes
-            
-            # Check for expensive queries
-            cursor.execute("""
-                SELECT TOP 5
-                    qs.execution_count,
-                    qs.total_worker_time / qs.execution_count AS avg_cpu_time,
-                    qs.total_elapsed_time / qs.execution_count AS avg_elapsed_time,
-                    qs.total_logical_reads / qs.execution_count AS avg_logical_reads,
-                    SUBSTRING(qt.text, (qs.statement_start_offset/2)+1,
-                        ((CASE qs.statement_end_offset
-                            WHEN -1 THEN DATALENGTH(qt.text)
-                            ELSE qs.statement_end_offset
-                        END - qs.statement_start_offset)/2)+1) AS statement_text
-                FROM sys.dm_exec_query_stats qs
-                CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) qt
-                WHERE qt.text LIKE '%claims%' OR qt.text LIKE '%failed_claims%'
-                ORDER BY qs.total_worker_time / qs.execution_count DESC
-            """)
-            
-            expensive_queries = []
-            for row in cursor.fetchall():
-                expensive_queries.append({
-                    "execution_count": row[0],
-                    "avg_cpu_time": row[1],
-                    "avg_elapsed_time": row[2],
-                    "avg_logical_reads": row[3],
-                    "statement": row[4][:200] if row[4] else ""  # Truncate for display
-                })
-            insights["expensive_queries"] = expensive_queries
-            
-            cursor.close()
-            await self._release(conn)
-            
-            return insights
-            
-        except Exception as e:
-            print(f"Warning: Failed to get performance insights: {e}")
-            return {}
-
-    async def close(self) -> None:
-        """Enhanced cleanup with connection health tracking."""
+        # Close all connections with cleanup
         async with self._lock:
-            closed_count = 0
-            failed_count = 0
-            
             while self.pool:
                 conn = self.pool.pop()
                 try:
                     conn.close()
-                    closed_count += 1
                 except Exception:
-                    failed_count += 1
-            
-            # Clear prepared statements
-            self._prepared.clear()
-            self._prepared_on_connections.clear()
-            
-            metrics.set("sqlserver_connections_closed", float(closed_count))
-            if failed_count > 0:
-                metrics.set("sqlserver_connections_close_failed", float(failed_count))
+                    pass
+        
+        # Force garbage collection
+        gc.collect()
+        
+        metrics.inc("sql_closes_with_cleanup")
+
+    async def close(self) -> None:
+        """Enhanced cleanup with connection health tracking."""
+        await self.close_with_memory_cleanup()
+
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """Get comprehensive memory statistics."""
+        return {
+            "process_memory_mb": self._get_process_memory(),
+            "cache_memory_mb": self._current_cache_memory / 1024 / 1024,
+            "cache_max_memory_mb": self._cache_max_memory / 1024 / 1024,
+            "prepared_statements_count": len(self._prepared),
+            "connection_memory_tracking": len(self._connection_memory_tracking),
+            "memory_pool_stats": self._memory_pool.get_stats(),
+            "memory_status": sql_memory_monitor.check_memory(),
+        }
 
     def get_optimization_stats(self) -> Dict[str, Any]:
         """Get comprehensive optimization statistics."""
@@ -940,6 +1080,13 @@ class SQLServerDatabase(BaseDatabase):
             "caching": {
                 "cache_size": len(self.query_cache.store) if hasattr(self.query_cache, 'store') else 0,
                 "cache_ttl": self.query_cache.ttl,
+                "cache_memory_mb": self._current_cache_memory / 1024 / 1024,
+                "cache_max_memory_mb": self._cache_max_memory / 1024 / 1024,
+            },
+            "memory_management": {
+                "process_memory_mb": self._get_process_memory(),
+                "memory_checks_performed": self._operation_count // self._memory_check_frequency,
+                "memory_pool_stats": self._memory_pool.get_stats(),
             },
             "optimization_features": {
                 "connection_warming": True,
@@ -950,7 +1097,8 @@ class SQLServerDatabase(BaseDatabase):
                 "health_monitoring": True,
                 "adaptive_pooling": True,
                 "bulk_validation": True,
-                "performance_insights": True,
+                "memory_management": True,
+                "emergency_cleanup": True,
             },
             "performance_optimizations": {
                 "fast_executemany": True,
@@ -958,5 +1106,7 @@ class SQLServerDatabase(BaseDatabase):
                 "batch_processing": True,
                 "parallel_execution": True,
                 "circuit_breaker": True,
+                "memory_monitoring": True,
+                "adaptive_batch_sizing": True,
             }
         }
