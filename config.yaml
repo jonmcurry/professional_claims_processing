@@ -26,6 +26,7 @@ security:
 cache:
   redis_url: null
   warm_rvu_codes: []
+  predictive_ahead: 2
 model:
   path: model.joblib
   version: "1"
