@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 import pyodbc
 from typing import Iterable, Any
@@ -24,6 +25,8 @@ class SQLServerDatabase(BaseDatabase):
         self.circuit_breaker = CircuitBreaker()
         # Simple read-through cache for query results
         self.query_cache = InMemoryCache(ttl=60)
+        self.min_pool = cfg.min_pool_size
+        self.max_pool = cfg.max_pool_size
 
     async def connect(self, size: int | None = None) -> None:
         if not await self.circuit_breaker.allow():
@@ -240,6 +243,31 @@ class SQLServerDatabase(BaseDatabase):
 
     def report_pool_status(self) -> None:
         metrics.set("sqlserver_pool_size", float(len(self.pool)))
+
+    async def adjust_pool_size(self) -> None:
+        """Dynamically adjust pool size based on system load."""
+        try:
+            load = os.getloadavg()[0]
+        except Exception:
+            load = 0
+        desired = self.cfg.pool_size
+        if load > 4:
+            desired = max(self.min_pool, len(self.pool) - 1)
+        elif load < 1 and len(self.pool) < self.max_pool:
+            desired = len(self.pool) + 1
+        diff = desired - len(self.pool)
+        if diff > 0:
+            for _ in range(diff):
+                try:
+                    conn = self._create_connection()
+                    self.pool.append(conn)
+                except Exception:
+                    break
+        elif diff < 0:
+            for _ in range(-diff):
+                if self.pool:
+                    conn = self.pool.pop()
+                    conn.close()
 
     async def close(self) -> None:
         async with self._lock:

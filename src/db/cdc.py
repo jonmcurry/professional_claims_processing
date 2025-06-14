@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, AsyncIterator
 
 from .postgres import PostgresDatabase
+from ..web.status import sync_status
 
 
 class ChangeDataCapture:
@@ -22,8 +24,10 @@ class ChangeDataCapture:
                 f"SELECT * FROM {self.table} WHERE {self.id_column} > $1 ORDER BY {self.id_column}",
                 self._last_id,
             )
+            sync_status["last_polled_at"] = time.time()
             for row in rows:
                 self._last_id = max(self._last_id, row[self.id_column])
+                sync_status["last_id"] = self._last_id
                 yield row
             await asyncio.sleep(self._poll_interval)
 

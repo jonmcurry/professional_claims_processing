@@ -198,7 +198,9 @@ def create_app(
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
         _check_role("user", role)
-        return processing_status
+        from .status import sync_status
+
+        return {"processing": processing_status, "sync": sync_status}
 
     @app.get("/batch_status")
     async def get_batch_status(
