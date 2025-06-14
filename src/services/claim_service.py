@@ -1,4 +1,5 @@
 from typing import Any, Dict, Iterable, List
+import json
 
 from ..db.postgres import PostgresDatabase
 from ..db.sql_server import SQLServerDatabase
@@ -160,7 +161,7 @@ class ClaimService:
                 except Exception:
                     continue
             try:
-                claim = eval(claim_str)
+                claim = json.loads(claim_str)
             except Exception:
                 continue
             pr = int(claim.get("priority", 0) or 0)
