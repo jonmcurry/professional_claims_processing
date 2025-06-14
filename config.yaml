@@ -6,17 +6,17 @@ postgresql:
   database: staging_process
   replica_host: null
   replica_port: null
-  min_pool_size: 5
-  max_pool_size: 20
+  min_pool_size: 20
+  max_pool_size: 100
 sqlserver:
   host: localhost
   port: 1433
   user: user
   password: pass
   database: smart_pro_claims
-  pool_size: 5
-  min_pool_size: 5
-  max_pool_size: 10
+  pool_size: 20
+  min_pool_size: 20
+  max_pool_size: 40
 processing:
   batch_size: 1000
   max_workers: 4
