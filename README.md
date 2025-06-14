@@ -21,6 +21,7 @@ This project builds a high-performance claims processing system with an integrat
 
 ### Scaling Enhancements
 - `ShardedDatabase` distributes writes across multiple PostgreSQL instances using a hash of the shard key.
+- `ShardedClaimsProcessor` splits incoming claims by facility and runs each shard's pipeline in parallel for higher throughput.
 - SQL Server queries now use a read-through cache to avoid repeated lookups.
 - Materialized views defined in `sql/materialized_views.sql` accelerate analytics queries.
 - A lightweight `ChangeDataCapture` poller streams row changes for real-time synchronization.
