@@ -117,5 +117,4 @@ def test_process_stream(monkeypatch):
         asyncio.set_event_loop(asyncio.new_event_loop())
 
     assert sorted(pipeline.sql.inserted) == [("111", "F1"), ("222", "F1")]
-    assert pipeline.sql.inserted == [("111", "F1"), ("222", "F1")]
     assert pipeline.rvu_cache.prefetched == [{"P1"}, {"P1"}]

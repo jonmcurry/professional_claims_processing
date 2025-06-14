@@ -151,29 +151,15 @@ class ClaimsPipeline:
         results = await asyncio.gather(*tasks)
         valid = [r for r in results if r]
         if valid:
-
-        # Validate all claims in parallel
-        validated = await asyncio.gather(
-            *(self._validate_stage(claim) for claim in claims)
-        )
-        to_predict = [c for c in validated if c is not None]
-
-        # Predict on valid claims in parallel
-        predicted = await asyncio.gather(
-            *(self._predict_stage(claim) for claim in to_predict)
-        )
-
-        if predicted:
-
             try:
                 await self.service.insert_claims(
-                    predicted, concurrency=self.cfg.processing.insert_workers
+                    valid, concurrency=self.cfg.processing.insert_workers
                 )
-                processing_status["processed"] += len(predicted)
-                metrics.inc("claims_processed", len(predicted))
+                processing_status["processed"] += len(valid)
+                metrics.inc("claims_processed", len(valid))
             except Exception as exc:
                 category = categorize_exception(exc)
-                for acct, facility in predicted:
+                for acct, facility in valid:
                     await self.service.enqueue_dead_letter(
                         {
                             "patient_account_number": acct,
@@ -186,8 +172,8 @@ class ClaimsPipeline:
                     exc_info=exc,
                     extra={"category": category.value},
                 )
-                metrics.inc("claims_failed", len(predicted))
-                metrics.inc(f"errors_{category.value}", len(predicted))
+                metrics.inc("claims_failed", len(valid))
+                metrics.inc(f"errors_{category.value}", len(valid))
 
         duration = time.perf_counter() - start_time
         if duration > 0:
@@ -232,15 +218,23 @@ class ClaimsPipeline:
         insert_workers = self.cfg.processing.insert_workers
 
         async def fetcher() -> None:
+            """Fetch claims in batches with one-batch lookahead."""
             offset = 0
+            next_batch = asyncio.create_task(
+                self.service.fetch_claims(batch_size, offset=offset, priority=True)
+            )
+            offset += batch_size
             while True:
-                batch = await self.service.fetch_claims(batch_size, offset=offset, priority=True)
+                batch = await next_batch
                 if not batch:
                     break
+                next_batch = asyncio.create_task(
+                    self.service.fetch_claims(batch_size, offset=offset, priority=True)
+                )
+                offset += batch_size
                 await self._prefetch_rvu(batch)
                 for claim in batch:
                     await fetch_to_validate.put(claim)
-                offset += batch_size
             for _ in range(validate_workers):
                 await fetch_to_validate.put(None)  # type: ignore
 
