@@ -15,3 +15,8 @@ flowchart TD
 ```
 
 The FastAPI application exposes operational endpoints for monitoring and reviewing failed claims. Caching and connection pools improve throughput under load.
+
+Failed claims are first stored in the dead letter queue. On startup they are
+loaded into a priority retry queue which attempts automated repair before
+another insertion attempt. Claims that still fail can be assigned to a user for
+manual resolution and the outcome is tracked for metrics.

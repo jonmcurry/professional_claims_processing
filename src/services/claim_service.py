@@ -2,14 +2,11 @@ from typing import Any, Dict, Iterable, List
 
 from ..db.postgres import PostgresDatabase
 from ..db.sql_server import SQLServerDatabase
-from ..security.compliance import (
-    encrypt_text,
-    encrypt_claim_fields,
-    decrypt_text,
-)
+from ..monitoring.metrics import metrics
+from ..security.compliance import (decrypt_text, encrypt_claim_fields,
+                                   encrypt_text)
 from ..utils.audit import record_audit_event
 from ..utils.priority_queue import PriorityClaimQueue
-from ..monitoring.metrics import metrics
 
 
 class ClaimService:
@@ -25,6 +22,7 @@ class ClaimService:
         self.sql = sql
         self.encryption_key = encryption_key or ""
         self.priority_queue = PriorityClaimQueue()
+        self.retry_queue = PriorityClaimQueue()
 
     async def fetch_claims(
         self, batch_size: int, offset: int = 0, priority: bool = False
@@ -117,6 +115,8 @@ class ClaimService:
             reason=reason,
         )
         await self.enqueue_dead_letter(claim, reason)
+        pr = int(claim.get("priority", 0) or 0)
+        self.retry_queue.push(claim, pr)
 
     async def stream_claims(
         self, batch_size: int, priority: bool = False
@@ -161,15 +161,33 @@ class ClaimService:
                     continue
             try:
                 claim = eval(claim_str)
+            except Exception:
+                continue
+            pr = int(claim.get("priority", 0) or 0)
+            self.retry_queue.push(claim, pr)
+            await self.pg.execute(
+                "DELETE FROM dead_letter_queue WHERE claim_id = $1",
+                claim_id,
+            )
+
+        processed = 0
+        while processed < batch_size and len(self.retry_queue) > 0:
+            claim = self.retry_queue.pop()
+            try:
+                from ..processing.repair import ClaimRepairSuggester
+
+                suggester = ClaimRepairSuggester()
+                claim = suggester.auto_repair(claim, [])
                 await self.insert_claims(
                     [(claim.get("patient_account_number"), claim.get("facility_id"))]
                 )
-                await self.pg.execute(
-                    "DELETE FROM dead_letter_queue WHERE claim_id = $1",
-                    claim_id,
-                )
+                metrics.inc("failed_claims_resolved")
+                processed += 1
             except Exception:
-                continue
+                metrics.inc("failed_claims_retry_failed")
+                pr = int(claim.get("priority", 0) or 0)
+                self.retry_queue.push(claim, pr)
+                break
 
     async def amend_claim(self, claim_id: str, updates: Dict[str, Any]) -> None:
         """Update an existing claim with new values."""
@@ -190,4 +208,22 @@ class ClaimService:
             new_values=updates,
         )
 
+    async def assign_failed_claim(self, claim_id: str, user: str) -> None:
+        """Assign a failed claim to a user for manual review."""
+        await self.sql.execute(
+            "UPDATE failed_claims SET assigned_to = ?, resolution_status = 'assigned' WHERE claim_id = ?",
+            user,
+            claim_id,
+        )
 
+    async def resolve_failed_claim(
+        self, claim_id: str, action: str, notes: str | None = None
+    ) -> None:
+        """Mark a failed claim as manually resolved."""
+        await self.sql.execute(
+            "UPDATE failed_claims SET resolution_status = 'resolved', resolved_at = GETDATE(), resolution_action = ?, resolution_notes = ? WHERE claim_id = ?",
+            action,
+            notes or "",
+            claim_id,
+        )
+        metrics.inc("failed_claims_manual")
