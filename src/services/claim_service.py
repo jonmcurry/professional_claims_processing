@@ -860,13 +860,13 @@ class ClaimService:
         metrics.inc(f"errors_{category}")
         
         # Record audit event asynchronously
-        asyncio.create_task(self._record_audit_async(
+        self.audit_event(
             "failed_claims",
             claim.get("claim_id", ""),
             "insert",
             new_values=claim,
-            reason=reason
-        ))
+            reason=reason,
+        )
         
         # Add to dead letter queue
         await self.enqueue_dead_letter_optimized(claim, reason)
@@ -887,6 +887,25 @@ class ClaimService:
             )
         except Exception as e:
             print(f"Warning: Audit recording failed: {e}")
+
+    def audit_event(
+        self,
+        table_name: str,
+        record_id: str,
+        operation: str,
+        new_values: Dict[str, Any] | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Schedule an audit event to be recorded asynchronously."""
+        asyncio.create_task(
+            self._record_audit_async(
+                table_name,
+                record_id,
+                operation,
+                new_values=new_values,
+                reason=reason,
+            )
+        )
 
     async def enqueue_dead_letter_optimized(self, claim: Dict[str, Any], reason: str) -> None:
         """Optimized dead letter queue insertion with memory management."""
@@ -1334,8 +1353,7 @@ class ClaimService:
                 f"UPDATE claims SET {set_clause} WHERE claim_id = ?",
                 *params,
             )
-            await record_audit_event(
-                self.sql,
+            self.audit_event(
                 "claims",
                 claim_id,
                 "update",
