@@ -142,6 +142,15 @@ priority queue for high‑value claims. Batch progress information is exposed fr
 the `/batch_status` endpoint, and `process_partial_claim` allows partial claim
 updates without reprocessing the full record.
 
+## Analytics
+Additional utilities are provided to understand failed claims and revenue impact.
+- `src/analysis/revenue.py` calculates potential revenue loss from failures.
+- `src/analysis/failure_patterns.py` aggregates and ranks failure reasons.
+- `src/analysis/failure_predictor.py` offers a lightweight predictor for claim
+  failure probability with a fallback when scikit-learn is unavailable.
+- `src/analysis/trending.py` tracks moving averages and simple trends for any
+  numeric metric.
+
 
 ## Operations
 - See `migrations/README.md` for managing database migrations. Test migrations in a staging environment before production.
