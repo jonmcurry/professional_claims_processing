@@ -39,6 +39,9 @@ CREATE TABLE daily_processing_summary (
     created_at DATETIME2(7) NULL
 );
 GO
+CREATE CLUSTERED COLUMNSTORE INDEX cci_daily_processing_summary
+    ON daily_processing_summary;
+GO
 
 CREATE TABLE data_access_log (
     access_timestamp DATETIME2(7) NULL,
@@ -199,17 +202,34 @@ CREATE TABLE failed_claims_patterns (
 GO
 
 CREATE TABLE claims (
+    claim_id VARCHAR(50) PRIMARY KEY,
     facility_id VARCHAR(20) NOT NULL,
+    department_id INT NULL,
     patient_account_number VARCHAR(50) NOT NULL,
-    medical_record_number VARCHAR(50) NULL,
     patient_name VARCHAR(100) NULL,
     first_name VARCHAR(50) NULL,
     last_name VARCHAR(50) NULL,
+    medical_record_number VARCHAR(50) NULL,
     date_of_birth DATE NULL,
     gender VARCHAR(1) NULL,
     financial_class_id VARCHAR(10) NULL,
     secondary_insurance VARCHAR(10) NULL,
+    service_from_date DATE NULL,
+    service_to_date DATE NULL,
+    primary_diagnosis VARCHAR(10) NULL,
+    financial_class VARCHAR(10) NULL,
+    total_charge_amount DECIMAL(10,2) NULL,
+    processing_status VARCHAR(20) NULL,
+    processing_stage VARCHAR(50) NULL,
     active BIT NULL,
+    raw_data NVARCHAR(MAX) NULL,
+    validation_results NVARCHAR(MAX) NULL,
+    ml_predictions NVARCHAR(MAX) NULL,
+    processing_metrics NVARCHAR(MAX) NULL,
+    error_details NVARCHAR(MAX) NULL,
+    priority VARCHAR(10) NULL,
+    submitted_by VARCHAR(100) NULL,
+    correlation_id VARCHAR(50) NULL,
     created_at DATETIME2(7) NULL,
     updated_at DATETIME2(7) NULL
 );
@@ -258,6 +278,42 @@ ALTER TABLE claims_line_items
     ADD CONSTRAINT fk_line_provider FOREIGN KEY (rendering_provider_id)
         REFERENCES physicians(rendering_provider_id);
 
+CREATE TABLE batch_metadata (
+    batch_id VARCHAR(50) NOT NULL PRIMARY KEY,
+    submitted_by VARCHAR(100) NULL,
+    submitted_at DATETIME2(7) DEFAULT SYSDATETIME(),
+    updated_at DATETIME2(7) DEFAULT SYSDATETIME(),
+    completed_at DATETIME2(7) NULL,
+    total_claims INT NOT NULL DEFAULT 0,
+    valid_claims INT NOT NULL DEFAULT 0,
+    invalid_claims INT NOT NULL DEFAULT 0,
+    processed_claims INT NOT NULL DEFAULT 0,
+    failed_claims INT NOT NULL DEFAULT 0,
+    priority VARCHAR(10) DEFAULT 'normal',
+    status VARCHAR(20) DEFAULT 'queued',
+    processing_options NVARCHAR(MAX) NULL,
+    validation_errors NVARCHAR(MAX) NULL,
+    processing_errors NVARCHAR(MAX) NULL,
+    additional_data NVARCHAR(MAX) NULL
+);
+GO
+
+CREATE TABLE processing_metrics (
+    metric_id INT IDENTITY(1,1) PRIMARY KEY,
+    metric_timestamp DATETIME2(7) DEFAULT SYSDATETIME(),
+    batch_id VARCHAR(50) NULL,
+    stage_name VARCHAR(50) NOT NULL,
+    worker_id VARCHAR(50) NULL,
+    records_processed INT NOT NULL DEFAULT 0,
+    records_failed INT NOT NULL DEFAULT 0,
+    processing_time_seconds DECIMAL(10,3) NOT NULL,
+    throughput_per_second DECIMAL(10,2) NOT NULL DEFAULT 0,
+    memory_usage_mb INT NULL,
+    cpu_usage_percent DECIMAL(5,2) NULL,
+    additional_metrics NVARCHAR(MAX) NULL
+);
+GO
+
 CREATE TABLE performance_metrics (
     metric_date DATETIME2(7) NULL,
     metric_type VARCHAR(50) NOT NULL,
@@ -273,6 +329,9 @@ CREATE TABLE performance_metrics (
     revenue_per_claim DECIMAL(10,2) NULL,
     additional_metrics NVARCHAR(MAX) NULL
 );
+GO
+CREATE CLUSTERED COLUMNSTORE INDEX cci_performance_metrics
+    ON performance_metrics;
 GO
 
 CREATE TABLE rvu_data (
@@ -340,4 +399,27 @@ GO
 CREATE INDEX idx_sql_failed_claims_claim_id ON failed_claims (claim_id);
 GO
 CREATE INDEX idx_sql_failed_claims_failed_at ON failed_claims (failed_at);
+GO
+CREATE INDEX ix_claims_account_facility
+    ON claims (patient_account_number, facility_id)
+    INCLUDE (processing_status, processing_stage);
+GO
+CREATE INDEX ix_active_claims
+    ON claims (patient_account_number)
+    WHERE active = 1;
+GO
+CREATE INDEX ix_unresolved_failed_claims
+    ON failed_claims (claim_id)
+    WHERE resolution_status IS NULL OR resolution_status <> 'resolved';
+GO
+ALTER TABLE archived_failed_claims REBUILD PARTITION = ALL
+    WITH (DATA_COMPRESSION = PAGE);
+GO
+
+CREATE VIEW dbo.v_facility_totals WITH SCHEMABINDING AS
+SELECT facility_id, SUM(total_charge_amount) AS total_charge, COUNT_BIG(*) AS cnt
+FROM dbo.daily_processing_summary
+GROUP BY facility_id;
+GO
+CREATE UNIQUE CLUSTERED INDEX cix_v_facility_totals ON dbo.v_facility_totals (facility_id);
 GO

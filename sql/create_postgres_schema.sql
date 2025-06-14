@@ -20,19 +20,25 @@ CREATE TABLE business_rules (
 );
 
 CREATE TABLE claims (
-    claim_id VARCHAR(50),
+    claim_id VARCHAR(50) PRIMARY KEY,
     facility_id VARCHAR(20),
     department_id INTEGER,
-    patient_account_number VARCHAR(5),
+    patient_account_number VARCHAR(50),
     patient_name VARCHAR(100),
+    first_name VARCHAR(50),
+    last_name VARCHAR(50),
+    medical_record_number VARCHAR(50),
     date_of_birth DATE,
+    gender VARCHAR(1),
     service_from_date DATE,
     service_to_date DATE,
     primary_diagnosis VARCHAR(10),
     financial_class VARCHAR(10),
+    secondary_insurance VARCHAR(10),
     total_charge_amount NUMERIC(10,2),
     processing_status VARCHAR(20),
     processing_stage VARCHAR(50),
+    active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ,
     raw_data JSONB,
@@ -92,10 +98,12 @@ CREATE TABLE batch_metadata (
     processing_options JSONB,
     validation_errors TEXT,
     processing_errors TEXT,
-    additional_data JSONB
+    additional_data JSONB,
+    PRIMARY KEY (batch_id)
 );
 
 CREATE TABLE processing_metrics (
+    metric_id SERIAL PRIMARY KEY,
     metric_timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     batch_id VARCHAR(50),
     stage_name VARCHAR(50) NOT NULL,
@@ -107,6 +115,44 @@ CREATE TABLE processing_metrics (
     memory_usage_mb INTEGER,
     cpu_usage_percent NUMERIC(5,2),
     additional_metrics JSONB
+);
+
+CREATE TABLE dead_letter_queue (
+    dlq_id SERIAL PRIMARY KEY,
+    claim_id VARCHAR(50) NOT NULL,
+    reason TEXT NOT NULL,
+    data TEXT NOT NULL,
+    inserted_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE processing_checkpoints (
+    claim_id VARCHAR(50) NOT NULL,
+    stage VARCHAR(50) NOT NULL,
+    checkpoint_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (claim_id, stage)
+);
+
+CREATE TABLE rvu_data (
+    procedure_code VARCHAR(10) PRIMARY KEY,
+    description VARCHAR(500),
+    category VARCHAR(50),
+    subcategory VARCHAR(50),
+    work_rvu NUMERIC(8,4),
+    practice_expense_rvu NUMERIC(8,4),
+    malpractice_rvu NUMERIC(8,4),
+    total_rvu NUMERIC(8,4),
+    conversion_factor NUMERIC(8,2),
+    non_facility_pe_rvu NUMERIC(8,4),
+    facility_pe_rvu NUMERIC(8,4),
+    effective_date DATE,
+    end_date DATE,
+    status VARCHAR(20),
+    global_period VARCHAR(10),
+    professional_component BOOLEAN,
+    technical_component BOOLEAN,
+    bilateral_surgery BOOLEAN,
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ
 );
 
 CREATE TABLE ml_models (
@@ -146,6 +192,17 @@ BEGIN
 END;
 $$;
 
+-- Enable page compression for archived data (PostgreSQL using LZ4 toast)
+ALTER TABLE archived_claims
+    SET (toast.compress = 'lz4');
+
 CREATE INDEX IF NOT EXISTS idx_claims_claim_id ON claims (claim_id);
 CREATE INDEX IF NOT EXISTS idx_failed_claims_claim_id ON failed_claims (claim_id);
 CREATE INDEX IF NOT EXISTS idx_claims_patient_account ON claims (patient_account_number);
+CREATE INDEX IF NOT EXISTS idx_claims_account_facility
+    ON claims (patient_account_number, facility_id)
+    INCLUDE (processing_status, processing_stage);
+CREATE INDEX IF NOT EXISTS idx_claims_active
+    ON claims (patient_account_number)
+    WHERE active IS TRUE;
+CREATE INDEX IF NOT EXISTS idx_dlq_claim_id ON dead_letter_queue (claim_id);
