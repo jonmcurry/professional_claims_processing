@@ -1,3 +1,4 @@
+import asyncio
 from src.validation.validator import ClaimValidator
 
 
@@ -10,11 +11,11 @@ def test_validator_split_logic():
         "service_from_date": "1990-01-02",
         "service_to_date": "1990-01-03",
     }
-    assert validator.validate(claim) == []
+    assert asyncio.run(validator.validate(claim)) == []
 
     claim["facility_id"] = "B"
     claim["service_to_date"] = "1989-12-31"
-    errors = validator.validate(claim)
+    errors = asyncio.run(validator.validate(claim))
     assert "invalid_facility" in errors
     assert "invalid_service_dates" in errors
 
@@ -33,5 +34,5 @@ def test_line_item_date_validation():
             }
         ],
     }
-    errors = validator.validate(claim)
+    errors = asyncio.run(validator.validate(claim))
     assert "line_item_date_out_of_range" in errors

@@ -107,8 +107,6 @@ class SQLServerDatabase(BaseDatabase):
             metrics.inc("sqlserver_query_count")
             latencies.record("sqlserver_query", duration)
             record_query(query, duration)
-            record_query(query, duration)
-            record_query(query, duration)
             await self.circuit_breaker.record_success()
             self.query_cache.set(cache_key, rows)
             return rows
@@ -221,6 +219,43 @@ class SQLServerDatabase(BaseDatabase):
                 cursor.executemany(None, params_list)
             else:
                 cursor.executemany(query, params_list)
+            conn.commit()
+            await self.circuit_breaker.record_success()
+            return cursor.rowcount
+        except Exception as e:
+            await self.circuit_breaker.record_failure()
+            raise QueryError(str(e)) from e
+        finally:
+            await self._release(conn)
+
+    async def bulk_insert_tvp(
+        self,
+        table: str,
+        columns: Iterable[str],
+        rows: Iterable[Iterable[Any]],
+    ) -> int:
+        """Bulk insert using a table-valued parameter."""
+        if not await self.circuit_breaker.allow():
+            raise CircuitBreakerOpenError("SQLServer circuit open")
+        rows_list = list(rows)
+        if not rows_list:
+            return 0
+        placeholders = ", ".join(["?"] * len(columns))
+        query = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})"
+        conn = await self._acquire()
+        try:
+            cursor = conn.cursor()
+            cursor.fast_executemany = True
+            cursor.executemany(query, rows_list)
+            conn.commit()
+            await self.circuit_breaker.record_success()
+            return cursor.rowcount
+        except pyodbc.Error:
+            conn.close()
+            conn = self._create_connection()
+            cursor = conn.cursor()
+            cursor.fast_executemany = True
+            cursor.executemany(query, rows_list)
             conn.commit()
             await self.circuit_breaker.record_success()
             return cursor.rowcount
