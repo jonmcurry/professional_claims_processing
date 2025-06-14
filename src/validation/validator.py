@@ -1,4 +1,4 @@
-from concurrent.futures import ThreadPoolExecutor
+import asyncio
 from typing import Any, Dict, List
 
 from .validators import (validate_dob, validate_facility,
@@ -13,23 +13,16 @@ class ClaimValidator:
         self.valid_facilities = valid_facilities
         self.valid_financial_classes = valid_financial_classes
 
-    def validate(self, claim: Dict[str, Any]) -> List[str]:
-        """Validate a claim using multiple rules in parallel."""
+    async def validate(self, claim: Dict[str, Any]) -> List[str]:
+        """Validate a claim using multiple rules concurrently."""
+        results = await asyncio.gather(
+            validate_facility(claim, self.valid_facilities),
+            validate_financial_class(claim, self.valid_financial_classes),
+            validate_dob(claim),
+            validate_service_dates(claim),
+            validate_line_item_dates(claim),
+        )
         errors: List[str] = []
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = [
-                executor.submit(
-                    validate_facility, claim, self.valid_facilities
-                ),
-                executor.submit(
-                    validate_financial_class,
-                    claim,
-                    self.valid_financial_classes,
-                ),
-                executor.submit(validate_dob, claim),
-                executor.submit(validate_service_dates, claim),
-                executor.submit(validate_line_item_dates, claim),
-            ]
-            for f in futures:
-                errors += f.result()
+        for r in results:
+            errors += r
         return errors

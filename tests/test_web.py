@@ -1,3 +1,4 @@
+import asyncio
 import pytest
 from fastapi.testclient import TestClient
 from src.web.app import create_app
@@ -23,9 +24,13 @@ class DummyPG(DummyDB):
 
 @pytest.fixture
 def client():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     app = create_app(sql_db=DummyDB(), pg_db=DummyPG(), api_key="test", rate_limit_per_sec=1)
     with TestClient(app) as client:
         yield client
+    loop.close()
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
 
 def test_failed_claims_endpoint(client):

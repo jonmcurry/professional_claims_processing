@@ -307,7 +307,7 @@ class ClaimsPipeline:
         assert self.rules_engine and self.validator and self.model
         with start_span():
             await self._checkpoint(claim.get("claim_id", ""), "start")
-            validation_errors = self.validator.validate(claim)
+            validation_errors = await self.validator.validate(claim)
             rule_errors = self.rules_engine.evaluate(claim)
             await self._checkpoint(claim.get("claim_id", ""), "validated")
             if validation_errors or rule_errors:
@@ -372,7 +372,7 @@ class ClaimsPipeline:
         """Run validation and rules stage."""
         assert self.validator and self.rules_engine
         await self._checkpoint(claim.get("claim_id", ""), "start")
-        validation_errors = self.validator.validate(claim)
+        validation_errors = await self.validator.validate(claim)
         rule_errors = self.rules_engine.evaluate(claim)
         await self._checkpoint(claim.get("claim_id", ""), "validated")
         if validation_errors or rule_errors:
