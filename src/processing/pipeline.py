@@ -14,7 +14,7 @@ from ..models.ab_test import ABTestModel
 from ..models.filter_model import FilterModel
 from ..models.monitor import ModelMonitor
 from ..monitoring import pool_monitor, resource_monitor
-from ..monitoring.metrics import metrics
+from ..monitoring.metrics import metrics, sla_monitor
 from ..rules.durable_engine import DurableRulesEngine
 from ..security.compliance import mask_claim_data
 from ..services.claim_service import ClaimService
@@ -1024,11 +1024,21 @@ class ClaimsPipeline:
                 metrics.inc("claims_processed", len(valid_claims))
                 metrics.inc("claims_failed", len(failed_claims_data))
                 metrics.inc("batches_processed_optimized")
-                
+
                 # Performance metrics
                 total_duration = time.perf_counter() - batch_start
                 throughput = len(enriched_claims) / total_duration if total_duration > 0 else 0
-                
+
+                # Revenue and hourly metrics
+                revenue = sum(
+                    float(c.get("reimbursement_amount", 0.0) or 0.0)
+                    for c in valid_claims
+                )
+                metrics.record_hourly("claims_processed", len(valid_claims))
+                metrics.record_hourly("revenue_impact", revenue)
+                metrics.inc("revenue_impact", revenue)
+                sla_monitor.record_batch(total_duration, len(enriched_claims))
+
                 metrics.set("batch_processing_rate_per_sec", throughput)
                 metrics.set("last_batch_duration_ms", total_duration * 1000)
                 metrics.set("batch_fetch_time_ms", fetch_time * 1000)
@@ -1582,7 +1592,9 @@ class ClaimsPipeline:
         """Process a single batch in the optimized stream with dynamic concurrency management."""
         if not claims:
             return {"processed": 0, "failed": 0}
-        
+
+        batch_start = time.perf_counter()
+
         # Use memory pooling for stream processing
         batch_objects = None
         try:
@@ -1753,7 +1765,20 @@ class ClaimsPipeline:
             # Update status
             processing_status["processed"] += len(valid_claims)
             processing_status["failed"] += len(failed_claims_data)
-            
+
+            # Additional metrics
+            revenue = sum(
+                float(c.get("reimbursement_amount", 0.0) or 0.0)
+                for c in valid_claims
+            )
+            metrics.inc("claims_processed", len(valid_claims))
+            metrics.inc("claims_failed", len(failed_claims_data))
+            metrics.record_hourly("claims_processed", len(valid_claims))
+            metrics.record_hourly("revenue_impact", revenue)
+            metrics.inc("revenue_impact", revenue)
+            total_time = time.perf_counter() - batch_start
+            sla_monitor.record_batch(total_time, len(enriched_claims))
+
             return {"processed": len(valid_claims), "failed": len(failed_claims_data)}
             
         finally:

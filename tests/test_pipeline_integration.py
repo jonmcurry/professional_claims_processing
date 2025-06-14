@@ -130,6 +130,11 @@ def test_pipeline_process_batch(monkeypatch):
     monkeypatch.setattr("src.utils.audit.record_audit_event", noop)
     processing_status["processed"] = 0
     processing_status["failed"] = 0
+    from src.monitoring.metrics import metrics
+    metrics.reset("claims_processed")
+    metrics.reset("claims_failed")
+    metrics.reset("revenue_impact")
+    metrics.reset("sla_violations")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -139,9 +144,11 @@ def test_pipeline_process_batch(monkeypatch):
         asyncio.set_event_loop(asyncio.new_event_loop())
     assert processing_status["processed"] == 1
     assert pipeline.sql.inserted == [("111", "F1")]
-    from src.monitoring.metrics import metrics
-
     assert metrics.get("batch_processing_rate_per_sec") > 0
+    assert metrics.get("claims_processed_per_hour") == 1
+    assert metrics.get("revenue_impact") > 0
+    assert metrics.get("revenue_impact_per_hour") == metrics.get("revenue_impact")
+    assert metrics.get("sla_violations") == 0
 
 
 def test_batch_prefetches_rvu(monkeypatch):
