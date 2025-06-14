@@ -5,8 +5,9 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.testclient import Response
 
-from ..config.config import load_config
+from ..config.config import AppConfig, create_default_config, load_config
 from ..db.sql_server import SQLServerDatabase
+from ..utils.cache import DistributedCache
 from ..monitoring.metrics import metrics
 from ..utils.tracing import start_trace, start_trace_from_traceparent
 from .rate_limit import RateLimiter
@@ -39,6 +40,9 @@ from ..utils.logging import RequestContextFilter
 def create_app(
     sql_db: Optional[SQLServerDatabase] = None,
     pg_db: Optional["PostgresDatabase"] = None,
+    redis_cache: Optional["DistributedCache"] = None,
+    external_service: Optional[Any] = None,
+    cfg: Optional["AppConfig"] = None,
     api_key: str | None = None,
     rate_limit_per_sec: int = 100,
 ) -> FastAPI:
@@ -51,6 +55,12 @@ def create_app(
         created using settings from ``config.yaml``.
     pg_db : Optional["PostgresDatabase"]
         Optional PostgreSQL connection for health checks.
+    redis_cache : Optional["DistributedCache"]
+        Optional Redis cache instance for health checks.
+    external_service : Optional[Any]
+        Any additional external service with a ``health_check`` coroutine.
+    cfg : Optional["AppConfig"]
+        Pre-loaded configuration to avoid reading from disk.
     api_key : str | None
         API key required for all requests when provided.
     rate_limit_per_sec : int
@@ -62,7 +72,11 @@ def create_app(
         Configured application instance ready to run.
     """
     app = FastAPI()
-    cfg = load_config()
+    if cfg is None:
+        try:
+            cfg = load_config()
+        except Exception:
+            cfg = create_default_config()
     sql = sql_db or SQLServerDatabase(cfg.sqlserver)
     if pg_db is None:
         from ..db.postgres import PostgresDatabase
@@ -72,6 +86,8 @@ def create_app(
         pg = pg_db
     required_key = api_key or cfg.security.api_key
     limiter = RateLimiter(rate_limit_per_sec)
+    redis = redis_cache
+    external = external_service
     logger = logging.getLogger("claims_processor")
 
     @app.exception_handler(Exception)
@@ -137,16 +153,18 @@ def create_app(
 
         async def dispatch(self, request: Request, call_next):
             start = time.perf_counter()
+            path = getattr(getattr(request, "url", None), "path", "unknown")
+            method = getattr(request, "method", "GET")
             self.logger.info(
-                "request", extra={"path": request.url.path, "method": request.method}
+                "request", extra={"path": path, "method": method}
             )
             response = await call_next(request)
             latency_ms = (time.perf_counter() - start) * 1000
             self.logger.info(
                 "response",
                 extra={
-                    "path": request.url.path,
-                    "method": request.method,
+                    "path": path,
+                    "method": method,
                     "status": response.status_code,
                     "latency_ms": latency_ms,
                 },
@@ -255,8 +273,12 @@ def create_app(
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
         _check_role("user", role)
-        ok = await sql.health_check()
-        return {"sqlserver": ok}
+        status = {"sqlserver": await sql.health_check()}
+        if redis:
+            status["redis"] = await redis.health_check()
+        if external and hasattr(external, "health_check"):
+            status["external"] = await external.health_check()
+        return status
 
     @app.get("/readiness")
     async def readiness(
@@ -267,9 +289,15 @@ def create_app(
         role = x_user_role or request.headers.get("X-User-Role")
         _check_key(x_api_key)
         _check_role("user", role)
-        pg_ok = await pg.health_check()
-        sql_ok = await sql.health_check()
-        return {"postgres": pg_ok, "sqlserver": sql_ok}
+        status = {
+            "postgres": await pg.health_check(),
+            "sqlserver": await sql.health_check(),
+        }
+        if redis:
+            status["redis"] = await redis.health_check()
+        if external and hasattr(external, "health_check"):
+            status["external"] = await external.health_check()
+        return status
 
     @app.get("/liveness")
     async def liveness() -> dict[str, str]:

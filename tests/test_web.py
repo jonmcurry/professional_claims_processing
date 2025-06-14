@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from src.monitoring.metrics import metrics
 from src.web.app import create_app
+from src.config.config import create_default_config
 from src.web.status import batch_status, processing_status
 
 
@@ -27,12 +28,22 @@ class DummyPG(DummyDB):
     pass
 
 
+class DummyRedis:
+    async def health_check(self):
+        return True
+
+
 @pytest.fixture
 def client():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     app = create_app(
-        sql_db=DummyDB(), pg_db=DummyPG(), api_key="test", rate_limit_per_sec=1
+        sql_db=DummyDB(),
+        pg_db=DummyPG(),
+        redis_cache=DummyRedis(),
+        cfg=create_default_config(),
+        api_key="test",
+        rate_limit_per_sec=1,
     )
     with TestClient(app) as client:
         yield client
@@ -68,13 +79,13 @@ def test_batch_status_endpoint(client):
 def test_health_endpoint(client):
     resp = client.get("/health", headers={"X-API-Key": "test"})
     assert resp.status_code == 200
-    assert resp.json() == {"sqlserver": True}
+    assert resp.json() == {"sqlserver": True, "redis": True}
 
 
 def test_readiness_endpoint(client):
     resp = client.get("/readiness", headers={"X-API-Key": "test"})
     assert resp.status_code == 200
-    assert resp.json() == {"postgres": True, "sqlserver": True}
+    assert resp.json() == {"postgres": True, "sqlserver": True, "redis": True}
 
 
 def test_metrics_endpoint(client):
