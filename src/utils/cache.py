@@ -1,6 +1,6 @@
 import json
 import time
-from collections import Counter, deque
+from collections import Counter, deque, OrderedDict
 from typing import Any, Dict, Iterable, Optional
 
 from ..monitoring.metrics import metrics
@@ -220,3 +220,82 @@ class RvuCache:
                     await self.get(next_code, _prefetch=True)
                 except Exception:
                     continue
+
+
+class OptimizedRvuCache:
+    """Distributed RVU cache backed by Redis with a local LRU layer."""
+
+    def __init__(
+        self,
+        redis_url: str,
+        pg_db: "BaseDatabase",
+        local_size: int = 1024,
+        *,
+        redis_client: Optional[Any] = None,
+    ) -> None:
+        from ..db.base import BaseDatabase
+
+        self.pg = pg_db
+        self.redis = redis_client or (aioredis.from_url(redis_url) if aioredis else None)
+        self.local_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        self.local_size = local_size
+
+    def _cache_local(self, code: str, value: Dict[str, Any]) -> None:
+        self.local_cache[code] = value
+        self.local_cache.move_to_end(code)
+        if len(self.local_cache) > self.local_size:
+            self.local_cache.popitem(last=False)
+
+    async def get(self, code: str) -> Optional[Dict[str, Any]]:
+        result = await self.get_many([code])
+        return result.get(code)
+
+    async def get_many(self, codes: Iterable[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+        unique = [c for c in set(codes) if c]
+        cached_results: Dict[str, Optional[Dict[str, Any]]] = {c: None for c in unique}
+        missing_codes: list[str] = []
+
+        for code in unique:
+            if code in self.local_cache:
+                cached_results[code] = self.local_cache[code]
+            else:
+                missing_codes.append(code)
+
+        if missing_codes and self.redis:
+            pipe = self.redis.pipeline()
+            for code in missing_codes:
+                pipe.get(f"rvu:{code}")
+
+            redis_results = await pipe.execute()
+            decoded = [json.loads(r) if r else None for r in redis_results]
+            for code, data in zip(missing_codes, decoded):
+                if data is not None:
+                    cached_results[code] = data
+                    self._cache_local(code, data)
+
+        still_missing = [c for c in unique if cached_results[c] is None]
+        if still_missing:
+            placeholders = ", ".join(f"${i+1}" for i in range(len(still_missing)))
+            rows = await self.pg.fetch(
+                f"SELECT * FROM rvu_data WHERE procedure_code IN ({placeholders})",
+                *still_missing,
+            )
+            for row in rows:
+                code = row.get("procedure_code")
+                if not code:
+                    continue
+                data = dict(row)
+                cached_results[code] = data
+                self._cache_local(code, data)
+                if self.redis:
+                    await self.redis.set(f"rvu:{code}", json.dumps(data), ex=3600)
+
+        return cached_results
+
+    async def invalidate(self, code: str) -> None:
+        self.local_cache.pop(code, None)
+        if self.redis:
+            try:
+                await self.redis.delete(f"rvu:{code}")
+            except Exception:
+                pass
