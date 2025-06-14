@@ -95,17 +95,15 @@ class ClaimService:
                     ["patient_account_number", "facility_id"],
                     processed,
                 )
-            elif "concurrency" in self.sql.execute_many.__code__.co_varnames:
-                await self.sql.execute_many(
-                    "INSERT INTO claims (patient_account_number, facility_id) VALUES (?, ?)",
-                    processed,
-                    concurrency=concurrency,
-                )
             else:
-                await self.sql.execute_many(
-                    "INSERT INTO claims (patient_account_number, facility_id) VALUES (?, ?)",
-                    processed,
-                )
+                claims_data = [
+                    {
+                        "patient_account_number": acct,
+                        "facility_id": facility,
+                    }
+                    for acct, facility in processed
+                ]
+                await self.bulk_insert_postgres_copy(claims_data)
         except Exception:
             for acct, facility in processed:
                 await self.delete_claim(acct, facility)
