@@ -9,6 +9,8 @@ This project processes Protected Health Information (PHI). The following checkli
 
 ## Technical Safeguards
 - Encrypt PHI at rest and in transit using the `encryption_key` from `config.yaml`.
+- The application requires the `cryptography` package to be installed for these
+  encryption features.
 - Ensure user authentication for all web endpoints via API key and role headers.
 - Record access events in the `audit_log` table for traceability.
 

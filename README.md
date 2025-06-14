@@ -36,6 +36,9 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a high-level system diagram
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+# The cryptography package is required for encryption support.
+# It is included in the requirements file but must be installed for the
+# application to start correctly.
 pip install pre-commit
 pre-commit install
 ```
