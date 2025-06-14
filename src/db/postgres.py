@@ -4,6 +4,8 @@ except Exception:  # pragma: no cover - allow missing dependency in tests
     asyncpg = None
 import asyncio
 import os
+import asyncio
+from typing import Iterable, Any
 import time
 from typing import Any, Iterable
 
@@ -26,6 +28,17 @@ class PostgresDatabase(BaseDatabase):
         self.circuit_breaker = CircuitBreaker()
         # Simple in-memory cache for query results
         self.query_cache = InMemoryCache(ttl=60)
+        # Track prepared statements cached across connections
+        self._prepared: set[str] = set()
+        self._lock = asyncio.Lock()
+
+    async def _init_connection(self, conn: "asyncpg.Connection") -> None:
+        """Prepare cached statements on a newly created connection."""
+        for stmt in self._prepared:
+            try:
+                await conn.prepare(stmt)
+            except Exception:
+                continue
 
     async def connect(self) -> None:
         if not await self.circuit_breaker.allow():
@@ -39,6 +52,7 @@ class PostgresDatabase(BaseDatabase):
                 database=self.cfg.database,
                 min_size=self.cfg.min_pool_size,
                 max_size=self.cfg.max_pool_size,
+                init=self._init_connection,
             )
             if self.cfg.replica_host:
                 self.replica_pool = await asyncpg.create_pool(
@@ -49,6 +63,7 @@ class PostgresDatabase(BaseDatabase):
                     database=self.cfg.database,
                     min_size=self.cfg.min_pool_size,
                     max_size=self.cfg.max_pool_size,
+                    init=self._init_connection,
                 )
 
             # Pre-warm connections
@@ -74,6 +89,20 @@ class PostgresDatabase(BaseDatabase):
         if self.cfg.replica_host and not self.replica_pool:
             await self.connect()
 
+    async def prepare(self, query: str) -> None:
+        """Prepare a statement on all existing connections."""
+        await self._ensure_pool()
+        async with self._lock:
+            if query in self._prepared:
+                return
+            self._prepared.add(query)
+            assert self.pool
+            async with self.pool.acquire() as conn:
+                await conn.prepare(query)
+            if self.replica_pool:
+                async with self.replica_pool.acquire() as conn:
+                    await conn.prepare(query)
+
     async def fetch(self, query: str, *params: Any) -> Iterable[dict]:
         if not await self.circuit_breaker.allow():
             raise CircuitBreakerOpenError("Postgres circuit open")
@@ -88,7 +117,11 @@ class PostgresDatabase(BaseDatabase):
             assert pool
             start = time.perf_counter()
             async with pool.acquire() as conn:
-                rows = await conn.fetch(query, *params)
+                if query in self._prepared:
+                    stmt = await conn.prepare(query)
+                    rows = await stmt.fetch(*params)
+                else:
+                    rows = await conn.fetch(query, *params)
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("postgres_query_ms", duration)
             metrics.inc("postgres_query_count")
@@ -104,7 +137,11 @@ class PostgresDatabase(BaseDatabase):
             pool = self.replica_pool or self.pool
             assert pool
             async with pool.acquire() as conn:
-                rows = await conn.fetch(query, *params)
+                if query in self._prepared:
+                    stmt = await conn.prepare(query)
+                    rows = await stmt.fetch(*params)
+                else:
+                    rows = await conn.fetch(query, *params)
             await self.circuit_breaker.record_success()
             result = [dict(row) for row in rows]
             self.query_cache.set(cache_key, result)
@@ -121,7 +158,11 @@ class PostgresDatabase(BaseDatabase):
         try:
             start = time.perf_counter()
             async with self.pool.acquire() as conn:
-                result = await conn.execute(query, *params)
+                if query in self._prepared:
+                    stmt = await conn.prepare(query)
+                    result = await stmt.execute(*params)
+                else:
+                    result = await conn.execute(query, *params)
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("postgres_query_ms", duration)
             metrics.inc("postgres_query_count")
@@ -132,7 +173,11 @@ class PostgresDatabase(BaseDatabase):
             await self.circuit_breaker.record_failure()
             await self.connect()
             async with self.pool.acquire() as conn:
-                result = await conn.execute(query, *params)
+                if query in self._prepared:
+                    stmt = await conn.prepare(query)
+                    result = await stmt.execute(*params)
+                else:
+                    result = await conn.execute(query, *params)
             await self.circuit_breaker.record_success()
             return int(result.split(" ")[-1])
         except Exception as e:
@@ -160,7 +205,11 @@ class PostgresDatabase(BaseDatabase):
 
             async def run_chunk(chunk: list[Iterable[Any]]) -> int:
                 async with self.pool.acquire() as conn:
-                    await conn.executemany(query, chunk)
+                    if query in self._prepared:
+                        stmt = await conn.prepare(query)
+                        await stmt.executemany(chunk)
+                    else:
+                        await conn.executemany(query, chunk)
                 return len(chunk)
 
             results = await asyncio.gather(*[run_chunk(c) for c in chunks])
@@ -169,7 +218,11 @@ class PostgresDatabase(BaseDatabase):
         try:
             start = time.perf_counter()
             async with self.pool.acquire() as conn:
-                await conn.executemany(query, params_list)
+                if query in self._prepared:
+                    stmt = await conn.prepare(query)
+                    await stmt.executemany(params_list)
+                else:
+                    await conn.executemany(query, params_list)
             duration = (time.perf_counter() - start) * 1000
             metrics.inc("postgres_query_ms", duration)
             metrics.inc("postgres_query_count")
@@ -179,7 +232,11 @@ class PostgresDatabase(BaseDatabase):
             await self.circuit_breaker.record_failure()
             await self.connect()
             async with self.pool.acquire() as conn:
-                await conn.executemany(query, params_list)
+                if query in self._prepared:
+                    stmt = await conn.prepare(query)
+                    await stmt.executemany(params_list)
+                else:
+                    await conn.executemany(query, params_list)
             await self.circuit_breaker.record_success()
         except Exception as e:
             await self.circuit_breaker.record_failure()

@@ -58,6 +58,12 @@ class ClaimsPipeline:
         await self.sql.prepare(
             "INSERT INTO failed_claims (claim_id, facility_id, patient_account_number, failure_reason, processing_stage, failed_at, original_data, repair_suggestions) VALUES (?, ?, ?, ?, ?, GETDATE(), ?, ?)"
         )
+        await self.pg.prepare(
+            "INSERT INTO processing_checkpoints (claim_id, stage) VALUES ($1, $2)"
+        )
+        await self.pg.prepare(
+            "INSERT INTO dead_letter_queue (claim_id, reason, data) VALUES ($1, $2, $3)"
+        )
         if self.cfg.model.ab_test_path:
             model_a = FilterModel(self.cfg.model.path, self.cfg.model.version)
             model_b = FilterModel(
