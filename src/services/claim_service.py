@@ -50,7 +50,14 @@ class ClaimService:
                 acct = encrypt_text(str(acct), self.encryption_key)
             processed.append((acct, facility))
         try:
-            if "concurrency" in self.sql.execute_many.__code__.co_varnames:
+            bulk = getattr(self.sql, "bulk_insert_tvp", None)
+            if callable(bulk):
+                await bulk(
+                    "claims",
+                    ["patient_account_number", "facility_id"],
+                    processed,
+                )
+            elif "concurrency" in self.sql.execute_many.__code__.co_varnames:
                 await self.sql.execute_many(
                     "INSERT INTO claims (patient_account_number, facility_id) VALUES (?, ?)",
                     processed,

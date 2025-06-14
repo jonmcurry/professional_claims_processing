@@ -41,6 +41,10 @@ class DummySQL:
         self.inserted.extend(list(params_seq))
         return len(self.inserted)
 
+    async def bulk_insert_tvp(self, table, columns, rows):
+        self.inserted.extend(list(rows))
+        return len(self.inserted)
+
 async def noop(*args, **kwargs):
     pass
 
