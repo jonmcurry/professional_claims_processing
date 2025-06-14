@@ -11,7 +11,7 @@ except Exception:  # pragma: no cover - optional dependency
     sentry_init = None
     LoggingIntegration = None
 
-from .tracing import trace_id_var, span_id_var
+from .tracing import trace_id_var, span_id_var, correlation_id_var
 from ..security.compliance import mask_claim_data
 from ..config.config import LoggingConfig
 from ..monitoring.metrics import metrics
@@ -28,6 +28,7 @@ class JsonFormatter(logging.Formatter):
             "message": record.getMessage(),
             "request_id": getattr(record, "request_id", ""),
             "span_id": getattr(record, "span_id", ""),
+            "correlation_id": getattr(record, "correlation_id", ""),
         }
         for key, value in record.__dict__.items():
             if key not in standard and key not in data:
@@ -114,5 +115,6 @@ class RequestContextFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.request_id = trace_id_var.get("")
         record.span_id = span_id_var.get("")
+        record.correlation_id = correlation_id_var.get("")
         return True
 

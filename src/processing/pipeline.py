@@ -23,7 +23,7 @@ from ..utils.cache import DistributedCache, InMemoryCache, RvuCache
 from ..utils.errors import ErrorCategory, categorize_exception
 from ..utils.logging import RequestContextFilter, setup_logging
 from ..utils.retries import retry_async
-from ..utils.tracing import start_span, start_trace
+from ..utils.tracing import start_span, start_trace, correlation_id_var
 from ..validation.validator import ClaimValidator
 from ..web.status import batch_status, processing_status
 from .repair import ClaimRepairSuggester
@@ -682,6 +682,7 @@ class ClaimsPipeline:
         
         # Initialize batch tracking
         batch_id = f"opt_batch_{int(batch_start * 1000)}"
+        correlation_id_var.set(batch_id)
         batch_status["batch_id"] = batch_id
         batch_status["start_time"] = batch_start
         batch_status["end_time"] = None
@@ -801,6 +802,7 @@ class ClaimsPipeline:
                 
                 for i, (claim, prediction) in enumerate(zip(enriched_claims, predictions)):
                     claim_id = claim.get("claim_id", "")
+                    correlation_id_var.set(claim.get("correlation_id", ""))
                     v_errors = validation_results.get(claim_id, [])
                     r_errors = rules_results.get(claim_id, [])
                     
@@ -1015,6 +1017,7 @@ class ClaimsPipeline:
         
         start_trace()
         stream_start = time.perf_counter()
+        correlation_id_var.set(f"stream_{int(stream_start * 1000)}")
         
         # Memory management for long-running processes
         last_cleanup = stream_start
@@ -1420,6 +1423,7 @@ class ClaimsPipeline:
             
             for claim, prediction in zip(enriched_claims, predictions):
                 claim_id = claim.get("claim_id", "")
+                correlation_id_var.set(claim.get("correlation_id", ""))
                 v_errors = validation_results.get(claim_id, [])
                 r_errors = rules_results.get(claim_id, [])
                 
@@ -1561,6 +1565,7 @@ class ClaimsPipeline:
     async def process_claim(self, claim: Dict[str, Any]) -> None:
         """Process single claim with memory management and dynamic concurrency."""
         # Use memory pool for single claim processing
+        correlation_id_var.set(claim.get("correlation_id", ""))
         pooled_claim = self._memory_pool.acquire("claims", dict)
         try:
             pooled_claim.clear()
@@ -1575,6 +1580,7 @@ class ClaimsPipeline:
 
     async def _process_single_claim_with_pooling(self, claim: Dict[str, Any]) -> Dict[str, Any]:
         """Process single claim using memory pooling and dynamic concurrency."""
+        correlation_id_var.set(claim.get("correlation_id", ""))
         try:
             # Validate claim with dynamic concurrency
             errors = []
@@ -1636,6 +1642,7 @@ class ClaimsPipeline:
                     for claim in claims:
                         try:
                             # Simplified processing
+                            correlation_id_var.set(claim.get("correlation_id", ""))
                             patient_acct = claim.get("patient_account_number")
                             facility_id = claim.get("facility_id")
                             
