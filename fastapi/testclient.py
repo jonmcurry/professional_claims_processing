@@ -37,6 +37,8 @@ class TestClient:
         if headers and "X-User-Role" in headers:
             kwargs["x_user_role"] = headers["X-User-Role"]
         request = Request(headers)
+        request.url = type("URL", (), {"path": path})()
+        request.method = "GET"
         if "request" in func.__code__.co_varnames:
             kwargs["request"] = request
         try:

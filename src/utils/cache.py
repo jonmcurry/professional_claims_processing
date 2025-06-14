@@ -151,6 +151,12 @@ class DistributedCache:
         except Exception:
             self.client = None
 
+    async def health_check(self) -> bool:
+        """Public wrapper for Redis connection health check."""
+        if not self.client:
+            return False
+        return await self._health_check()
+
     async def get(self, key: str) -> Optional[Any]:
         """Get item from distributed cache with connection health check."""
         if not self.client:
