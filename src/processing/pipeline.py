@@ -737,3 +737,36 @@ class ClaimsPipeline:
     ) -> None:
         """Process an amendment/correction for an existing claim."""
         await self.service.amend_claim(claim_id, updates)
+
+    async def stream_claims_batches(
+        self, batch_size: int, *, priority: bool = True
+    ) -> Iterable[list[Dict[str, Any]]]:
+        """Yield batches of claims for streaming processing."""
+        offset = 0
+        while True:
+            batch = await self.service.fetch_claims(
+                batch_size, offset=offset, priority=priority
+            )
+            if not batch:
+                break
+            yield batch
+            offset += batch_size
+
+    async def process_claims_batch_optimized(
+        self, claims: list[Dict[str, Any]]
+    ) -> list[tuple[str, str]]:
+        """Optimized wrapper around ``process_claims_batch`` for large batches."""
+        return await self.process_claims_batch(claims)
+
+    async def process_stream_optimized(self) -> None:
+        """Stream claims in batches with concurrency backpressure."""
+        batch_size = 5000
+        max_concurrent_batches = 10
+        semaphore = asyncio.Semaphore(max_concurrent_batches)
+
+        async def process_batch_with_backpressure(batch: list[Dict[str, Any]]) -> None:
+            async with semaphore:
+                await self.process_claims_batch_optimized(batch)
+
+        async for batch in self.stream_claims_batches(batch_size):
+            asyncio.create_task(process_batch_with_backpressure(batch))
