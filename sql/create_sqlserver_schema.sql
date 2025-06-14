@@ -444,3 +444,11 @@ FROM failed_claims
 GROUP BY DATE_TRUNC('day', failed_at)
 WITH DATA;
 
+-- SQL Server configuration for high throughput
+ALTER DATABASE smart_pro_claims SET RECOVERY SIMPLE;  -- During bulk operations
+ALTER DATABASE smart_pro_claims SET AUTO_UPDATE_STATISTICS_ASYNC ON;
+
+-- Bulk insert optimizations
+EXEC sp_configure 'max degree of parallelism', 0;
+EXEC sp_configure 'cost threshold for parallelism', 5;
+RECONFIGURE;
