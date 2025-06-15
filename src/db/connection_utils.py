@@ -10,6 +10,7 @@ from ..utils.errors import CircuitBreakerOpenError, DatabaseConnectionError
 
 T = TypeVar("T")
 
+
 async def connect_with_retry(
     cb: CircuitBreaker,
     open_error: CircuitBreakerOpenError,
@@ -50,6 +51,7 @@ async def connect_with_retry(
             if max_delay is not None:
                 backoff = min(backoff, max_delay)
     raise DatabaseConnectionError(str(last_exc)) from last_exc
+
 
 def report_pool_metrics(
     prefix: str,

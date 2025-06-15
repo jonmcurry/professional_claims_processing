@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import random
-import numpy as np
 from typing import Any, Dict, List, Protocol
+
+import numpy as np
 
 from ..monitoring.metrics import metrics
 
 
 class _Predictor(Protocol):
-    def predict(self, claim: Dict[str, Any]) -> int: ...
-    def predict_batch(self, claims: List[Dict[str, Any]]) -> List[int]: ...
+    def predict(self, claim: Dict[str, Any]) -> int:
+        ...
+
+    def predict_batch(self, claims: List[Dict[str, Any]]) -> List[int]:
+        ...
 
 
 class ABTestModel:
@@ -31,7 +35,7 @@ class ABTestModel:
         """Optimized batch prediction with vectorized model routing."""
         if not claims:
             return []
-        
+
         # Generate routing decisions for entire batch
         batch_size = len(claims)
         try:
@@ -41,18 +45,22 @@ class ABTestModel:
             model_b_indices = np.where(~routing_decisions)[0]
         except (ImportError, Exception):
             # Fallback to standard library
-            routing_decisions = [random.random() < self.ratio for _ in range(batch_size)]
+            routing_decisions = [
+                random.random() < self.ratio for _ in range(batch_size)
+            ]
             model_a_indices = [i for i, use_a in enumerate(routing_decisions) if use_a]
-            model_b_indices = [i for i, use_a in enumerate(routing_decisions) if not use_a]
-        
+            model_b_indices = [
+                i for i, use_a in enumerate(routing_decisions) if not use_a
+            ]
+
         # Split claims into batches for each model
         model_a_claims = [claims[i] for i in model_a_indices]
         model_b_claims = [claims[i] for i in model_b_indices]
-        
+
         # Get predictions from each model in batches
         results = [0] * batch_size
-        
-        if model_a_claims and hasattr(self.model_a, 'predict_batch'):
+
+        if model_a_claims and hasattr(self.model_a, "predict_batch"):
             model_a_predictions = self.model_a.predict_batch(model_a_claims)
             for idx, pred in zip(model_a_indices, model_a_predictions):
                 results[idx] = pred
@@ -60,8 +68,8 @@ class ABTestModel:
             # Fallback to individual predictions
             for idx in model_a_indices:
                 results[idx] = self.model_a.predict(claims[idx])
-        
-        if model_b_claims and hasattr(self.model_b, 'predict_batch'):
+
+        if model_b_claims and hasattr(self.model_b, "predict_batch"):
             model_b_predictions = self.model_b.predict_batch(model_b_claims)
             for idx, pred in zip(model_b_indices, model_b_predictions):
                 results[idx] = pred
@@ -69,7 +77,7 @@ class ABTestModel:
             # Fallback to individual predictions
             for idx in model_b_indices:
                 results[idx] = self.model_b.predict(claims[idx])
-        
+
         return results
 
 
@@ -92,23 +100,25 @@ class ABTestManager:
         """Batch prediction with exposure tracking."""
         if not claims:
             return []
-        
+
         batch_size = len(claims)
-        
+
         # Generate routing decisions
         try:
             routing_decisions = np.random.random(batch_size) < self.ab_model.ratio
             a_count = int(np.sum(routing_decisions))
             b_count = batch_size - a_count
         except (ImportError, Exception):
-            routing_decisions = [random.random() < self.ab_model.ratio for _ in range(batch_size)]
+            routing_decisions = [
+                random.random() < self.ab_model.ratio for _ in range(batch_size)
+            ]
             a_count = sum(routing_decisions)
             b_count = batch_size - a_count
-        
+
         # Update exposure metrics
         metrics.inc(f"ab_exposure_{self.version_a}", a_count)
         metrics.inc(f"ab_exposure_{self.version_b}", b_count)
-        
+
         # Delegate to AB model for actual predictions
         return self.ab_model.predict_batch(claims)
 
@@ -117,15 +127,15 @@ class ABTestManager:
         total_a = metrics.get(f"ab_exposure_{self.version_a}")
         total_b = metrics.get(f"ab_exposure_{self.version_b}")
         total = total_a + total_b
-        
+
         if total > 0:
             return {
                 f"exposure_rate_{self.version_a}": total_a / total,
                 f"exposure_rate_{self.version_b}": total_b / total,
-                "total_predictions": total
+                "total_predictions": total,
             }
         return {
             f"exposure_rate_{self.version_a}": 0.0,
             f"exposure_rate_{self.version_b}": 0.0,
-            "total_predictions": 0
+            "total_predictions": 0,
         }

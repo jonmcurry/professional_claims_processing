@@ -1,8 +1,8 @@
-import logging
 import json
+import logging
 import logging.handlers
 import time
-from typing import Optional, Dict
+from typing import Dict, Optional
 
 try:  # pragma: no cover - optional dependency
     from sentry_sdk import init as sentry_init
@@ -11,16 +11,18 @@ except Exception:  # pragma: no cover - optional dependency
     sentry_init = None
     LoggingIntegration = None
 
-from .tracing import trace_id_var, span_id_var, correlation_id_var
-from ..security.compliance import mask_claim_data
 from ..config.config import LoggingConfig
 from ..monitoring.metrics import metrics
+from ..security.compliance import mask_claim_data
+from .tracing import correlation_id_var, span_id_var, trace_id_var
 
 
 class JsonFormatter(logging.Formatter):
     """Format log records as JSON for analytics."""
 
-    def format(self, record: logging.LogRecord) -> str:  # pragma: no cover - formatting only
+    def format(
+        self, record: logging.LogRecord
+    ) -> str:  # pragma: no cover - formatting only
         standard = logging.makeLogRecord({}).__dict__.keys()
         data = {
             "timestamp": self.formatTime(record, self.datefmt),
@@ -39,7 +41,9 @@ class JsonFormatter(logging.Formatter):
 class SensitiveDataFilter(logging.Filter):
     """Mask sensitive claim data from logs."""
 
-    def filter(self, record: logging.LogRecord) -> bool:  # pragma: no cover - simple masking
+    def filter(
+        self, record: logging.LogRecord
+    ) -> bool:  # pragma: no cover - simple masking
         claim = getattr(record, "claim", None)
         if isinstance(claim, dict):
             record.claim = mask_claim_data(claim)
@@ -117,4 +121,3 @@ class RequestContextFilter(logging.Filter):
         record.span_id = span_id_var.get("")
         record.correlation_id = correlation_id_var.get("")
         return True
-

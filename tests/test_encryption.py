@@ -1,4 +1,5 @@
-from src.security.compliance import encrypt_text, decrypt_text, encrypt_claim_fields
+from src.security.compliance import (decrypt_text, encrypt_claim_fields,
+                                     encrypt_text)
 
 
 def test_encrypt_decrypt_roundtrip():
@@ -21,4 +22,3 @@ def test_encrypt_claim_fields():
     decrypted_name = decrypt_text(encrypted["patient_name"], key)
     assert decrypted_acct == "123"
     assert decrypted_name == "Jane"
-

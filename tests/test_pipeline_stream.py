@@ -1,25 +1,19 @@
 import asyncio
+import os
 import sys
 import types
-import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 sys.modules.setdefault("asyncpg", types.ModuleType("asyncpg"))
 sys.modules.setdefault("joblib", types.ModuleType("joblib"))
 
+from src.config.config import (AppConfig, CacheConfig, ModelConfig,
+                               PostgresConfig, ProcessingConfig,
+                               SecurityConfig, SQLServerConfig)
 from src.processing.pipeline import ClaimsPipeline
-from src.config.config import (
-    AppConfig,
-    PostgresConfig,
-    SQLServerConfig,
-    ProcessingConfig,
-    SecurityConfig,
-    CacheConfig,
-    ModelConfig,
-)
-from src.services.claim_service import ClaimService
 from src.rules.engine import RulesEngine
+from src.services.claim_service import ClaimService
 from src.validation.validator import ClaimValidator
 
 
@@ -161,4 +155,3 @@ def test_process_stream_parallel(monkeypatch):
 
     assert sorted(pipeline.sql.inserted) == [("111", "F1"), ("222", "F1")]
     assert pipeline.rvu_cache.prefetched == [{"P1"}, {"P1"}]
-

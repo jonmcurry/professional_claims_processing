@@ -1,4 +1,4 @@
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 processing_status: Dict[str, int] = {"processed": 0, "failed": 0}
 
@@ -15,4 +15,3 @@ sync_status: Dict[str, Optional[Any]] = {
     "last_id": None,
     "last_polled_at": None,
 }
-

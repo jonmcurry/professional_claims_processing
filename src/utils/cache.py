@@ -10,7 +10,7 @@ import psutil
 
 from ..monitoring.metrics import metrics
 from ..utils.circuit_breaker import CircuitBreaker
-from ..utils.memory import memory_pool
+from ..utils.memory_pool import memory_pool
 
 try:
     import redis.asyncio as aioredis  # type: ignore
@@ -1269,7 +1269,6 @@ class OptimizedRvuCache(RvuCache):
             and len(self.local_cache) < self._prefetch_threshold
             and time.time() - self._last_prefetch > self._prefetch_interval
         ):
-
             asyncio.create_task(self._background_prefetch())
 
         # Use the parent optimized method

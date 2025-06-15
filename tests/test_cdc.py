@@ -16,4 +16,3 @@ def test_invalid_table_name():
 def test_invalid_id_column():
     with pytest.raises(ValueError):
         ChangeDataCapture(DummyDB(), "claims", id_column="id;")
-

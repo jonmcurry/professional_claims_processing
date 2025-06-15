@@ -1,8 +1,10 @@
 import pytest
 
-from src.analysis.revenue import calculate_potential_revenue_loss, revenue_loss_by_category
-from src.analysis.failure_patterns import failure_reason_counts, top_failure_reasons
+from src.analysis.failure_patterns import (failure_reason_counts,
+                                           top_failure_reasons)
 from src.analysis.failure_predictor import FailurePredictor
+from src.analysis.revenue import (calculate_potential_revenue_loss,
+                                  revenue_loss_by_category)
 from src.analysis.trending import TrendingTracker
 
 
@@ -23,10 +25,12 @@ async def test_revenue_loss():
 
 @pytest.mark.asyncio
 async def test_revenue_loss_by_category():
-    db = DummySQL([
-        {"failure_category": "A", "total": 50},
-        {"failure_category": "B", "total": 30},
-    ])
+    db = DummySQL(
+        [
+            {"failure_category": "A", "total": 50},
+            {"failure_category": "B", "total": 30},
+        ]
+    )
     result = await revenue_loss_by_category(db)
     assert result["A"] == 50
     assert result["B"] == 30

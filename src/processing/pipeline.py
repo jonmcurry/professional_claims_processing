@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import gc
+import inspect
 import json
 import os
 import time
@@ -9,7 +10,6 @@ from pathlib import Path
 from typing import Any, Awaitable, Dict, Iterable, List, Optional, Set
 
 import psutil
-import inspect
 
 from ..alerting import AlertManager, EmailNotifier
 from ..analysis.error_pattern_detector import ErrorPatternDetector
@@ -29,7 +29,8 @@ from ..utils.cache import DistributedCache, InMemoryCache, RvuCache
 from ..utils.errors import ErrorCategory, categorize_exception
 from ..utils.logging import RequestContextFilter, setup_logging
 from ..utils.retries import retry_async
-from ..utils.tracing import correlation_id_var, start_span, start_trace, trace_id_var
+from ..utils.tracing import (correlation_id_var, start_span, start_trace,
+                             trace_id_var)
 from ..validation.validator import ClaimValidator
 from ..web.status import batch_status, processing_status
 from .repair import ClaimRepairSuggester, MLRepairAdvisor
@@ -407,6 +408,7 @@ class ClaimsPipeline:
         self.health_state = {"postgres": True, "sqlserver": True, "redis": True}
         self.local_queue_path = Path("claim_backup_queue.jsonl")
         from ..maintenance import RecoveryManager
+
         self.recovery_manager = RecoveryManager(self, cfg)
 
     async def _run_error_detection_check(self) -> None:
@@ -654,7 +656,6 @@ class ClaimsPipeline:
             current_time - self._last_gc_time > self._gc_interval
             or memory_mb > self._total_memory_limit / (1024 * 1024)
         ):
-
             collected = gc.collect()
             self._last_gc_time = current_time
 
@@ -761,14 +762,28 @@ class ClaimsPipeline:
 
     async def _check_services_health(self) -> bool:
         """Check dependent service health and update mode."""
-        pg_ok = await self.pg.health_check() if hasattr(self.pg, "health_check") else True
-        sql_ok = await self.sql.health_check() if hasattr(self.sql, "health_check") else True
-        redis_ok = await self.distributed_cache.health_check() if self.distributed_cache else True
+        pg_ok = (
+            await self.pg.health_check() if hasattr(self.pg, "health_check") else True
+        )
+        sql_ok = (
+            await self.sql.health_check() if hasattr(self.sql, "health_check") else True
+        )
+        redis_ok = (
+            await self.distributed_cache.health_check()
+            if self.distributed_cache
+            else True
+        )
 
         if not hasattr(self, "health_state"):
-            self.health_state = {"postgres": pg_ok, "sqlserver": sql_ok, "redis": redis_ok}
+            self.health_state = {
+                "postgres": pg_ok,
+                "sqlserver": sql_ok,
+                "redis": redis_ok,
+            }
         else:
-            self.health_state.update({"postgres": pg_ok, "sqlserver": sql_ok, "redis": redis_ok})
+            self.health_state.update(
+                {"postgres": pg_ok, "sqlserver": sql_ok, "redis": redis_ok}
+            )
 
         metrics.set("postgres_available", 1.0 if pg_ok else 0.0)
         metrics.set("sqlserver_available", 1.0 if sql_ok else 0.0)
@@ -793,7 +808,6 @@ class ClaimsPipeline:
             for claim in claims:
                 fh.write(json.dumps(claim) + "\n")
         metrics.inc("claims_queued_backup", len(claims))
-
 
     async def process_batch_ultra_optimized(self) -> Dict[str, Any]:
         """Ultra-optimized batch processing with dynamic concurrency management."""
@@ -1025,9 +1039,7 @@ class ClaimsPipeline:
                         encrypted_claim = claim.copy()
                         if self.encryption_key:
                             from ..security.compliance import (
-                                encrypt_claim_fields,
-                                encrypt_text,
-                            )
+                                encrypt_claim_fields, encrypt_text)
 
                             encrypted_claim = encrypt_claim_fields(
                                 claim, self.encryption_key
@@ -1893,9 +1905,7 @@ class ClaimsPipeline:
                     encrypted_claim = claim.copy()
                     if self.encryption_key:
                         from ..security.compliance import (
-                            encrypt_claim_fields,
-                            encrypt_text,
-                        )
+                            encrypt_claim_fields, encrypt_text)
 
                         encrypted_claim = encrypt_claim_fields(
                             claim, self.encryption_key
@@ -2069,7 +2079,10 @@ class ClaimsPipeline:
         await self._check_services_health()
         if self.mode == "backup":
             await self._queue_claims_locally([claim])
-            self.logger.warning("Queued claim locally due to backup mode", extra={"claim_id": claim.get("claim_id")})
+            self.logger.warning(
+                "Queued claim locally due to backup mode",
+                extra={"claim_id": claim.get("claim_id")},
+            )
             return {"status": "queued"}
 
         correlation_id_var.set(claim.get("correlation_id", ""))
@@ -2411,4 +2424,3 @@ class ClaimsPipeline:
             },
             "emergency_throttling": self.semaphore_manager.emergency_active,
         }
-

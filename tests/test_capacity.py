@@ -1,4 +1,4 @@
-from src.analysis.capacity import predict_throughput, predict_resource_usage
+from src.analysis.capacity import predict_resource_usage, predict_throughput
 
 
 def test_predict_throughput():

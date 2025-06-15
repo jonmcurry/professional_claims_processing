@@ -6,12 +6,11 @@ from typing import Any, Callable, Dict, Tuple
 
 from fastapi import Header, Request
 
-from ..maintenance.enforce_retention_policy import ARCHIVE_PATH, RETENTION_YEARS
 from ..analysis.failure_patterns import top_failure_reasons
-from ..analysis.revenue import (
-    calculate_potential_revenue_loss,
-    revenue_loss_by_category,
-)
+from ..analysis.revenue import (calculate_potential_revenue_loss,
+                                revenue_loss_by_category)
+from ..maintenance.enforce_retention_policy import (ARCHIVE_PATH,
+                                                    RETENTION_YEARS)
 
 
 class SimpleRouter:
@@ -52,7 +51,11 @@ def create_compliance_router(
         files: list[str] = []
         latest: str | None = None
         if os.path.isdir(path):
-            files = [f for f in os.listdir(path) if f.startswith("claims_") and f.endswith(".jsonl")]
+            files = [
+                f
+                for f in os.listdir(path)
+                if f.startswith("claims_") and f.endswith(".jsonl")
+            ]
             if files:
                 try:
                     latest_ts = max(

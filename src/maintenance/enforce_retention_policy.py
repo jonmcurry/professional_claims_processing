@@ -5,7 +5,6 @@ from pathlib import Path
 
 from .archive_old_claims import archive_old_claims
 
-
 RETENTION_YEARS = int(os.getenv("RETENTION_YEARS", "7"))
 ARCHIVE_PATH = Path(os.getenv("ARCHIVE_PATH", "archive"))
 

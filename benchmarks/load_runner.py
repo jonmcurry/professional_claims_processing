@@ -2,18 +2,12 @@ import asyncio
 import time
 from typing import List
 
+from src.config.config import (AppConfig, CacheConfig, ModelConfig,
+                               PostgresConfig, ProcessingConfig,
+                               SecurityConfig, SQLServerConfig)
 from src.processing.pipeline import ClaimsPipeline
-from src.config.config import (
-    AppConfig,
-    PostgresConfig,
-    SQLServerConfig,
-    ProcessingConfig,
-    SecurityConfig,
-    CacheConfig,
-    ModelConfig,
-)
-from src.services.claim_service import ClaimService
 from src.rules.engine import RulesEngine
+from src.services.claim_service import ClaimService
 from src.validation.validator import ClaimValidator
 
 
@@ -83,6 +77,4 @@ async def run(concurrency: int = 10, iterations: int = 100) -> float:
 
 if __name__ == "__main__":
     duration = asyncio.run(run())
-    print(
-        f"Processed {10 * 100} claims concurrently in {duration:.4f}s"
-    )
+    print(f"Processed {10 * 100} claims concurrently in {duration:.4f}s")

@@ -1,1 +1,1 @@
-__all__ = ['ErrorPatternDetector']
+__all__ = ["ErrorPatternDetector"]

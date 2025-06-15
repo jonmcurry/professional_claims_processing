@@ -7,12 +7,12 @@ from fastapi.testclient import Response
 
 from ..config.config import AppConfig, create_default_config, load_config
 from ..db.sql_server import SQLServerDatabase
-from ..utils.cache import DistributedCache
 from ..monitoring.metrics import metrics
+from ..utils.cache import DistributedCache
 from ..utils.tracing import start_trace, start_trace_from_traceparent
+from .compliance import create_compliance_router
 from .rate_limit import RateLimiter
 from .status import batch_status, processing_status
-from .compliance import create_compliance_router
 
 try:
     from starlette.middleware.base import BaseHTTPMiddleware
@@ -35,8 +35,8 @@ import time
 from fastapi.responses import JSONResponse
 
 from ..monitoring.profiling import start_profiling, stop_profiling
-from ..utils.logging import RequestContextFilter
 from ..utils.audit import record_audit_event
+from ..utils.logging import RequestContextFilter
 
 
 def create_app(
@@ -125,16 +125,19 @@ def create_app(
         allowed = role_permissions.get(path, {"auditor", "user", "admin"})
         current = role or "user"
         if current not in allowed:
-            ip = (
-                getattr(getattr(request, "client", None), "host", None)
-                or request.headers.get("X-Forwarded-For", "unknown")
-            )
+            ip = getattr(
+                getattr(request, "client", None), "host", None
+            ) or request.headers.get("X-Forwarded-For", "unknown")
             await record_audit_event(
                 sql,
                 "auth",
                 ip,
                 "unauthorized",
-                new_values={"path": path, "role": role, "headers": dict(request.headers)},
+                new_values={
+                    "path": path,
+                    "role": role,
+                    "headers": dict(request.headers),
+                },
             )
             raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -187,9 +190,7 @@ def create_app(
             start = time.perf_counter()
             path = getattr(getattr(request, "url", None), "path", "unknown")
             method = getattr(request, "method", "GET")
-            self.logger.info(
-                "request", extra={"path": path, "method": method}
-            )
+            self.logger.info("request", extra={"path": path, "method": method})
             response = await call_next(request)
             latency_ms = (time.perf_counter() - start) * 1000
             self.logger.info(
@@ -216,10 +217,9 @@ def create_app(
 
     async def _check_key(request: Request, x_api_key: str) -> None:
         if required_key and x_api_key != required_key:
-            ip = (
-                getattr(getattr(request, "client", None), "host", None)
-                or request.headers.get("X-Forwarded-For", "unknown")
-            )
+            ip = getattr(
+                getattr(request, "client", None), "host", None
+            ) or request.headers.get("X-Forwarded-For", "unknown")
             await record_audit_event(
                 sql,
                 "auth",

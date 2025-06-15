@@ -1,6 +1,7 @@
 import heapq
 from typing import Any, Dict, List, Tuple
 
+
 class PriorityClaimQueue:
     """Simple in-memory priority queue for claims."""
 
@@ -20,4 +21,3 @@ class PriorityClaimQueue:
 
     def __len__(self) -> int:
         return len(self._queue)
-

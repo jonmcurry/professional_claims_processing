@@ -4,8 +4,8 @@ import logging
 from dataclasses import dataclass
 from typing import Callable, List
 
-from ..monitoring.metrics import metrics
 from ..config.config import AppConfig
+from ..monitoring.metrics import metrics
 from .notifier import EmailNotifier
 
 
@@ -69,4 +69,3 @@ class AlertManager:
             body = "\n".join(triggered)
             self.notifier.send(self.recipients, "Claims Processor Alert", body)
             self.logger.warning("Alerts triggered: %s", body)
-

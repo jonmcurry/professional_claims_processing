@@ -1,7 +1,7 @@
+import time
 from collections import defaultdict, deque
 from threading import Lock
-from typing import Dict, Deque, Tuple
-import time
+from typing import Deque, Dict, Tuple
 
 
 class MetricsRegistry:

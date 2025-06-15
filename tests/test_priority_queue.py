@@ -8,4 +8,3 @@ def test_priority_queue_order():
     q.push({"id": 3}, 3)
     order = [q.pop()["id"] for _ in range(3)]
     assert order == [2, 3, 1]
-

@@ -14,9 +14,9 @@ async def apply_migrations(cfg: PostgresConfig) -> None:
     """Run ``alembic upgrade head`` using the given configuration."""
     ini_path = Path(__file__).resolve().parent.parent.parent / "alembic.ini"
     env = dict(os.environ)
-    env["DATABASE_URL"] = (
-        f"postgresql://{cfg.user}:{cfg.password}@{cfg.host}:{cfg.port}/{cfg.database}"
-    )
+    env[
+        "DATABASE_URL"
+    ] = f"postgresql://{cfg.user}:{cfg.password}@{cfg.host}:{cfg.port}/{cfg.database}"
     subprocess.run(
         ["alembic", "-c", str(ini_path), "upgrade", "head"], check=True, env=env
     )
@@ -24,6 +24,7 @@ async def apply_migrations(cfg: PostgresConfig) -> None:
 
 if __name__ == "__main__":
     import os
+
     from ..config.config import load_config
 
     config_path = os.getenv("APP_CONFIG", "config.yaml")

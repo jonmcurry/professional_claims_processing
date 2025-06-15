@@ -1,5 +1,7 @@
 import asyncio
-from . import HTMLResponse, Request, HTTPException
+
+from . import HTMLResponse, HTTPException, Request
+
 
 class Response:
     def __init__(self, status_code=200, json=None, content=None, headers=None):
@@ -10,6 +12,7 @@ class Response:
 
     def json(self):
         return self._json
+
 
 class TestClient:
     def __init__(self, app):
@@ -60,6 +63,7 @@ class TestClient:
 
         for mw in reversed(self.app.middleware_handlers):
             response = self.loop.run_until_complete(mw(request, call_next))
+
             async def call_next(_):
                 return response
 
@@ -96,8 +100,8 @@ class TestClient:
 
         for mw in reversed(self.app.middleware_handlers):
             response = self.loop.run_until_complete(mw(request, call_next))
+
             async def call_next(_):
                 return response
 
         return response
-

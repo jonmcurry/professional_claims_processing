@@ -27,4 +27,3 @@ def test_main_invokes_pipeline(monkeypatch):
     main.main()
     assert called.started
     assert called.processed
-

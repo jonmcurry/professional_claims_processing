@@ -1,7 +1,9 @@
 import pytest
+
 from fastapi.testclient import TestClient
-from src.web.app import create_app
 from src.config.config import create_default_config
+from src.web.app import create_app
+
 
 class DummyDB:
     async def connect(self):
@@ -25,6 +27,7 @@ class DummyRedis:
     async def health_check(self):
         return True
 
+
 @pytest.fixture
 def client():
     app = create_app(
@@ -36,6 +39,7 @@ def client():
     )
     with TestClient(app) as client:
         yield client
+
 
 def test_trace_id_header(client):
     traceparent = "00-1234567890abcdef1234567890abcdef-abcdef1234567890-01"

@@ -1,23 +1,18 @@
-import pytest
+import asyncio
 import sys
 import types
-import asyncio
+
+import pytest
 
 sys.modules.setdefault("asyncpg", types.ModuleType("asyncpg"))
 sys.modules.setdefault("joblib", types.ModuleType("joblib"))
 
+from src.config.config import (AppConfig, CacheConfig, ModelConfig,
+                               PostgresConfig, ProcessingConfig,
+                               SecurityConfig, SQLServerConfig)
 from src.processing.pipeline import ClaimsPipeline
-from src.config.config import (
-    AppConfig,
-    PostgresConfig,
-    SQLServerConfig,
-    ProcessingConfig,
-    SecurityConfig,
-    CacheConfig,
-    ModelConfig,
-)
-from src.services.claim_service import ClaimService
 from src.rules.engine import RulesEngine
+from src.services.claim_service import ClaimService
 from src.validation.validator import ClaimValidator
 from src.web.status import processing_status
 
@@ -122,6 +117,7 @@ def test_pipeline_process_batch(monkeypatch):
     processing_status["processed"] = 0
     processing_status["failed"] = 0
     from src.monitoring.metrics import metrics
+
     metrics.reset("claims_processed")
     metrics.reset("claims_failed")
     metrics.reset("revenue_impact")
@@ -257,4 +253,3 @@ async def test_pipeline_startup(monkeypatch):
     assert pipeline.rvu_cache.get("X2") is not None
     assert "F1" in pipeline.validator.valid_facilities
     assert "A" in pipeline.validator.valid_financial_classes
-

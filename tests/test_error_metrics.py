@@ -1,6 +1,7 @@
 import pytest
-from src.services.claim_service import ClaimService
+
 from src.monitoring.metrics import metrics
+from src.services.claim_service import ClaimService
 
 
 class DummySQL:
@@ -20,7 +21,9 @@ async def noop(*args, **kwargs):
 @pytest.mark.asyncio
 async def test_error_metric_increment(monkeypatch):
     service = ClaimService(DummyPG(), DummySQL())
-    monkeypatch.setattr('src.utils.audit.record_audit_event', noop)
+    monkeypatch.setattr("src.utils.audit.record_audit_event", noop)
     metrics.set("errors_validation", 0)
-    await service.record_failed_claim({"claim_id": "1"}, "bad", "fix", category="validation")
+    await service.record_failed_claim(
+        {"claim_id": "1"}, "bad", "fix", category="validation"
+    )
     assert metrics.get("errors_validation") == 1

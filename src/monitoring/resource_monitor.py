@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import asyncio
 import logging
 import time
@@ -10,10 +11,11 @@ except Exception:  # pragma: no cover - optional dependency
     psutil = None
 
 from collections import deque
-from .metrics import metrics
-from ..analysis.trending import TrendingTracker
-from ..analysis.capacity import predict_resource_usage, predict_throughput
+
 from ..alerting import AlertManager
+from ..analysis.capacity import predict_resource_usage, predict_throughput
+from ..analysis.trending import TrendingTracker
+from .metrics import metrics
 
 _task: Optional[asyncio.Task] = None
 _alert_manager: Optional[AlertManager] = None
@@ -52,9 +54,7 @@ async def _collect(interval: float, log_interval: float) -> None:
             metrics.set("memory_usage_trend", _trending.trend("mem"))
             now = time.time()
             if now - last_log >= log_interval:
-                logger.info(
-                    "CPU usage: %.2f%%, Memory usage: %.2f MB", cpu, mem
-                )
+                logger.info("CPU usage: %.2f%%, Memory usage: %.2f MB", cpu, mem)
                 last_log = now
         tp = metrics.get("batch_processing_rate_per_sec")
         if tp:

@@ -1,13 +1,14 @@
-from typing import Dict, Any
 import base64
-import types
 import sys
+import types
+from typing import Any, Dict
 
 try:
     from cryptography.fernet import Fernet
 except Exception as exc:  # pragma: no cover - enforce dependency
     try:
         import cryptography  # type: ignore
+
         mod = getattr(cryptography, "fernet", None)
         if mod and hasattr(mod, "Fernet"):
             Fernet = mod.Fernet
@@ -70,7 +71,9 @@ def encrypt_claim_fields(claim: Dict[str, Any], key: str) -> Dict[str, Any]:
         return claim
     encrypted = claim.copy()
     if "patient_account_number" in encrypted and encrypted["patient_account_number"]:
-        encrypted["patient_account_number"] = encrypt_text(str(encrypted["patient_account_number"]), key)
+        encrypted["patient_account_number"] = encrypt_text(
+            str(encrypted["patient_account_number"]), key
+        )
     if "patient_name" in encrypted and encrypted["patient_name"]:
         encrypted["patient_name"] = encrypt_text(str(encrypted["patient_name"]), key)
     return encrypted

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+
 import pytest
 
 from src.analysis.error_pattern_detector import ErrorPatternDetector
@@ -15,7 +16,10 @@ class DummySQL:
 
 @pytest.mark.asyncio
 async def test_detector_emits_warning(caplog):
-    rows = [{"failure_reason": "invalid_facility"}, {"failure_reason": "invalid_facility"}]
+    rows = [
+        {"failure_reason": "invalid_facility"},
+        {"failure_reason": "invalid_facility"},
+    ]
     db = DummySQL(rows)
     detector = ErrorPatternDetector(db, threshold=2, check_interval=0)
     with caplog.at_level(logging.WARNING):
@@ -31,4 +35,3 @@ async def test_detector_no_warning(caplog):
     with caplog.at_level(logging.WARNING):
         await detector.maybe_check()
     assert not caplog.records
-

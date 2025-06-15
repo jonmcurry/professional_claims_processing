@@ -1,6 +1,6 @@
-import time
 import asyncio
 import sys
+import time
 import types
 
 sys.modules.setdefault("asyncpg", types.ModuleType("asyncpg"))
@@ -15,30 +15,36 @@ setattr(durable_module, "lang", durable_lang)
 sys.modules.setdefault("durable", durable_module)
 sys.modules.setdefault("durable.lang", durable_lang)
 
+from src.config.config import (AppConfig, CacheConfig, ModelConfig,
+                               PostgresConfig, ProcessingConfig,
+                               SecurityConfig, SQLServerConfig)
 from src.processing.pipeline import ClaimsPipeline
-from src.config.config import AppConfig, PostgresConfig, SQLServerConfig, ProcessingConfig, SecurityConfig, CacheConfig, ModelConfig
-from src.services.claim_service import ClaimService
 from src.rules.engine import RulesEngine
+from src.services.claim_service import ClaimService
 from src.validation.validator import ClaimValidator
+
 
 class DummyPostgres:
     async def connect(self):
         pass
 
     async def fetch(self, query: str, *params):
-        return [{
-            "claim_id": "1",
-            "patient_account_number": "111",
-            "facility_id": "F1",
-            "procedure_code": "P1",
-            "financial_class": "A"
-        }]
+        return [
+            {
+                "claim_id": "1",
+                "patient_account_number": "111",
+                "facility_id": "F1",
+                "procedure_code": "P1",
+                "financial_class": "A",
+            }
+        ]
 
     async def execute(self, query: str, *params):
         return 1
 
     async def execute_many(self, query: str, params_seq):
         return len(list(params_seq))
+
 
 class DummySQL:
     def __init__(self):
@@ -63,9 +69,11 @@ class DummySQL:
     async def prepare(self, query: str):
         pass
 
+
 class DummyModel:
     def predict(self, claim):
         return 1
+
 
 def test_pipeline_batch_performance():
     cfg = AppConfig(
@@ -94,4 +102,3 @@ def test_pipeline_batch_performance():
         loop.close()
         asyncio.set_event_loop(asyncio.new_event_loop())
     assert duration < 0.5
-

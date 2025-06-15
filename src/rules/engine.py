@@ -1,8 +1,9 @@
-import json
-import numpy as np
-from typing import Any, Dict, List
-from concurrent.futures import ThreadPoolExecutor
 import asyncio
+import json
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Dict, List
+
+import numpy as np
 
 
 class Rule:
@@ -63,13 +64,13 @@ class Rule:
         op = self.logic.get("operator", "equals")
         value = self.logic.get("value")
         values = self.logic.get("values")
-        
+
         if not field:
             return [True] * len(claims)
-        
+
         # Extract field values for vectorized operations
         field_values = [claim.get(field) for claim in claims]
-        
+
         try:
             # Use numpy for vectorized operations where possible
             if op == "equals":
@@ -110,75 +111,81 @@ class RulesEngine:
         """Vectorized batch evaluation of claims."""
         if not claims or not self.rules:
             return {claim.get("claim_id", ""): [] for claim in claims}
-        
+
         results: Dict[str, List[str]] = {}
-        
+
         # Initialize results dict
         for claim in claims:
             claim_id = claim.get("claim_id", "")
             results[claim_id] = []
-        
+
         # Process each rule across all claims vectorized
         for rule in self.rules:
             try:
                 # Get vectorized results for this rule across all claims
                 rule_results = rule.apply_vectorized(claims)
-                
+
                 # Map failures back to specific claims
                 for i, (claim, rule_passed) in enumerate(zip(claims, rule_results)):
                     if not rule_passed:
                         claim_id = claim.get("claim_id", "")
                         results[claim_id].append(rule.name)
-                        
+
             except Exception:
                 # Fallback to individual evaluation for this rule
                 for claim in claims:
                     claim_id = claim.get("claim_id", "")
                     if not rule.apply(claim):
                         results[claim_id].append(rule.name)
-        
+
         return results
 
-    def evaluate_batch_parallel(self, claims: List[Dict[str, Any]], max_workers: int = 4) -> Dict[str, List[str]]:
+    def evaluate_batch_parallel(
+        self, claims: List[Dict[str, Any]], max_workers: int = 4
+    ) -> Dict[str, List[str]]:
         """Parallel batch evaluation using thread pool for CPU-intensive rules."""
         if not claims or not self.rules:
             return {claim.get("claim_id", ""): [] for claim in claims}
-        
+
         results: Dict[str, List[str]] = {}
-        
+
         # Initialize results dict
         for claim in claims:
             claim_id = claim.get("claim_id", "")
             results[claim_id] = []
-        
+
         # Split claims into chunks for parallel processing
         chunk_size = max(len(claims) // max_workers, 100)
-        claim_chunks = [claims[i:i + chunk_size] for i in range(0, len(claims), chunk_size)]
-        
+        claim_chunks = [
+            claims[i : i + chunk_size] for i in range(0, len(claims), chunk_size)
+        ]
+
         def process_chunk(chunk: List[Dict[str, Any]]) -> Dict[str, List[str]]:
             chunk_results: Dict[str, List[str]] = {}
-            
+
             for claim in chunk:
                 claim_id = claim.get("claim_id", "")
                 chunk_results[claim_id] = []
-                
+
                 for rule in self.rules:
                     if not rule.apply(claim):
                         chunk_results[claim_id].append(rule.name)
-            
+
             return chunk_results
-        
+
         # Process chunks in parallel
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             chunk_results = list(executor.map(process_chunk, claim_chunks))
-        
+
         # Merge results
         for chunk_result in chunk_results:
             results.update(chunk_result)
-        
+
         return results
 
-    async def evaluate_batch_async(self, claims: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+    async def evaluate_batch_async(
+        self, claims: List[Dict[str, Any]]
+    ) -> Dict[str, List[str]]:
         """Async batch evaluation for non-blocking processing."""
         return await asyncio.get_event_loop().run_in_executor(
             None, self.evaluate_batch_parallel, claims

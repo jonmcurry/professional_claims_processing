@@ -8,7 +8,9 @@ from .base import BaseDatabase
 class ShardedDatabase(BaseDatabase):
     """Simple hash-based sharding wrapper."""
 
-    def __init__(self, shards: List[BaseDatabase], shard_func: Callable[[Any], int]) -> None:
+    def __init__(
+        self, shards: List[BaseDatabase], shard_func: Callable[[Any], int]
+    ) -> None:
         self.shards = shards
         self.shard_func = shard_func
 

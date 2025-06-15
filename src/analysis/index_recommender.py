@@ -3,9 +3,9 @@ from __future__ import annotations
 import re
 from typing import List
 
-from .query_tracker import summary
-from .query_plan import explain, has_seq_scan
 from ..db.postgres import PostgresDatabase
+from .query_plan import explain, has_seq_scan
+from .query_tracker import summary
 
 
 async def recommend_indexes(

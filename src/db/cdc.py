@@ -5,8 +5,8 @@ import re
 import time
 from typing import Any, AsyncIterator
 
-from .postgres import PostgresDatabase
 from ..web.status import sync_status
+from .postgres import PostgresDatabase
 
 
 class ChangeDataCapture:
@@ -14,7 +14,9 @@ class ChangeDataCapture:
 
     _VALID_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-    def __init__(self, db: PostgresDatabase, table: str, *, id_column: str = "id") -> None:
+    def __init__(
+        self, db: PostgresDatabase, table: str, *, id_column: str = "id"
+    ) -> None:
         self.db = db
         self.table = self._validate_name(table, "table")
         self.id_column = self._validate_name(id_column, "id column")
@@ -39,4 +41,3 @@ class ChangeDataCapture:
                 sync_status["last_id"] = self._last_id
                 yield row
             await asyncio.sleep(self._poll_interval)
-

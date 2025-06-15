@@ -1,6 +1,6 @@
 import asyncio
-import types
 import sys
+import types
 
 sys.modules.setdefault("asyncpg", types.ModuleType("asyncpg"))
 
@@ -45,5 +45,7 @@ def test_process_claims_sharded(monkeypatch):
         loop.close()
         asyncio.set_event_loop(asyncio.new_event_loop())
 
-    assert proc.shards[0].batches == [[{"facility_id": "A", "claim_id": "1"}, {"facility_id": "A", "claim_id": "3"}]]
+    assert proc.shards[0].batches == [
+        [{"facility_id": "A", "claim_id": "1"}, {"facility_id": "A", "claim_id": "3"}]
+    ]
     assert proc.shards[1].batches == [[{"facility_id": "B", "claim_id": "2"}]]

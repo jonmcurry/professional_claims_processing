@@ -1,6 +1,9 @@
 import asyncio
+
 import pytest
+
 from src.services.claim_service import ClaimService
+
 
 class DummyPG:
     def __init__(self):
@@ -14,8 +17,10 @@ class DummyPG:
         self.recorded.append(params)
         return 1
 
+
 class DummySQL:
     pass
+
 
 @pytest.mark.asyncio
 async def test_checkpoint_buffer_flushes():

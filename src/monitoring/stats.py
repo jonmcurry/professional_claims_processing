@@ -11,7 +11,9 @@ class LatencyTracker:
 
     def __init__(self, window: int = 1000) -> None:
         self.window = window
-        self._data: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=self.window))
+        self._data: Dict[str, Deque[float]] = defaultdict(
+            lambda: deque(maxlen=self.window)
+        )
 
     def record(self, name: str, value: float) -> None:
         series = self._data[name]

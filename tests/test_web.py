@@ -4,9 +4,9 @@ import logging
 import pytest
 
 from fastapi.testclient import TestClient
+from src.config.config import create_default_config
 from src.monitoring.metrics import metrics
 from src.web.app import create_app
-from src.config.config import create_default_config
 from src.web.status import batch_status, processing_status
 
 
@@ -140,12 +140,14 @@ def test_invalid_api_key_audited(client, monkeypatch):
     recorded = []
 
     async def fake_record(db, table, record_id, operation, **kwargs):
-        recorded.append({
-            "table": table,
-            "record_id": record_id,
-            "operation": operation,
-            "values": kwargs.get("new_values"),
-        })
+        recorded.append(
+            {
+                "table": table,
+                "record_id": record_id,
+                "operation": operation,
+                "values": kwargs.get("new_values"),
+            }
+        )
 
     monkeypatch.setattr("src.utils.audit.record_audit_event", fake_record)
     monkeypatch.setattr("src.web.app.record_audit_event", fake_record)
@@ -160,12 +162,14 @@ def test_forbidden_role_audited(client, monkeypatch):
     recorded = []
 
     async def fake_record(db, table, record_id, operation, **kwargs):
-        recorded.append({
-            "table": table,
-            "record_id": record_id,
-            "operation": operation,
-            "values": kwargs.get("new_values"),
-        })
+        recorded.append(
+            {
+                "table": table,
+                "record_id": record_id,
+                "operation": operation,
+                "values": kwargs.get("new_values"),
+            }
+        )
 
     monkeypatch.setattr("src.utils.audit.record_audit_event", fake_record)
     monkeypatch.setattr("src.web.app.record_audit_event", fake_record)

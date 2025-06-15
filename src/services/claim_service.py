@@ -10,7 +10,8 @@ import psutil
 from ..db.postgres import PostgresDatabase
 from ..db.sql_server import SQLServerDatabase
 from ..monitoring.metrics import metrics
-from ..security.compliance import decrypt_text, encrypt_claim_fields, encrypt_text
+from ..security.compliance import (decrypt_text, encrypt_claim_fields,
+                                   encrypt_text)
 from ..utils.audit import record_audit_event
 from ..utils.memory_pool import memory_pool
 from ..utils.priority_queue import PriorityClaimQueue
@@ -1268,9 +1269,9 @@ class ClaimService:
 
             # Performance insights
             if hasattr(self.sql, "get_performance_insights"):
-                metrics_container["performance_insights"] = (
-                    await self.sql.get_performance_insights()
-                )
+                metrics_container[
+                    "performance_insights"
+                ] = await self.sql.get_performance_insights()
 
             return dict(metrics_container)
 

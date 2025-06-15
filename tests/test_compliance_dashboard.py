@@ -1,10 +1,11 @@
-import os
 import asyncio
-import pytest
-from fastapi.testclient import TestClient
+import os
 
-from src.web.app import create_app
+import pytest
+
+from fastapi.testclient import TestClient
 from src.config.config import create_default_config
+from src.web.app import create_app
 
 
 class DummyDB:

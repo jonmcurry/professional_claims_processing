@@ -4,8 +4,8 @@ import asyncio
 from collections import defaultdict
 from typing import Any, Dict, Iterable
 
-from .pipeline import ClaimsPipeline
 from ..config.config import AppConfig
+from .pipeline import ClaimsPipeline
 
 
 class ShardedClaimsProcessor:

@@ -4,8 +4,8 @@ import logging
 import time
 from typing import Dict
 
-from .failure_patterns import failure_reason_counts
 from ..db.sql_server import SQLServerDatabase
+from .failure_patterns import failure_reason_counts
 
 
 class ErrorPatternDetector:
@@ -52,4 +52,3 @@ class ErrorPatternDetector:
             "invalid_dob": "Ensure patient date_of_birth is valid",
         }
         return table.get(reason, "Investigate data quality issues")
-

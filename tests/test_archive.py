@@ -1,10 +1,11 @@
-import os
 import json
-import pytest
+import os
 from types import SimpleNamespace
-from src.security.compliance import decrypt_text
+
+import pytest
 
 from src.maintenance.archive_old_claims import archive_old_claims
+from src.security.compliance import decrypt_text
 
 
 class DummyDB:
@@ -47,14 +48,22 @@ async def test_archive_no_rows(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_archive_with_rows(monkeypatch, tmp_path):
     key = "abcd" * 8
-    rows = [{"claim_id": 1, "patient_account_number": "123", "service_to_date": "2020-01-01"}]
+    rows = [
+        {
+            "claim_id": 1,
+            "patient_account_number": "123",
+            "service_to_date": "2020-01-01",
+        }
+    ]
     db = DummyDB(rows)
     monkeypatch.setattr(
         "src.maintenance.archive_old_claims.PostgresDatabase", lambda cfg: db
     )
     monkeypatch.setattr(
         "src.maintenance.archive_old_claims.load_config",
-        lambda: SimpleNamespace(postgres=None, security=SimpleNamespace(encryption_key=key)),
+        lambda: SimpleNamespace(
+            postgres=None, security=SimpleNamespace(encryption_key=key)
+        ),
     )
     monkeypatch.setenv("ARCHIVE_PATH", str(tmp_path))
     await archive_old_claims(days=1)

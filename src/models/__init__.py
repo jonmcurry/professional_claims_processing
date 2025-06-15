@@ -31,5 +31,3 @@ def __getattr__(name):
         module = _import_module(f"{__name__}.{module_name}")
         return getattr(module, name)
     raise AttributeError(name)
-
-

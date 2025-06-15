@@ -35,4 +35,3 @@ def test_repair_suggestions_with_ml(monkeypatch):
     res = suggester.suggest(["invalid_dob"], {"claim_id": "1"})
     assert "Check date_of_birth" in res
     assert "ML fix" in res
-

@@ -1,6 +1,6 @@
 import asyncio
-import types
 import sys
+import types
 
 import pytest
 
@@ -9,20 +9,14 @@ sys.modules.setdefault("asyncpg", types.ModuleType("asyncpg"))
 sys.modules.setdefault("joblib", types.ModuleType("joblib"))
 
 
+from src.analysis.error_pattern_detector import ErrorPatternDetector
+from src.config.config import (AppConfig, CacheConfig, ModelConfig,
+                               PostgresConfig, ProcessingConfig,
+                               SecurityConfig, SQLServerConfig)
 from src.processing.pipeline import ClaimsPipeline
-from src.config.config import (
-    AppConfig,
-    PostgresConfig,
-    SQLServerConfig,
-    ProcessingConfig,
-    SecurityConfig,
-    CacheConfig,
-    ModelConfig,
-)
+from src.rules.engine import RulesEngine
 from src.services.claim_service import ClaimService
 from src.validation.validator import ClaimValidator
-from src.rules.engine import RulesEngine
-from src.analysis.error_pattern_detector import ErrorPatternDetector
 
 
 class DummyPostgres:
@@ -106,10 +100,10 @@ async def test_pipeline_triggers_error_detector(monkeypatch):
         nonlocal called
         called = True
 
-    pipeline.error_detector = ErrorPatternDetector(pipeline.sql, threshold=1, check_interval=0)
+    pipeline.error_detector = ErrorPatternDetector(
+        pipeline.sql, threshold=1, check_interval=0
+    )
     monkeypatch.setattr(pipeline.error_detector, "maybe_check", fake_check)
 
     await pipeline.process_batch()
     assert called
-
-

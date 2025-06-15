@@ -1,25 +1,19 @@
 import asyncio
 import json
-import types
 import sys
+import types
 
 import pytest
 
 sys.modules.setdefault("asyncpg", types.ModuleType("asyncpg"))
 sys.modules.setdefault("joblib", types.ModuleType("joblib"))
 
+from src.config.config import (AppConfig, CacheConfig, ModelConfig,
+                               PostgresConfig, ProcessingConfig,
+                               SecurityConfig, SQLServerConfig)
 from src.processing.pipeline import ClaimsPipeline
-from src.config.config import (
-    AppConfig,
-    PostgresConfig,
-    SQLServerConfig,
-    ProcessingConfig,
-    SecurityConfig,
-    CacheConfig,
-    ModelConfig,
-)
-from src.services.claim_service import ClaimService
 from src.rules.engine import RulesEngine
+from src.services.claim_service import ClaimService
 
 
 class DummyDB:
@@ -89,7 +83,8 @@ async def test_backup_mode_and_recovery(tmp_path, monkeypatch):
     await pipeline._check_services_health()
     assert pipeline.mode == "normal"
 
-    await pipeline.process_claim({"claim_id": "2", "patient_account_number": "2", "facility_id": "F"})
+    await pipeline.process_claim(
+        {"claim_id": "2", "patient_account_number": "2", "facility_id": "F"}
+    )
     assert pipeline.model.calls == 1
     assert pipeline.service.inserted
-
