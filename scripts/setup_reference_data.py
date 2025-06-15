@@ -1,371 +1,575 @@
 #!/usr/bin/env python3
 """
-Reference Data Setup Script
-Creates reference data with integer facility IDs to match the original schema.
-FIXED: Removed Unicode characters for Windows compatibility.
+Sample Claims Data Generator
+Generates 100,000 realistic healthcare claims and loads them into PostgreSQL staging database.
+UPDATED: facility_id as VARCHAR(20) string to match both PostgreSQL and SQL Server schemas
 """
 
 import asyncio
 import logging
-import sys
-from pathlib import Path
+import random
+import uuid
+import json  # Added import for JSON handling
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from typing import Any, Dict, List
 
-# Add src to Python path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+import asyncpg
+from faker import Faker
 
 from src.config.config import load_config
 from src.db.postgres import PostgresDatabase
-from src.db.sql_server import SQLServerDatabase
 
-# Reference data definitions - UPDATED: Use integer facility IDs
-FACILITIES_DATA = [
-    {
-        "facility_id": i,  # Integer instead of string
-        "facility_name": f"Healthcare Facility {i:03d}",
-        "facility_type": "Hospital" if i % 3 == 0 else "Clinic",
-        "address": f"{1000 + i} Medical Way",
-        "city": f"City{i}",
-        "state": "CA" if i % 2 == 0 else "NY",
-        "zip_code": f"{90000 + i:05d}",
-        "phone": f"555-{i:03d}-{(i*37) % 10000:04d}",
-        "active": True,
-    }
-    for i in range(1, 51)  # 50 facilities: IDs 1-50
+# Initialize Faker for realistic data generation
+fake = Faker()
+
+# Healthcare-specific data pools - UPDATED: String facility IDs to match both schemas
+FACILITY_IDS = [str(i) for i in range(1, 51)]  # Strings: "1", "2", ..., "50" (VARCHAR(20))
+FINANCIAL_CLASSES = ["COM", "MED", "MCR", "PPO", "HMO", "WRK", "OTH", "SELF"]
+GENDER_CODES = ["M", "F"]
+PLACES_OF_SERVICE = ["11", "12", "21", "22", "23", "31", "32", "49", "50", "81"]
+
+# Common procedure codes (CPT codes)
+PROCEDURE_CODES = [
+    "99213",
+    "99214",
+    "99215",
+    "99203",
+    "99204",
+    "99205",  # Office visits
+    "99282",
+    "99283",
+    "99284",
+    "99285",  # Emergency visits
+    "36415",
+    "85025",
+    "80053",
+    "80061",  # Lab procedures
+    "71020",
+    "71030",
+    "73060",
+    "73070",  # Radiology
+    "29881",
+    "29882",
+    "64483",
+    "64484",  # Surgery
+    "90834",
+    "90837",
+    "90853",
+    "96116",  # Mental health
+    "G0438",
+    "G0439",
+    "99490",
+    "99491",  # Preventive care
 ]
 
-FINANCIAL_CLASSES_DATA = [
-    {"class_code": "COM", "class_name": "Commercial Insurance", "description": "Private commercial insurance plans"},
-    {"class_code": "MED", "class_name": "Medicaid", "description": "State Medicaid program"},
-    {"class_code": "MCR", "class_name": "Medicare", "description": "Federal Medicare program"},
-    {"class_code": "PPO", "class_name": "PPO Plan", "description": "Preferred Provider Organization"},
-    {"class_code": "HMO", "class_name": "HMO Plan", "description": "Health Maintenance Organization"},
-    {"class_code": "WRK", "class_name": "Workers Comp", "description": "Workers compensation insurance"},
-    {"class_code": "OTH", "class_name": "Other Insurance", "description": "Other insurance types"},
-    {"class_code": "SELF", "class_name": "Self Pay", "description": "Self-pay patients"},
+# Common diagnosis codes (ICD-10)
+DIAGNOSIS_CODES = [
+    "Z00.00",
+    "Z12.11",
+    "I10",
+    "E11.9",
+    "M79.3",  # Routine/common
+    "J44.1",
+    "N39.0",
+    "K21.9",
+    "M25.561",
+    "F41.1",  # Chronic conditions
+    "S72.001A",
+    "M17.11",
+    "I25.10",
+    "E78.5",
+    "Z51.11",  # Acute/treatment
+    "G89.29",
+    "M54.5",
+    "R06.02",
+    "R50.9",
+    "K59.00",  # Symptoms
 ]
 
-RVU_DATA = [
-    {"procedure_code": "99213", "total_rvu": 1.3, "work_rvu": 0.97, "practice_expense_rvu": 0.28, "malpractice_rvu": 0.05},
-    {"procedure_code": "99214", "total_rvu": 2.0, "work_rvu": 1.5, "practice_expense_rvu": 0.44, "malpractice_rvu": 0.06},
-    {"procedure_code": "99215", "total_rvu": 2.8, "work_rvu": 2.11, "practice_expense_rvu": 0.62, "malpractice_rvu": 0.07},
-    {"procedure_code": "99203", "total_rvu": 1.6, "work_rvu": 1.21, "practice_expense_rvu": 0.34, "malpractice_rvu": 0.05},
-    {"procedure_code": "99204", "total_rvu": 2.4, "work_rvu": 1.92, "practice_expense_rvu": 0.42, "malpractice_rvu": 0.06},
-    {"procedure_code": "99205", "total_rvu": 3.2, "work_rvu": 2.56, "practice_expense_rvu": 0.57, "malpractice_rvu": 0.07},
-    {"procedure_code": "36415", "total_rvu": 0.17, "work_rvu": 0.17, "practice_expense_rvu": 0.0, "malpractice_rvu": 0.0},
-    {"procedure_code": "85025", "total_rvu": 0.28, "work_rvu": 0.0, "practice_expense_rvu": 0.27, "malpractice_rvu": 0.01},
-    {"procedure_code": "80053", "total_rvu": 0.54, "work_rvu": 0.0, "practice_expense_rvu": 0.53, "malpractice_rvu": 0.01},
-    {"procedure_code": "71020", "total_rvu": 0.22, "work_rvu": 0.22, "practice_expense_rvu": 0.0, "malpractice_rvu": 0.0},
-]
+# Modifiers
+MODIFIERS = ["", "25", "59", "76", "77", "78", "79", "LT", "RT", "50"]
+
+# Revenue codes
+REVENUE_CODES = ["0450", "0636", "0320", "0370", "0410", "0730", "0942"]
 
 
-async def setup_postgres_simple():
-    """PostgreSQL reference data setup with integer facility IDs"""
-    logger = logging.getLogger(__name__)
-    
-    config = load_config()
-    pg_db = PostgresDatabase(config.postgres)
-    
-    try:
-        await pg_db.connect(prepare_queries=False)
-        logger.info("Connected to PostgreSQL database")
+@dataclass
+class GeneratedClaim:
+    """Container for a generated claim with all related data"""
 
-        # Setup facilities table - UPDATED: facility_id as INTEGER
-        logger.info("Creating facilities table...")
-        try:
-            await pg_db.execute("""
-                CREATE TABLE IF NOT EXISTS facilities (
-                    facility_id INTEGER PRIMARY KEY,
-                    facility_name VARCHAR(200) NOT NULL,
-                    facility_type VARCHAR(50),
-                    address VARCHAR(200),
-                    city VARCHAR(100),
-                    state VARCHAR(2),
-                    zip_code VARCHAR(10),
-                    phone VARCHAR(20),
-                    active BOOLEAN DEFAULT true,
-                    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            logger.info("[OK] Facilities table created/verified")
-        except Exception as e:
-            logger.warning(f"Facilities table creation warning: {e}")
+    claim_data: Dict[str, Any]
+    line_items: List[Dict[str, Any]]
+    diagnosis_codes: List[Dict[str, Any]]
 
-        # Insert facilities data with integer IDs
-        logger.info("Inserting facilities data...")
-        success_count = 0
-        for facility in FACILITIES_DATA:
-            try:
-                await pg_db.execute("""
-                    INSERT INTO facilities (facility_id, facility_name, facility_type, address, city, state, zip_code, phone, active)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                    ON CONFLICT (facility_id) DO NOTHING
-                """, 
-                facility['facility_id'], facility['facility_name'], facility['facility_type'],
-                facility['address'], facility['city'], facility['state'], 
-                facility['zip_code'], facility['phone'], facility['active'])
-                success_count += 1
-            except Exception as e:
-                logger.warning(f"Failed to insert facility {facility['facility_id']}: {e}")
+
+class SampleDataGenerator:
+    """Generates realistic healthcare claims data"""
+
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        self.patient_accounts = set()
+
+    def generate_patient_account_number(self) -> str:
+        """Generate a unique patient account number"""
+        while True:
+            account = f"PAT{random.randint(100000, 999999)}"
+            if account not in self.patient_accounts:
+                self.patient_accounts.add(account)
+                return account
+
+    def generate_claim_data(self) -> Dict[str, Any]:
+        """Generate a single claim's base data"""
+        claim_id = f"CLM{uuid.uuid4().hex[:8].upper()}"
+        facility_id = random.choice(FACILITY_IDS)  # Now returns string ("1"-"50")
+        patient_account = self.generate_patient_account_number()
+
+        # Generate realistic dates
+        service_from = fake.date_between(start_date="-730d", end_date="today")
         
-        logger.info(f"[OK] Inserted {success_count}/{len(FACILITIES_DATA)} facilities")
+        # 80% single-day claims, 20% multi-day (up to 30 days)
+        if random.random() < 0.8:
+            service_to = service_from
+        else:
+            service_to = service_from + timedelta(days=random.randint(1, 30))
 
-        # Setup financial classes table
-        logger.info("Creating financial_classes table...")
-        try:
-            await pg_db.execute("""
-                CREATE TABLE IF NOT EXISTS financial_classes (
-                    class_code VARCHAR(10) PRIMARY KEY,
-                    class_name VARCHAR(100) NOT NULL,
-                    description TEXT,
-                    active BOOLEAN DEFAULT true,
-                    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            logger.info("[OK] Financial classes table created/verified")
-        except Exception as e:
-            logger.warning(f"Financial classes table creation warning: {e}")
+        # Patient demographics
+        birth_date = fake.date_of_birth(minimum_age=18, maximum_age=95)
+        gender = random.choice(GENDER_CODES)
+        first_name = fake.first_name_male() if gender == "M" else fake.first_name_female()
+        last_name = fake.last_name()
+        patient_name = f"{last_name}, {first_name}"
 
-        # Insert financial classes data
-        logger.info("Inserting financial classes data...")
-        success_count = 0
-        for fc in FINANCIAL_CLASSES_DATA:
-            try:
-                await pg_db.execute("""
-                    INSERT INTO financial_classes (class_code, class_name, description, active)
-                    VALUES ($1, $2, $3, $4)
-                    ON CONFLICT (class_code) DO NOTHING
-                """, fc['class_code'], fc['class_name'], fc['description'], True)
-                success_count += 1
-            except Exception as e:
-                logger.warning(f"Failed to insert financial class {fc['class_code']}: {e}")
+        return {
+            "claim_id": claim_id,
+            "facility_id": facility_id,  # String value ("1"-"50") - matches VARCHAR(20)
+            "department_id": random.randint(100, 999),
+            "patient_account_number": patient_account,
+            "patient_name": patient_name,
+            "first_name": first_name,
+            "last_name": last_name,
+            "medical_record_number": f"MRN{random.randint(1000000, 9999999)}",
+            "date_of_birth": birth_date,
+            "gender": gender,
+            "service_from_date": service_from,
+            "service_to_date": service_to,
+            "primary_diagnosis": random.choice(DIAGNOSIS_CODES),
+            "financial_class": random.choice(FINANCIAL_CLASSES),
+            "secondary_insurance": random.choice(FINANCIAL_CLASSES) if random.random() < 0.3 else None,
+            "total_charge_amount": Decimal("0.00"),  # Will be calculated from line items
+            "processing_status": "pending",
+            "processing_stage": "intake",
+            "active": True,
+            "created_at": datetime.now(),
+            "updated_at": datetime.now(),
+            "raw_data": json.dumps({"source": "sample_generator", "version": "1.0"}),
+            "validation_results": None,
+            "ml_predictions": None,
+            "processing_metrics": None,
+            "error_details": None,
+            "priority": random.choice(["low", "normal", "high"]),
+            "submitted_by": "data_generator",
+            "correlation_id": str(uuid.uuid4()),
+        }
+
+    def generate_line_items(self, claim_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate line items for a claim"""
+        # 1-5 line items per claim, weighted toward 1-2
+        num_items = random.choices([1, 2, 3, 4, 5], weights=[40, 30, 15, 10, 5])[0]
         
-        logger.info(f"[OK] Inserted {success_count}/{len(FINANCIAL_CLASSES_DATA)} financial classes")
+        line_items = []
+        total_charge = Decimal("0.00")
 
-    except Exception as e:
-        logger.error(f"PostgreSQL setup failed: {e}")
-        raise
-    finally:
-        await pg_db.close()
+        for line_num in range(1, num_items + 1):
+            procedure_code = random.choice(PROCEDURE_CODES)
+            units = random.randint(1, 3)
+            
+            # Generate realistic charge amounts based on procedure type
+            if procedure_code.startswith("99"):  # Office visits
+                base_charge = Decimal(random.uniform(200, 600))
+            elif procedure_code.startswith("8"):  # Labs
+                base_charge = Decimal(random.uniform(50, 300))
+            elif procedure_code.startswith("7"):  # Radiology
+                base_charge = Decimal(random.uniform(300, 1500))
+            elif procedure_code.startswith("2") or procedure_code.startswith("6"):  # Surgery
+                base_charge = Decimal(random.uniform(1000, 5000))
+            else:  # Other
+                base_charge = Decimal(random.uniform(100, 800))
+
+            charge_amount = base_charge * units
+            total_charge += charge_amount
+
+            # Calculate RVU and reimbursement
+            rvu_value = Decimal(random.uniform(0.5, 5.0))
+            reimbursement_amount = rvu_value * units * Decimal("36.04")  # Conversion factor
+
+            line_item = {
+                "claim_id": claim_data["claim_id"],
+                "line_number": line_num,
+                "procedure_code": procedure_code,
+                "modifier1": random.choice(MODIFIERS),
+                "modifier2": random.choice(MODIFIERS) if random.random() < 0.2 else None,
+                "modifier3": random.choice(MODIFIERS) if random.random() < 0.1 else None,
+                "modifier4": random.choice(MODIFIERS) if random.random() < 0.05 else None,
+                "units": units,
+                "charge_amount": charge_amount,
+                "service_from_date": claim_data["service_from_date"],
+                "service_to_date": claim_data["service_to_date"],
+                "diagnosis_pointer": "1",  # Points to primary diagnosis
+                "place_of_service": random.choice(PLACES_OF_SERVICE),
+                "revenue_code": random.choice(REVENUE_CODES),
+                "created_at": datetime.now(),
+                "rvu_value": rvu_value,
+                "reimbursement_amount": reimbursement_amount,
+            }
+            line_items.append(line_item)
+
+        # Update total charge amount in claim
+        claim_data["total_charge_amount"] = total_charge
+
+        return line_items
+
+    def generate_diagnosis_codes(self, claim_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate diagnosis codes for a claim"""
+        # 1-4 diagnoses per claim, weighted toward 1-2
+        num_diagnoses = random.choices([1, 2, 3, 4], weights=[50, 30, 15, 5])[0]
+        
+        diagnosis_codes = []
+        used_codes = set()
+
+        for seq in range(1, num_diagnoses + 1):
+            # Ensure unique diagnosis codes per claim
+            while True:
+                diag_code = random.choice(DIAGNOSIS_CODES)
+                if diag_code not in used_codes:
+                    used_codes.add(diag_code)
+                    break
+
+            diagnosis = {
+                "claim_id": claim_data["claim_id"],
+                "diagnosis_sequence": seq,
+                "diagnosis_code": diag_code,
+                "diagnosis_description": f"Description for {diag_code}",
+                "diagnosis_type": "primary" if seq == 1 else "secondary",
+                "created_at": datetime.now(),
+                # UPDATED: Add service_to_date for partitioned table compatibility
+                "service_to_date": claim_data["service_to_date"],
+            }
+            diagnosis_codes.append(diagnosis)
+
+        return diagnosis_codes
+
+    def generate_batch(self, batch_size: int) -> List[GeneratedClaim]:
+        """Generate a batch of claims"""
+        claims = []
+        
+        for _ in range(batch_size):
+            claim_data = self.generate_claim_data()
+            line_items = self.generate_line_items(claim_data)
+            diagnosis_codes = self.generate_diagnosis_codes(claim_data)
+            
+            claims.append(GeneratedClaim(
+                claim_data=claim_data,
+                line_items=line_items,
+                diagnosis_codes=diagnosis_codes
+            ))
+        
+        return claims
 
 
-async def setup_sqlserver_simple():
-    """SQL Server reference data setup with integer facility IDs"""
-    logger = logging.getLogger(__name__)
-    
-    config = load_config()
-    sql_db = SQLServerDatabase(config.sqlserver)
-    
-    try:
-        await sql_db.connect()
-        logger.info("Connected to SQL Server database")
+class DataLoader:
+    """Loads generated claims data into PostgreSQL database"""
 
-        # First, ensure core_standard_payers table exists with sample data
-        logger.info("Setting up core_standard_payers table...")
-        try:
-            await sql_db.execute("""
-                IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'core_standard_payers')
-                CREATE TABLE core_standard_payers (
-                    payer_id INT PRIMARY KEY,
-                    payer_name VARCHAR(100) NOT NULL,
-                    payer_code VARCHAR(2) NOT NULL
+    def __init__(self, db: PostgresDatabase):
+        self.db = db
+        self.logger = logging.getLogger(__name__)
+
+    async def load_claims_batch(self, claims: List[GeneratedClaim]) -> int:
+        """Load a batch of claims into the database"""
+        claims_data = []
+        line_items_data = []
+        diagnosis_codes_data = []
+
+        # Prepare data for bulk insert
+        for claim in claims:
+            # Prepare claim data
+            claim_tuple = (
+                claim.claim_data["claim_id"],
+                claim.claim_data["facility_id"],  # String value
+                claim.claim_data["department_id"],
+                claim.claim_data["patient_account_number"],
+                claim.claim_data["patient_name"],
+                claim.claim_data["first_name"],
+                claim.claim_data["last_name"],
+                claim.claim_data["medical_record_number"],
+                claim.claim_data["date_of_birth"],
+                claim.claim_data["gender"],
+                claim.claim_data["service_from_date"],
+                claim.claim_data["service_to_date"],
+                claim.claim_data["primary_diagnosis"],
+                claim.claim_data["financial_class"],
+                claim.claim_data["secondary_insurance"],
+                claim.claim_data["total_charge_amount"],
+                claim.claim_data["processing_status"],
+                claim.claim_data["processing_stage"],
+                claim.claim_data["active"],
+                claim.claim_data["created_at"],
+                claim.claim_data["updated_at"],
+                claim.claim_data["raw_data"],
+                claim.claim_data["validation_results"],
+                claim.claim_data["ml_predictions"],
+                claim.claim_data["processing_metrics"],
+                claim.claim_data["error_details"],
+                claim.claim_data["priority"],
+                claim.claim_data["submitted_by"],
+                claim.claim_data["correlation_id"],
+            )
+            claims_data.append(claim_tuple)
+
+            # Prepare line items data
+            for line_item in claim.line_items:
+                line_tuple = (
+                    line_item["claim_id"],
+                    line_item["line_number"],
+                    line_item["procedure_code"],
+                    line_item["modifier1"],
+                    line_item["modifier2"],
+                    line_item["modifier3"],
+                    line_item["modifier4"],
+                    line_item["units"],
+                    line_item["charge_amount"],
+                    line_item["service_from_date"],
+                    line_item["service_to_date"],
+                    line_item["diagnosis_pointer"],
+                    line_item["place_of_service"],
+                    line_item["revenue_code"],
+                    line_item["created_at"],
+                    line_item["rvu_value"],
+                    line_item["reimbursement_amount"],
                 )
-            """)
+                line_items_data.append(line_tuple)
 
-            # Insert sample payer data - Fixed: Use 2-character codes to match schema
-            sample_payers = [
-                (1, 'Medicare', 'MC'),
-                (2, 'Medicaid', 'MD'),
-                (3, 'Commercial', 'CM'),  # Changed from 'COM' to 'CM'
-                (4, 'Blue Cross', 'BC'),
-                (5, 'Aetna', 'AE'),       # Changed from 'AET' to 'AE'
-                (6, 'United Health', 'UH'), # Changed from 'UNH' to 'UH'
-                (7, 'Workers Comp', 'WC'),
-                (8, 'Self Pay', 'SP')
+            # Prepare diagnosis codes data
+            for diagnosis in claim.diagnosis_codes:
+                diag_tuple = (
+                    diagnosis["claim_id"],
+                    diagnosis["service_to_date"],  # Include service_to_date for partitioning
+                    diagnosis["diagnosis_sequence"],
+                    diagnosis["diagnosis_code"],
+                    diagnosis["diagnosis_description"],
+                    diagnosis["diagnosis_type"],
+                    diagnosis["created_at"],
+                )
+                diagnosis_codes_data.append(diag_tuple)
+
+        try:
+            # Insert claims
+            claims_columns = [
+                "claim_id",
+                "facility_id",
+                "department_id",
+                "patient_account_number",
+                "patient_name",
+                "first_name",
+                "last_name",
+                "medical_record_number",
+                "date_of_birth",
+                "gender",
+                "service_from_date",
+                "service_to_date",
+                "primary_diagnosis",
+                "financial_class",
+                "secondary_insurance",
+                "total_charge_amount",
+                "processing_status",
+                "processing_stage",
+                "active",
+                "created_at",
+                "updated_at",
+                "raw_data",
+                "validation_results",
+                "ml_predictions",
+                "processing_metrics",
+                "error_details",
+                "priority",
+                "submitted_by",
+                "correlation_id",
             ]
 
-            for payer_id, payer_name, payer_code in sample_payers:
-                await sql_db.execute("""
-                    IF NOT EXISTS (SELECT * FROM core_standard_payers WHERE payer_id = ?)
-                    INSERT INTO core_standard_payers (payer_id, payer_name, payer_code)
-                    VALUES (?, ?, ?)
-                """, payer_id, payer_id, payer_name, payer_code)
+            claims_inserted = await self.db.copy_records(
+                "claims", claims_columns, claims_data
+            )
+            self.logger.info(f"Inserted {claims_inserted} claims")
 
-            logger.info("[OK] Core payers table setup completed")
+            # Insert line items
+            line_items_columns = [
+                "claim_id",
+                "line_number",
+                "procedure_code",
+                "modifier1",
+                "modifier2",
+                "modifier3",
+                "modifier4",
+                "units",
+                "charge_amount",
+                "service_from_date",
+                "service_to_date",
+                "diagnosis_pointer",
+                "place_of_service",
+                "revenue_code",
+                "created_at",
+                "rvu_value",
+                "reimbursement_amount",
+            ]
+
+            lines_inserted = await self.db.copy_records(
+                "claims_line_items", line_items_columns, line_items_data
+            )
+            self.logger.info(f"Inserted {lines_inserted} line items")
+
+            # Insert diagnosis codes
+            diagnosis_columns = [
+                "claim_id",
+                "service_to_date",  # Include service_to_date column
+                "diagnosis_sequence",
+                "diagnosis_code",
+                "diagnosis_description",
+                "diagnosis_type",
+                "created_at",
+            ]
+
+            diag_inserted = await self.db.copy_records(
+                "claims_diagnosis_codes", diagnosis_columns, diagnosis_codes_data
+            )
+            self.logger.info(f"Inserted {diag_inserted} diagnosis codes")
+
+            return claims_inserted
+
         except Exception as e:
-            logger.warning(f"Core payers setup warning: {e}")
-
-        # Setup facilities table with INTEGER facility_id (original schema)
-        logger.info("Creating facilities table...")
-        try:
-            await sql_db.execute("""
-                IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'facilities')
-                CREATE TABLE facilities (
-                    facility_id INT PRIMARY KEY,
-                    facility_name VARCHAR(200) NOT NULL,
-                    facility_type VARCHAR(50),
-                    address VARCHAR(200),
-                    city VARCHAR(100),
-                    state VARCHAR(2),
-                    zip_code VARCHAR(10),
-                    phone VARCHAR(20),
-                    active BIT DEFAULT 1,
-                    created_at DATETIME2 DEFAULT GETDATE()
-                )
-            """)
-            logger.info("[OK] Facilities table created/verified")
-        except Exception as e:
-            logger.warning(f"Facilities table creation warning: {e}")
-
-        # Insert facilities data with integer IDs
-        logger.info("Inserting facilities data...")
-        success_count = 0
-        for facility in FACILITIES_DATA:
-            try:
-                await sql_db.execute("""
-                    IF NOT EXISTS (SELECT * FROM facilities WHERE facility_id = ?)
-                    INSERT INTO facilities (facility_id, facility_name, facility_type, address, city, state, zip_code, phone, active)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
-                """, 
-                facility['facility_id'],  # for the EXISTS check
-                facility['facility_id'], facility['facility_name'], facility['facility_type'],
-                facility['address'], facility['city'], facility['state'], 
-                facility['zip_code'], facility['phone'])
-                success_count += 1
-            except Exception as e:
-                logger.warning(f"Failed to insert facility {facility['facility_id']}: {e}")
-        
-        logger.info(f"[OK] Inserted {success_count}/{len(FACILITIES_DATA)} facilities")
-
-        # Setup facility financial classes table
-        logger.info("Creating facility_financial_classes table...")
-        try:
-            await sql_db.execute("""
-                IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'facility_financial_classes')
-                CREATE TABLE facility_financial_classes (
-                    facility_id INT,
-                    financial_class_id VARCHAR(10) PRIMARY KEY,
-                    financial_class_name VARCHAR(100),
-                    payer_id INT,
-                    reimbursement_rate DECIMAL(5,4),
-                    processing_priority VARCHAR(10),
-                    auto_posting_enabled BIT,
-                    active BIT,
-                    effective_date DATE,
-                    end_date DATE,
-                    created_at DATETIME,
-                    HCC CHAR(3)
-                )
-            """)
-            logger.info("[OK] Facility financial classes table created/verified")
-        except Exception as e:
-            logger.warning(f"Facility financial classes table creation warning: {e}")
-
-        # Insert financial classes data - Fixed column names to match schema
-        logger.info("Inserting financial classes data...")
-        success_count = 0
-        for fc in FINANCIAL_CLASSES_DATA:
-            try:
-                await sql_db.execute("""
-                    IF NOT EXISTS (SELECT * FROM facility_financial_classes WHERE financial_class_id = ?)
-                    INSERT INTO facility_financial_classes (financial_class_id, financial_class_name, payer_id, 
-                                                           reimbursement_rate, processing_priority, auto_posting_enabled, 
-                                                           active, effective_date, created_at)
-                    VALUES (?, ?, ?, 0.8000, 'Normal', 1, 1, GETDATE(), GETDATE())
-                """, 
-                fc['class_code'],  # for the EXISTS check
-                fc['class_code'], fc['class_name'], 1)  # Default to payer_id 1 (Medicare), simplified insert
-                success_count += 1
-            except Exception as e:
-                logger.warning(f"Failed to insert financial class {fc['class_code']}: {e}")
-        
-        logger.info(f"[OK] Inserted {success_count}/{len(FINANCIAL_CLASSES_DATA)} financial classes")
-
-        # Setup RVU data table
-        logger.info("Creating rvu_data table...")
-        try:
-            await sql_db.execute("""
-                IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'rvu_data')
-                CREATE TABLE rvu_data (
-                    procedure_code VARCHAR(10) PRIMARY KEY,
-                    total_rvu DECIMAL(8,4) NOT NULL,
-                    work_rvu DECIMAL(8,4) NOT NULL,
-                    practice_expense_rvu DECIMAL(8,4) NOT NULL,
-                    malpractice_rvu DECIMAL(8,4) NOT NULL,
-                    effective_date DATE DEFAULT GETDATE(),
-                    created_at DATETIME2 DEFAULT GETDATE()
-                )
-            """)
-            logger.info("[OK] RVU data table created/verified")
-        except Exception as e:
-            logger.warning(f"RVU data table creation warning: {e}")
-
-        # Insert RVU data
-        logger.info("Inserting RVU data...")
-        success_count = 0
-        for rvu in RVU_DATA:
-            try:
-                await sql_db.execute("""
-                    IF NOT EXISTS (SELECT * FROM rvu_data WHERE procedure_code = ?)
-                    INSERT INTO rvu_data (procedure_code, total_rvu, work_rvu, practice_expense_rvu, malpractice_rvu)
-                    VALUES (?, ?, ?, ?, ?)
-                """,
-                    rvu["procedure_code"],  # for the EXISTS check
-                    rvu["procedure_code"], rvu["total_rvu"], rvu["work_rvu"],
-                    rvu["practice_expense_rvu"], rvu["malpractice_rvu"]
-                )
-                success_count += 1
-            except Exception as e:
-                logger.warning(f"Failed to insert RVU {rvu['procedure_code']}: {e}")
-        
-        logger.info(f"[OK] Inserted {success_count}/{len(RVU_DATA)} RVU records")
-
-    except Exception as e:
-        logger.error(f"SQL Server setup failed: {e}")
-        raise
-    finally:
-        await sql_db.close()
+            self.logger.error(f"Error inserting batch: {e}")
+            raise
 
 
-async def setup_reference_data():
-    """Run reference data setup for both databases."""
-    logger = logging.getLogger(__name__)
+async def create_batch_metadata(db: PostgresDatabase, total_claims: int) -> str:
+    """Create a batch metadata record for tracking"""
+    batch_id = f"GEN_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-    logger.info("Setting up PostgreSQL reference data...")
-    await setup_postgres_simple()
+    await db.execute(
+        """
+        INSERT INTO batch_metadata (
+            batch_id, submitted_by, submitted_at, total_claims,
+            status, priority, processing_options
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        """,
+        batch_id,
+        "data_generator",
+        datetime.now(),
+        total_claims,
+        "completed",
+        "normal",
+        # FIXED: Use json.dumps instead of asyncpg.types.Json
+        json.dumps({"generated": True, "source": "sample_data_generator"}),
+    )
 
-    logger.info("Setting up SQL Server reference data...")
-    await setup_sqlserver_simple()
+    return batch_id
 
 
-async def main():
-    """Main entrypoint when executing as a script."""
-    # Configure logging with UTF-8 encoding to handle any Unicode issues
+async def generate_and_load_sample_data(
+    total_claims: int = 100000, batch_size: int = 1000
+):
+    """Main function to generate and load sample claims data"""
+
+    # Set up logging
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.StreamHandler(),  # Console output
-        ]
     )
     logger = logging.getLogger(__name__)
 
-    logger.info("=" * 60)
-    logger.info("REFERENCE DATA SETUP - INTEGER FACILITY IDS")
-    logger.info("=" * 60)
+    logger.info(f"Starting generation of {total_claims:,} sample claims...")
+
+    # Load configuration and connect to database
+    config = load_config()
+    db = PostgresDatabase(config.postgres)
 
     try:
-        await setup_reference_data()
+        await db.connect()
+        logger.info("Connected to PostgreSQL database")
 
-        logger.info("=" * 60)
-        logger.info("[SUCCESS] REFERENCE DATA SETUP COMPLETED SUCCESSFULLY!")
-        logger.info("Generated facility IDs: 1-50 (integers)")
-        logger.info("[SUCCESS] Data compatible with original schema")
-        logger.info("=" * 60)
+        # Create batch metadata
+        batch_id = await create_batch_metadata(db, total_claims)
+        logger.info(f"Created batch metadata: {batch_id}")
+
+        # Initialize generator and loader
+        generator = SampleDataGenerator()
+        loader = DataLoader(db)
+
+        # Process in batches
+        total_loaded = 0
+        batches = (total_claims + batch_size - 1) // batch_size  # Ceiling division
+
+        for batch_num in range(batches):
+            current_batch_size = min(batch_size, total_claims - total_loaded)
+
+            logger.info(
+                f"Processing batch {batch_num + 1}/{batches} ({current_batch_size} claims)"
+            )
+
+            # Generate batch
+            claims_batch = generator.generate_batch(current_batch_size)
+
+            # Load batch
+            loaded = await loader.load_claims_batch(claims_batch)
+            total_loaded += loaded
+
+            logger.info(
+                f"Batch {batch_num + 1} completed. Total loaded: {total_loaded:,}/{total_claims:,}"
+            )
+
+        logger.info(
+            f"Successfully generated and loaded {total_loaded:,} sample claims!"
+        )
+
+        # Update batch metadata
+        await db.execute(
+            """
+            UPDATE batch_metadata 
+            SET completed_at = $1, processed_claims = $2, valid_claims = $3
+            WHERE batch_id = $4
+        """,
+            datetime.now(),
+            total_loaded,
+            total_loaded,
+            batch_id,
+        )
 
     except Exception as e:
-        logger.error(f"Setup failed: {e}")
+        logger.error(f"Error during data generation: {e}")
         raise
+    finally:
+        await db.close()
+        logger.info("Database connection closed")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Generate sample claims data")
+    parser.add_argument(
+        "--claims",
+        type=int,
+        default=100000,
+        help="Number of claims to generate (default: 100000)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1000,
+        help="Batch size for database operations (default: 1000)",
+    )
+
+    args = parser.parse_args()
+
+    # Run the generator
+    asyncio.run(generate_and_load_sample_data(args.claims, args.batch_size))
