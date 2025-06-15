@@ -20,7 +20,7 @@ Interactive documentation is available when the service is running.
 | `GET` | `/metrics` | Prometheus formatted metrics |
 | `GET` | `/profiling/start` | Begin CPU profiling |
 | `GET` | `/profiling/stop` | Stop profiling and return stats |
-| `GET` | `/compliance/dashboard` | Summary of audit logs and archival status |
+| `GET` | `/compliance/dashboard` | Compliance metrics including audit counts, archive status, failure patterns, processing trends, and revenue impact |
 
 ### Example Request
 

@@ -14,6 +14,8 @@ class DummyDB:
     async def fetch(self, query: str, *params):
         if "audit_log" in query:
             return [{"count": 5}]
+        if "daily_processing_summary" in query:
+            return []
         return []
 
     async def execute(self, query: str, *params):
@@ -59,3 +61,6 @@ def test_dashboard_endpoint(dashboard_client):
     data = resp.json()
     assert data["total_audit_events"] == 5
     assert data["archive_files"] == 1
+    assert "failure_patterns" in data
+    assert "processing_trends" in data
+    assert "revenue_impact" in data
