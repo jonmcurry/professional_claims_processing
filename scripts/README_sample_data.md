@@ -139,7 +139,7 @@ python -m src.processing.main
 
 # Check processing results
 python -c "
-from src.database.postgres import PostgresDatabase
+from src.db.postgres import PostgresDatabase
 from src.config.config import load_config
 import asyncio
 
