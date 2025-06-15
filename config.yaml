@@ -3,8 +3,8 @@
 postgresql:
   host: "localhost"
   port: 5432
-  user: "claims_user"
-  password: "${POSTGRES_PASSWORD}"
+  user: "postgres"
+  password: "ClearToFly1"
   database: "staging_process"
   replica_host: null
   replica_port: null
@@ -15,8 +15,8 @@ postgresql:
 sqlserver:
   host: "localhost"
   port: 1433
-  user: "claims_user"
-  password: "${SQLSERVER_PASSWORD}"
+  user: "sa"
+  password: "ClearToFly1"
   database: "smart_pro_claims"
   min_pool_size: 25
   max_pool_size: 80
