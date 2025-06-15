@@ -191,7 +191,7 @@ CREATE INDEX idx_facility_coders_facility_id
 GO
 
 CREATE TABLE physicians (
-    rendering_provider_id VARCHAR(50),
+    rendering_provider_id VARCHAR(50) NOT NULL PRIMARY KEY,
     last_name VARCHAR(50),
     first_name VARCHAR(50)
 );
