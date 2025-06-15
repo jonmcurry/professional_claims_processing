@@ -8,6 +8,7 @@ import asyncio
 import logging
 import random
 import uuid
+import json  # Added import for JSON handling
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -110,100 +111,145 @@ class SampleDataGenerator:
         self.patient_accounts = set()
 
     def generate_patient_account_number(self) -> str:
-        """Generate unique patient account number"""
+        """Generate a unique patient account number"""
         while True:
             account = f"PAT{random.randint(100000, 999999)}"
             if account not in self.patient_accounts:
                 self.patient_accounts.add(account)
                 return account
 
-    def generate_service_dates(self) -> tuple[date, date]:
-        """Generate realistic service date range"""
-        # Generate dates within last 2 years
-        start_date = fake.date_between(start_date="-2y", end_date="today")
+    def generate_claim_data(self) -> Dict[str, Any]:
+        """Generate a single claim's base data"""
+        claim_id = f"CLM{uuid.uuid4().hex[:8].upper()}"
+        facility_id = random.choice(FACILITY_IDS)
+        patient_account = self.generate_patient_account_number()
 
-        # Most claims are single day, some span multiple days
-        if random.random() < 0.8:  # 80% single day
-            end_date = start_date
-        else:  # 20% multi-day (typically 1-30 days)
-            days_span = random.randint(1, 30)
-            end_date = start_date + timedelta(days=days_span)
+        # Generate realistic dates
+        service_from = fake.date_between(start_date="-730d", end_date="today")
+        
+        # 80% single-day claims, 20% multi-day (up to 30 days)
+        if random.random() < 0.8:
+            service_to = service_from
+        else:
+            service_to = service_from + timedelta(days=random.randint(1, 30))
 
-        return start_date, end_date
+        # Patient demographics
+        birth_date = fake.date_of_birth(minimum_age=18, maximum_age=95)
+        gender = random.choice(GENDER_CODES)
+        first_name = fake.first_name_male() if gender == "M" else fake.first_name_female()
+        last_name = fake.last_name()
+        patient_name = f"{last_name}, {first_name}"
 
-    def generate_line_items(
-        self, claim_id: str, service_from: date, service_to: date
-    ) -> List[Dict[str, Any]]:
+        return {
+            "claim_id": claim_id,
+            "facility_id": facility_id,
+            "department_id": random.randint(100, 999),
+            "patient_account_number": patient_account,
+            "patient_name": patient_name,
+            "first_name": first_name,
+            "last_name": last_name,
+            "medical_record_number": f"MRN{random.randint(1000000, 9999999)}",
+            "date_of_birth": birth_date,
+            "gender": gender,
+            "service_from_date": service_from,
+            "service_to_date": service_to,
+            "primary_diagnosis": random.choice(DIAGNOSIS_CODES),
+            "financial_class": random.choice(FINANCIAL_CLASSES),
+            "secondary_insurance": random.choice(FINANCIAL_CLASSES) if random.random() < 0.3 else None,
+            "total_charge_amount": Decimal("0.00"),  # Will be calculated from line items
+            "processing_status": "pending",
+            "processing_stage": "intake",
+            "active": True,
+            "created_at": datetime.now(),
+            "updated_at": datetime.now(),
+            "raw_data": json.dumps({"source": "sample_generator", "version": "1.0"}),
+            "validation_results": None,
+            "ml_predictions": None,
+            "processing_metrics": None,
+            "error_details": None,
+            "priority": random.choice(["low", "normal", "high"]),
+            "submitted_by": "data_generator",
+            "correlation_id": str(uuid.uuid4()),
+        }
+
+    def generate_line_items(self, claim_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Generate line items for a claim"""
-        num_lines = random.choices([1, 2, 3, 4, 5], weights=[50, 25, 15, 7, 3])[0]
+        # 1-5 line items per claim, weighted toward 1-2
+        num_items = random.choices([1, 2, 3, 4, 5], weights=[40, 30, 15, 10, 5])[0]
+        
         line_items = []
+        total_charge = Decimal("0.00")
 
-        for line_num in range(1, num_lines + 1):
-            # Generate service dates within claim date range
-            if service_from == service_to:
-                line_service_date = service_from
-            else:
-                days_diff = (service_to - service_from).days
-                random_days = random.randint(0, days_diff)
-                line_service_date = service_from + timedelta(days=random_days)
+        for line_num in range(1, num_items + 1):
+            procedure_code = random.choice(PROCEDURE_CODES)
+            units = random.randint(1, 3)
+            
+            # Generate realistic charge amounts based on procedure type
+            if procedure_code.startswith("99"):  # Office visits
+                base_charge = Decimal(random.uniform(200, 600))
+            elif procedure_code.startswith("8"):  # Labs
+                base_charge = Decimal(random.uniform(50, 300))
+            elif procedure_code.startswith("7"):  # Radiology
+                base_charge = Decimal(random.uniform(300, 1500))
+            elif procedure_code.startswith("2") or procedure_code.startswith("6"):  # Surgery
+                base_charge = Decimal(random.uniform(1000, 5000))
+            else:  # Other
+                base_charge = Decimal(random.uniform(100, 800))
 
-            units = random.choices([1, 2, 3, 4, 5], weights=[60, 20, 10, 7, 3])[0]
-            charge_amount = Decimal(f"{random.uniform(50, 2000):.2f}")
+            charge_amount = base_charge * units
+            total_charge += charge_amount
+
+            # Calculate RVU and reimbursement
+            rvu_value = Decimal(random.uniform(0.5, 5.0))
+            reimbursement_amount = rvu_value * units * Decimal("36.04")  # Conversion factor
 
             line_item = {
-                "claim_id": claim_id,
+                "claim_id": claim_data["claim_id"],
                 "line_number": line_num,
-                "procedure_code": random.choice(PROCEDURE_CODES),
-                "modifier1": random.choice(MODIFIERS) or None,
-                "modifier2": random.choice(MODIFIERS)
-                if random.random() < 0.1
-                else None,
-                "modifier3": random.choice(MODIFIERS)
-                if random.random() < 0.05
-                else None,
-                "modifier4": random.choice(MODIFIERS)
-                if random.random() < 0.02
-                else None,
+                "procedure_code": procedure_code,
+                "modifier1": random.choice(MODIFIERS),
+                "modifier2": random.choice(MODIFIERS) if random.random() < 0.2 else None,
+                "modifier3": random.choice(MODIFIERS) if random.random() < 0.1 else None,
+                "modifier4": random.choice(MODIFIERS) if random.random() < 0.05 else None,
                 "units": units,
                 "charge_amount": charge_amount,
-                "service_from_date": line_service_date,
-                "service_to_date": line_service_date,
-                "diagnosis_pointer": str(random.randint(1, 4)),
+                "service_from_date": claim_data["service_from_date"],
+                "service_to_date": claim_data["service_to_date"],
+                "diagnosis_pointer": "1",  # Points to primary diagnosis
                 "place_of_service": random.choice(PLACES_OF_SERVICE),
-                "revenue_code": random.choice(REVENUE_CODES)
-                if random.random() < 0.7
-                else None,
+                "revenue_code": random.choice(REVENUE_CODES),
                 "created_at": datetime.now(),
-                "rvu_value": Decimal(f"{random.uniform(0.5, 15.0):.4f}"),
-                "reimbursement_amount": charge_amount
-                * Decimal("0.65"),  # Rough 65% reimbursement
+                "rvu_value": rvu_value,
+                "reimbursement_amount": reimbursement_amount,
             }
             line_items.append(line_item)
 
+        # Update total charge amount in claim
+        claim_data["total_charge_amount"] = total_charge
+
         return line_items
 
-    def generate_diagnosis_codes(self, claim_id: str) -> List[Dict[str, Any]]:
+    def generate_diagnosis_codes(self, claim_data: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Generate diagnosis codes for a claim"""
-        num_diagnoses = random.choices([1, 2, 3, 4], weights=[40, 35, 20, 5])[0]
+        # 1-4 diagnoses per claim, weighted toward 1-2
+        num_diagnoses = random.choices([1, 2, 3, 4], weights=[50, 30, 15, 5])[0]
+        
         diagnosis_codes = []
-
         used_codes = set()
+
         for seq in range(1, num_diagnoses + 1):
             # Ensure unique diagnosis codes per claim
-            available_codes = [
-                code for code in DIAGNOSIS_CODES if code not in used_codes
-            ]
-            if not available_codes:
-                break
-
-            diagnosis_code = random.choice(available_codes)
-            used_codes.add(diagnosis_code)
+            while True:
+                diag_code = random.choice(DIAGNOSIS_CODES)
+                if diag_code not in used_codes:
+                    used_codes.add(diag_code)
+                    break
 
             diagnosis = {
-                "claim_id": claim_id,
+                "claim_id": claim_data["claim_id"],
                 "diagnosis_sequence": seq,
-                "diagnosis_code": diagnosis_code,
-                "diagnosis_description": fake.text(max_nb_chars=100),
+                "diagnosis_code": diag_code,
+                "diagnosis_description": f"Description for {diag_code}",
                 "diagnosis_type": "primary" if seq == 1 else "secondary",
                 "created_at": datetime.now(),
             }
@@ -211,75 +257,22 @@ class SampleDataGenerator:
 
         return diagnosis_codes
 
-    def generate_claim(self) -> GeneratedClaim:
-        """Generate a complete claim with line items and diagnosis codes"""
-        claim_id = f"CLM{uuid.uuid4().hex[:12].upper()}"
-        patient_account = self.generate_patient_account_number()
-        service_from, service_to = self.generate_service_dates()
-
-        # Generate realistic birthdates (18-95 years old)
-        birth_date = fake.date_of_birth(minimum_age=18, maximum_age=95)
-
-        # Calculate total charge from line items (we'll update this after generating lines)
-        claim_data = {
-            "claim_id": claim_id,
-            "facility_id": random.choice(FACILITY_IDS),
-            "department_id": random.randint(100, 999),
-            "patient_account_number": patient_account,
-            "patient_name": fake.name(),
-            "first_name": fake.first_name(),
-            "last_name": fake.last_name(),
-            "medical_record_number": f"MRN{random.randint(1000000, 9999999)}",
-            "date_of_birth": birth_date,
-            "gender": random.choice(GENDER_CODES),
-            "service_from_date": service_from,
-            "service_to_date": service_to,
-            "primary_diagnosis": random.choice(DIAGNOSIS_CODES),
-            "financial_class": random.choice(FINANCIAL_CLASSES),
-            "secondary_insurance": random.choice(FINANCIAL_CLASSES)
-            if random.random() < 0.3
-            else None,
-            "total_charge_amount": Decimal(
-                "0.00"
-            ),  # Will be calculated from line items
-            "processing_status": "pending",
-            "processing_stage": "initial",
-            "active": True,
-            "created_at": datetime.now(),
-            "updated_at": datetime.now(),
-            "raw_data": {
-                "source": "generated",
-                "batch_id": f"GEN_{datetime.now().strftime('%Y%m%d')}",
-            },
-            "validation_results": None,
-            "ml_predictions": None,
-            "processing_metrics": None,
-            "error_details": None,
-            "priority": random.choices(["low", "normal", "high"], weights=[10, 85, 5])[
-                0
-            ],
-            "submitted_by": "data_generator",
-            "correlation_id": str(uuid.uuid4()),
-        }
-
-        # Generate related data
-        line_items = self.generate_line_items(claim_id, service_from, service_to)
-        diagnosis_codes = self.generate_diagnosis_codes(claim_id)
-
-        # Calculate total charge amount from line items
-        total_charge = sum(item["charge_amount"] for item in line_items)
-        claim_data["total_charge_amount"] = total_charge
-
-        return GeneratedClaim(
-            claim_data=claim_data,
-            line_items=line_items,
-            diagnosis_codes=diagnosis_codes,
-        )
-
     def generate_batch(self, batch_size: int) -> List[GeneratedClaim]:
         """Generate a batch of claims"""
-        self.logger.info(f"Generating batch of {batch_size} claims...")
-        return [self.generate_claim() for _ in range(batch_size)]
+        claims = []
+        
+        for _ in range(batch_size):
+            claim_data = self.generate_claim_data()
+            line_items = self.generate_line_items(claim_data)
+            diagnosis_codes = self.generate_diagnosis_codes(claim_data)
+            
+            claims.append(GeneratedClaim(
+                claim_data=claim_data,
+                line_items=line_items,
+                diagnosis_codes=diagnosis_codes
+            ))
+        
+        return claims
 
 
 class DataLoader:
@@ -290,17 +283,14 @@ class DataLoader:
         self.logger = logging.getLogger(__name__)
 
     async def load_claims_batch(self, claims: List[GeneratedClaim]) -> int:
-        """Load a batch of claims into the database using bulk operations"""
-        if not claims:
-            return 0
-
-        # Prepare data for bulk insert
+        """Load a batch of claims into the database"""
         claims_data = []
         line_items_data = []
         diagnosis_codes_data = []
 
+        # Prepare data for bulk insert
         for claim in claims:
-            # Convert claim data to tuple for COPY
+            # Prepare claim data
             claim_tuple = (
                 claim.claim_data["claim_id"],
                 claim.claim_data["facility_id"],
@@ -474,7 +464,8 @@ async def create_batch_metadata(db: PostgresDatabase, total_claims: int) -> str:
         total_claims,
         "completed",
         "normal",
-        asyncpg.types.Json({"generated": True, "source": "sample_data_generator"}),
+        # FIXED: Use json.dumps instead of asyncpg.types.Json
+        json.dumps({"generated": True, "source": "sample_data_generator"}),
     )
 
     return batch_id
