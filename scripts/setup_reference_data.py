@@ -86,7 +86,6 @@ async def setup_facilities_sql_server_only(sql_db: SQLServerDatabase, logger):
         facility_data = (
             str(i),  # facility_id as VARCHAR(20)
             f"FAC{i:03d}",  # facility_name (FAC001, FAC002, etc.)
-            f"Test Facility {i}",  # facility_description
             "Hospital" if i <= 25 else "Clinic",  # facility_type
             f"{100 + i} Medical Center Drive",  # address
             datetime.now(),  # installed_date
@@ -103,59 +102,88 @@ async def setup_facilities_sql_server_only(sql_db: SQLServerDatabase, logger):
         )
         facilities_data.append(facility_data)
     
-    # Insert into SQL Server ONLY
+    # Insert into SQL Server ONLY - match actual facilities table schema
     sql_query = """
         MERGE facilities AS target
-        USING (SELECT ? as facility_id, ? as facility_name, ? as facility_description, 
+        USING (SELECT ? as facility_id, ? as facility_name, 
                ? as facility_type, ? as address, ? as installed_date, ? as beds,
                ? as city, ? as state, ? as zip_code, ? as phone, ? as active,
                ? as updated_date, ? as updated_by, ? as region_id, ? as fiscal_month) AS source
         ON target.facility_id = source.facility_id
         WHEN MATCHED THEN
             UPDATE SET facility_name = source.facility_name,
-                      facility_description = source.facility_description,
+                      facility_type = source.facility_type,
                       updated_date = source.updated_date
         WHEN NOT MATCHED THEN
-            INSERT (facility_id, facility_name, facility_description, facility_type,
+            INSERT (facility_id, facility_name, facility_type,
                    address, installed_date, beds, city, state, zip_code, phone,
                    active, updated_date, updated_by, region_id, fiscal_month)
-            VALUES (source.facility_id, source.facility_name, source.facility_description,
-                   source.facility_type, source.address, source.installed_date, source.beds,
+            VALUES (source.facility_id, source.facility_name, source.facility_type,
+                   source.address, source.installed_date, source.beds,
                    source.city, source.state, source.zip_code, source.phone, source.active,
                    source.updated_date, source.updated_by, source.region_id, source.fiscal_month);
     """
     
     for facility in facilities_data:
-        await sql_db.execute(sql_query, facility)
+        await sql_db.execute(sql_query, *facility)  # Unpack the tuple as individual parameters
     
-    logger.info(f"✅ Inserted {len(facilities_data)} facilities into SQL Server")
-    logger.info("✅ Facilities are now managed ONLY in SQL Server (single source of truth)")
+    logger.info(f"SUCCESS: Inserted {len(facilities_data)} facilities into SQL Server")
+    logger.info("SUCCESS: Facilities are now managed ONLY in SQL Server (single source of truth)")
 
 
 async def setup_prerequisite_tables(sql_db: SQLServerDatabase, logger):
     """Ensure prerequisite tables exist in SQL Server"""
     logger.info("Setting up prerequisite tables in SQL Server...")
     
-    # Create facility_region table if it doesn't exist
-    region_query = """
-        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'facility_region')
-        BEGIN
-            CREATE TABLE facility_region (
-                region_id INT PRIMARY KEY,
-                region_name VARCHAR(100)
-            );
+    try:
+        # Step 1: Create the table if it doesn't exist
+        create_table_query = """
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'facility_region')
+            BEGIN
+                CREATE TABLE facility_region (
+                    region_id INT PRIMARY KEY,
+                    region_name VARCHAR(100)
+                );
+            END
+        """
+        await sql_db.execute(create_table_query)
+        logger.info("SUCCESS: Facility region table created/verified")
+        
+        # Step 2: Check if regions already exist
+        count_query = "SELECT COUNT(*) as region_count FROM facility_region"
+        result = await sql_db.fetch(count_query)
+        existing_count = result[0]['region_count'] if result else 0
+        
+        if existing_count == 0:
+            logger.info("No regions found, inserting default regions...")
             
-            -- Insert default regions
-            INSERT INTO facility_region (region_id, region_name) VALUES
-            (1, 'West Coast'),
-            (2, 'East Coast'), 
-            (3, 'Midwest'),
-            (4, 'Southwest'),
-            (5, 'Southeast');
-        END
-    """
-    await sql_db.execute(region_query)
-    logger.info("✅ Facility regions table setup completed")
+            # Step 3: Insert regions individually for better error handling
+            regions_data = [
+                (1, 'West Coast'),
+                (2, 'East Coast'), 
+                (3, 'Midwest'),
+                (4, 'Southwest'),
+                (5, 'Southeast')
+            ]
+            
+            for region_id, region_name in regions_data:
+                insert_query = "INSERT INTO facility_region (region_id, region_name) VALUES (?, ?)"
+                await sql_db.execute(insert_query, region_id, region_name)
+                logger.info(f"SUCCESS: Inserted region {region_id}: {region_name}")
+        else:
+            logger.info(f"SUCCESS: Found {existing_count} existing regions in facility_region table")
+        
+        # Step 4: Final verification
+        final_result = await sql_db.fetch(count_query)
+        final_count = final_result[0]['region_count'] if final_result else 0
+        logger.info(f"SUCCESS: Facility regions table setup completed with {final_count} regions")
+        
+        if final_count < 5:
+            logger.warning(f"Expected 5 regions but found {final_count}. This may cause foreign key errors.")
+            
+    except Exception as e:
+        logger.error(f"Failed to setup facility_region table: {e}")
+        raise
 
 
 async def setup_financial_classes(pg_db: PostgresDatabase, sql_db: SQLServerDatabase, logger):
@@ -199,9 +227,9 @@ async def setup_financial_classes(pg_db: PostgresDatabase, sql_db: SQLServerData
     """
     
     for payer in payers_data:
-        await sql_db.execute(payer_query, payer)
+        await sql_db.execute(payer_query, *payer)  # Unpack the tuple
     
-    logger.info(f"✅ Inserted {len(payers_data)} payers into SQL Server")
+    logger.info(f"SUCCESS: Inserted {len(payers_data)} payers into SQL Server")
     
     # Insert financial classes into SQL Server
     sql_financial_class_query = """
@@ -224,7 +252,9 @@ async def setup_financial_classes(pg_db: PostgresDatabase, sql_db: SQLServerData
     """
     
     for fc in financial_classes:
-        await sql_db.execute(sql_financial_class_query, fc)
+        # Pass the correct parameters: facility_id, financial_class_id, financial_class_name, payer_id, reimbursement_rate
+        fc_params = ('1', fc[0], fc[1], fc[2], fc[3])
+        await sql_db.execute(sql_financial_class_query, *fc_params)  # Unpack parameters
     
     # Insert simplified financial classes into PostgreSQL for validation cache
     pg_financial_class_query = """
@@ -238,8 +268,8 @@ async def setup_financial_classes(pg_db: PostgresDatabase, sql_db: SQLServerData
     for fc in financial_classes:
         await pg_db.execute(pg_financial_class_query, fc[0], fc[1], True)
     
-    logger.info(f"✅ Inserted {len(financial_classes)} financial classes into SQL Server")
-    logger.info(f"✅ Cached {len(financial_classes)} financial classes in PostgreSQL for fast validation")
+    logger.info(f"SUCCESS: Inserted {len(financial_classes)} financial classes into SQL Server")
+    logger.info(f"SUCCESS: Cached {len(financial_classes)} financial classes in PostgreSQL for fast validation")
 
 
 async def setup_rvu_data(sql_db: SQLServerDatabase, pg_db: PostgresDatabase, logger):
@@ -288,9 +318,9 @@ async def setup_rvu_data(sql_db: SQLServerDatabase, pg_db: PostgresDatabase, log
     """
     
     for rvu in rvu_data:
-        # Expand data for SQL Server insert
-        expanded_rvu = rvu + (rvu[4], rvu[4])  # Use work_rvu for both non_facility and facility PE
-        await sql_db.execute(sql_rvu_query, expanded_rvu)
+        # Expand data for SQL Server insert - need to match the 12 parameter markers in the query
+        expanded_rvu = rvu + (rvu[4], rvu[4])  # Add non_facility_pe_rvu, facility_pe_rvu
+        await sql_db.execute(sql_rvu_query, *expanded_rvu)  # Unpack parameters
     
     # Cache in PostgreSQL for fast access during processing
     pg_rvu_query = """
@@ -319,8 +349,8 @@ async def setup_rvu_data(sql_db: SQLServerDatabase, pg_db: PostgresDatabase, log
         )
         await pg_db.execute(pg_rvu_query, *pg_rvu_record)
     
-    logger.info(f"✅ Inserted {len(rvu_data)} RVU records into SQL Server")
-    logger.info(f"✅ Cached {len(rvu_data)} RVU records in PostgreSQL for fast reimbursement calculations")
+    logger.info(f"SUCCESS: Inserted {len(rvu_data)} RVU records into SQL Server")
+    logger.info(f"SUCCESS: Cached {len(rvu_data)} RVU records in PostgreSQL for fast reimbursement calculations")
 
 
 if __name__ == "__main__":
