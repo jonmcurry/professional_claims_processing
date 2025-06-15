@@ -73,13 +73,13 @@ CREATE TABLE facility_organization (
 GO
 
 CREATE TABLE facility_region (
-    region_id INT,
+    region_id INT PRIMARY KEY,
     region_name VARCHAR(100)
 );
 GO
 
 CREATE TABLE facilities (
-    facility_id INT,
+    facility_id INT PRIMARY KEY,
     facility_name VARCHAR(100),
     installed_date DATETIME,
     beds INT,
@@ -101,7 +101,7 @@ GO
 
 CREATE TABLE facility_financial_classes (
     facility_id INT,
-    financial_class_id VARCHAR(10),
+    financial_class_id VARCHAR(10) PRIMARY KEY,
     financial_class_name VARCHAR(100),
     payer_id INT,
     reimbursement_rate DECIMAL(5,4),
