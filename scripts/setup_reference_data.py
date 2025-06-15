@@ -13,7 +13,7 @@ from typing import List, Tuple
 
 from src.config.config import load_config
 from src.db.postgres import PostgresDatabase
-from src.db.sqlserver import SQLServerDatabase
+from src.db.sql_server import SQLServerDatabase
 
 
 async def setup_reference_data():
