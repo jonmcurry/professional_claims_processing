@@ -199,7 +199,11 @@ class SQLServerDatabase(BaseDatabase):
             f"LoginTimeout=15;"
         )
 
-        conn = pyodbc.connect(connection_string, autocommit=False)
+        # Use autocommit so that DDL statements such as CREATE PARTITION FUNCTION
+        # or ALTER TABLE are executed outside of an explicit transaction.  SQL
+        # Server does not allow some DDL inside user transactions and the setup
+        # script relies on executing them individually.
+        conn = pyodbc.connect(connection_string, autocommit=True)
         self._connection_create_count += 1
 
         # Apply connection-level optimizations
