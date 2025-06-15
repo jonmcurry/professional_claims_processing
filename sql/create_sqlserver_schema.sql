@@ -119,12 +119,26 @@ ALTER TABLE facility_financial_classes
     ADD CONSTRAINT fk_ffc_payer FOREIGN KEY (payer_id)
         REFERENCES core_standard_payers(payer_id);
 
+CREATE INDEX idx_facility_financial_classes_facility_id
+    ON facility_financial_classes (facility_id);
+CREATE INDEX idx_facility_financial_classes_payer_id
+    ON facility_financial_classes (payer_id);
+GO
+
 CREATE TABLE facility_place_of_service (
     facility_id INT,
     place_of_service VARCHAR(2),
     place_of_service_name VARCHAR(30),
     origin INT
 );
+GO
+
+ALTER TABLE facility_place_of_service
+    ADD CONSTRAINT fk_pos_facility FOREIGN KEY (facility_id)
+        REFERENCES facilities(facility_id);
+
+CREATE INDEX idx_facility_place_of_service_facility_id
+    ON facility_place_of_service (facility_id);
 GO
 
 CREATE TABLE facility_departments (
@@ -141,6 +155,10 @@ ALTER TABLE facility_departments
     ADD CONSTRAINT fk_dept_facility FOREIGN KEY (facility_id)
         REFERENCES facilities(facility_id);
 
+CREATE INDEX idx_facility_departments_facility_id
+    ON facility_departments (facility_id);
+GO
+
 CREATE TABLE facility_coders (
     facility_id INT,
     coder_id VARCHAR(50),
@@ -152,6 +170,10 @@ GO
 ALTER TABLE facility_coders
     ADD CONSTRAINT fk_coder_facility FOREIGN KEY (facility_id)
         REFERENCES facilities(facility_id);
+
+CREATE INDEX idx_facility_coders_facility_id
+    ON facility_coders (facility_id);
+GO
 
 CREATE TABLE physicians (
     rendering_provider_id VARCHAR(50),
