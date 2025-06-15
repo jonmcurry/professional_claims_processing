@@ -173,6 +173,32 @@ CREATE TABLE ml_models (
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Table to store claims that failed processing
+CREATE TABLE failed_claims (
+    claim_id VARCHAR(50) NOT NULL,
+    batch_id VARCHAR(50),
+    facility_id VARCHAR(20),
+    patient_account_number VARCHAR(50),
+    original_data TEXT,
+    failure_reason TEXT NOT NULL,
+    failure_category VARCHAR(50) NOT NULL,
+    processing_stage VARCHAR(50) NOT NULL,
+    failed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    repair_suggestions TEXT,
+    resolution_status VARCHAR(20),
+    assigned_to VARCHAR(100),
+    resolved_at TIMESTAMPTZ,
+    resolution_notes TEXT,
+    resolution_action VARCHAR(50),
+    error_pattern_id VARCHAR(50),
+    priority_level VARCHAR(10),
+    impact_level VARCHAR(10),
+    potential_revenue_loss NUMERIC(12,2),
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ,
+    coder_id VARCHAR(50)
+);
+
 -- Foreign key constraints
 ALTER TABLE claims_line_items
     ADD CONSTRAINT fk_claim_line_claim FOREIGN KEY (claim_id) REFERENCES claims (claim_id);
