@@ -104,6 +104,13 @@ ALTER TABLE facilities
 CREATE INDEX idx_facilities_region_id ON facilities (region_id);
 GO
 
+CREATE TABLE core_standard_payers (
+    payer_id INT,
+    payer_name VARCHAR(20),
+    payer_code CHAR(2)
+);
+GO
+
 CREATE TABLE facility_financial_classes (
     facility_id INT,
     financial_class_id VARCHAR(10) PRIMARY KEY,
@@ -400,14 +407,6 @@ CREATE TABLE rvu_data (
     updated_at DATETIME2(7) NULL
 );
 GO
-
-CREATE TABLE core_standard_payers (
-    payer_id INT,
-    payer_name VARCHAR(20),
-    payer_code CHAR(2)
-);
-GO
-
 -- Partition failed_claims table by failed_at date
 CREATE PARTITION FUNCTION pf_failed_at (DATETIME2(7))
 AS RANGE RIGHT FOR VALUES ('2020-01-01', '2021-01-01', '2022-01-01', '2023-01-01');
