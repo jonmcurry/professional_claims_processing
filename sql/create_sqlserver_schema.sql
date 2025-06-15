@@ -105,7 +105,7 @@ CREATE INDEX idx_facilities_region_id ON facilities (region_id);
 GO
 
 CREATE TABLE core_standard_payers (
-    payer_id INT,
+    payer_id INT PRIMARY KEY,
     payer_name VARCHAR(20),
     payer_code CHAR(2)
 );
@@ -286,7 +286,7 @@ ALTER TABLE claims
         REFERENCES facility_financial_classes(financial_class_id);
 
 CREATE TABLE claims_diagnosis (
-    patient_account_number VARCHAR(50) NOT NULL,
+    claim_id VARCHAR(50) NOT NULL,
     diagnosis_sequence INT NOT NULL,
     diagnosis_code VARCHAR(20) NOT NULL,
     diagnosis_description VARCHAR(255) NULL,
@@ -296,11 +296,11 @@ CREATE TABLE claims_diagnosis (
 GO
 
 ALTER TABLE claims_diagnosis
-    ADD CONSTRAINT fk_claim_diag_claim FOREIGN KEY (patient_account_number)
-        REFERENCES claims(patient_account_number);
+    ADD CONSTRAINT fk_claim_diag_claim FOREIGN KEY (claim_id)
+        REFERENCES claims(claim_id);
 
 CREATE TABLE claims_line_items (
-    patient_account_number VARCHAR(50) NOT NULL,
+    claim_id VARCHAR(50) NOT NULL,
     line_number INT NOT NULL,
     procedure_code VARCHAR(10) NOT NULL,
     modifier1 VARCHAR(2) NULL,
@@ -322,8 +322,8 @@ CREATE TABLE claims_line_items (
 GO
 
 ALTER TABLE claims_line_items
-    ADD CONSTRAINT fk_line_claim FOREIGN KEY (patient_account_number)
-        REFERENCES claims(patient_account_number);
+    ADD CONSTRAINT fk_line_claim FOREIGN KEY (claim_id)
+        REFERENCES claims(claim_id);
 ALTER TABLE claims_line_items
     ADD CONSTRAINT fk_line_provider FOREIGN KEY (rendering_provider_id)
         REFERENCES physicians(rendering_provider_id);
@@ -456,7 +456,7 @@ CREATE INDEX ix_active_claims
 GO
 CREATE INDEX ix_unresolved_failed_claims
     ON failed_claims (claim_id)
-    WHERE resolution_status IS NULL OR resolution_status <> 'resolved';
+    WHERE ISNULL(resolution_status, '') <> 'resolved';
 GO
 ALTER TABLE archived_failed_claims REBUILD PARTITION = ALL
     WITH (DATA_COMPRESSION = PAGE);
