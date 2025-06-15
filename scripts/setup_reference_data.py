@@ -1,575 +1,318 @@
 #!/usr/bin/env python3
 """
-Sample Claims Data Generator
-Generates 100,000 realistic healthcare claims and loads them into PostgreSQL staging database.
-UPDATED: facility_id as VARCHAR(20) string to match both PostgreSQL and SQL Server schemas
+Reference Data Setup Script
+Creates and populates reference data tables required for claims validation.
+This includes facilities, financial classes, and RVU data.
 """
 
 import asyncio
 import logging
-import random
-import uuid
-import json  # Added import for JSON handling
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
-from typing import Any, Dict, List
-
-import asyncpg
-from faker import Faker
+from typing import List, Tuple
 
 from src.config.config import load_config
 from src.db.postgres import PostgresDatabase
-
-# Initialize Faker for realistic data generation
-fake = Faker()
-
-# Healthcare-specific data pools - UPDATED: String facility IDs to match both schemas
-FACILITY_IDS = [str(i) for i in range(1, 51)]  # Strings: "1", "2", ..., "50" (VARCHAR(20))
-FINANCIAL_CLASSES = ["COM", "MED", "MCR", "PPO", "HMO", "WRK", "OTH", "SELF"]
-GENDER_CODES = ["M", "F"]
-PLACES_OF_SERVICE = ["11", "12", "21", "22", "23", "31", "32", "49", "50", "81"]
-
-# Common procedure codes (CPT codes)
-PROCEDURE_CODES = [
-    "99213",
-    "99214",
-    "99215",
-    "99203",
-    "99204",
-    "99205",  # Office visits
-    "99282",
-    "99283",
-    "99284",
-    "99285",  # Emergency visits
-    "36415",
-    "85025",
-    "80053",
-    "80061",  # Lab procedures
-    "71020",
-    "71030",
-    "73060",
-    "73070",  # Radiology
-    "29881",
-    "29882",
-    "64483",
-    "64484",  # Surgery
-    "90834",
-    "90837",
-    "90853",
-    "96116",  # Mental health
-    "G0438",
-    "G0439",
-    "99490",
-    "99491",  # Preventive care
-]
-
-# Common diagnosis codes (ICD-10)
-DIAGNOSIS_CODES = [
-    "Z00.00",
-    "Z12.11",
-    "I10",
-    "E11.9",
-    "M79.3",  # Routine/common
-    "J44.1",
-    "N39.0",
-    "K21.9",
-    "M25.561",
-    "F41.1",  # Chronic conditions
-    "S72.001A",
-    "M17.11",
-    "I25.10",
-    "E78.5",
-    "Z51.11",  # Acute/treatment
-    "G89.29",
-    "M54.5",
-    "R06.02",
-    "R50.9",
-    "K59.00",  # Symptoms
-]
-
-# Modifiers
-MODIFIERS = ["", "25", "59", "76", "77", "78", "79", "LT", "RT", "50"]
-
-# Revenue codes
-REVENUE_CODES = ["0450", "0636", "0320", "0370", "0410", "0730", "0942"]
+from src.db.sqlserver import SQLServerDatabase
 
 
-@dataclass
-class GeneratedClaim:
-    """Container for a generated claim with all related data"""
-
-    claim_data: Dict[str, Any]
-    line_items: List[Dict[str, Any]]
-    diagnosis_codes: List[Dict[str, Any]]
-
-
-class SampleDataGenerator:
-    """Generates realistic healthcare claims data"""
-
-    def __init__(self):
-        self.logger = logging.getLogger(__name__)
-        self.patient_accounts = set()
-
-    def generate_patient_account_number(self) -> str:
-        """Generate a unique patient account number"""
-        while True:
-            account = f"PAT{random.randint(100000, 999999)}"
-            if account not in self.patient_accounts:
-                self.patient_accounts.add(account)
-                return account
-
-    def generate_claim_data(self) -> Dict[str, Any]:
-        """Generate a single claim's base data"""
-        claim_id = f"CLM{uuid.uuid4().hex[:8].upper()}"
-        facility_id = random.choice(FACILITY_IDS)  # Now returns string ("1"-"50")
-        patient_account = self.generate_patient_account_number()
-
-        # Generate realistic dates
-        service_from = fake.date_between(start_date="-730d", end_date="today")
-        
-        # 80% single-day claims, 20% multi-day (up to 30 days)
-        if random.random() < 0.8:
-            service_to = service_from
-        else:
-            service_to = service_from + timedelta(days=random.randint(1, 30))
-
-        # Patient demographics
-        birth_date = fake.date_of_birth(minimum_age=18, maximum_age=95)
-        gender = random.choice(GENDER_CODES)
-        first_name = fake.first_name_male() if gender == "M" else fake.first_name_female()
-        last_name = fake.last_name()
-        patient_name = f"{last_name}, {first_name}"
-
-        return {
-            "claim_id": claim_id,
-            "facility_id": facility_id,  # String value ("1"-"50") - matches VARCHAR(20)
-            "department_id": random.randint(100, 999),
-            "patient_account_number": patient_account,
-            "patient_name": patient_name,
-            "first_name": first_name,
-            "last_name": last_name,
-            "medical_record_number": f"MRN{random.randint(1000000, 9999999)}",
-            "date_of_birth": birth_date,
-            "gender": gender,
-            "service_from_date": service_from,
-            "service_to_date": service_to,
-            "primary_diagnosis": random.choice(DIAGNOSIS_CODES),
-            "financial_class": random.choice(FINANCIAL_CLASSES),
-            "secondary_insurance": random.choice(FINANCIAL_CLASSES) if random.random() < 0.3 else None,
-            "total_charge_amount": Decimal("0.00"),  # Will be calculated from line items
-            "processing_status": "pending",
-            "processing_stage": "intake",
-            "active": True,
-            "created_at": datetime.now(),
-            "updated_at": datetime.now(),
-            "raw_data": json.dumps({"source": "sample_generator", "version": "1.0"}),
-            "validation_results": None,
-            "ml_predictions": None,
-            "processing_metrics": None,
-            "error_details": None,
-            "priority": random.choice(["low", "normal", "high"]),
-            "submitted_by": "data_generator",
-            "correlation_id": str(uuid.uuid4()),
-        }
-
-    def generate_line_items(self, claim_data: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Generate line items for a claim"""
-        # 1-5 line items per claim, weighted toward 1-2
-        num_items = random.choices([1, 2, 3, 4, 5], weights=[40, 30, 15, 10, 5])[0]
-        
-        line_items = []
-        total_charge = Decimal("0.00")
-
-        for line_num in range(1, num_items + 1):
-            procedure_code = random.choice(PROCEDURE_CODES)
-            units = random.randint(1, 3)
-            
-            # Generate realistic charge amounts based on procedure type
-            if procedure_code.startswith("99"):  # Office visits
-                base_charge = Decimal(random.uniform(200, 600))
-            elif procedure_code.startswith("8"):  # Labs
-                base_charge = Decimal(random.uniform(50, 300))
-            elif procedure_code.startswith("7"):  # Radiology
-                base_charge = Decimal(random.uniform(300, 1500))
-            elif procedure_code.startswith("2") or procedure_code.startswith("6"):  # Surgery
-                base_charge = Decimal(random.uniform(1000, 5000))
-            else:  # Other
-                base_charge = Decimal(random.uniform(100, 800))
-
-            charge_amount = base_charge * units
-            total_charge += charge_amount
-
-            # Calculate RVU and reimbursement
-            rvu_value = Decimal(random.uniform(0.5, 5.0))
-            reimbursement_amount = rvu_value * units * Decimal("36.04")  # Conversion factor
-
-            line_item = {
-                "claim_id": claim_data["claim_id"],
-                "line_number": line_num,
-                "procedure_code": procedure_code,
-                "modifier1": random.choice(MODIFIERS),
-                "modifier2": random.choice(MODIFIERS) if random.random() < 0.2 else None,
-                "modifier3": random.choice(MODIFIERS) if random.random() < 0.1 else None,
-                "modifier4": random.choice(MODIFIERS) if random.random() < 0.05 else None,
-                "units": units,
-                "charge_amount": charge_amount,
-                "service_from_date": claim_data["service_from_date"],
-                "service_to_date": claim_data["service_to_date"],
-                "diagnosis_pointer": "1",  # Points to primary diagnosis
-                "place_of_service": random.choice(PLACES_OF_SERVICE),
-                "revenue_code": random.choice(REVENUE_CODES),
-                "created_at": datetime.now(),
-                "rvu_value": rvu_value,
-                "reimbursement_amount": reimbursement_amount,
-            }
-            line_items.append(line_item)
-
-        # Update total charge amount in claim
-        claim_data["total_charge_amount"] = total_charge
-
-        return line_items
-
-    def generate_diagnosis_codes(self, claim_data: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Generate diagnosis codes for a claim"""
-        # 1-4 diagnoses per claim, weighted toward 1-2
-        num_diagnoses = random.choices([1, 2, 3, 4], weights=[50, 30, 15, 5])[0]
-        
-        diagnosis_codes = []
-        used_codes = set()
-
-        for seq in range(1, num_diagnoses + 1):
-            # Ensure unique diagnosis codes per claim
-            while True:
-                diag_code = random.choice(DIAGNOSIS_CODES)
-                if diag_code not in used_codes:
-                    used_codes.add(diag_code)
-                    break
-
-            diagnosis = {
-                "claim_id": claim_data["claim_id"],
-                "diagnosis_sequence": seq,
-                "diagnosis_code": diag_code,
-                "diagnosis_description": f"Description for {diag_code}",
-                "diagnosis_type": "primary" if seq == 1 else "secondary",
-                "created_at": datetime.now(),
-                # UPDATED: Add service_to_date for partitioned table compatibility
-                "service_to_date": claim_data["service_to_date"],
-            }
-            diagnosis_codes.append(diagnosis)
-
-        return diagnosis_codes
-
-    def generate_batch(self, batch_size: int) -> List[GeneratedClaim]:
-        """Generate a batch of claims"""
-        claims = []
-        
-        for _ in range(batch_size):
-            claim_data = self.generate_claim_data()
-            line_items = self.generate_line_items(claim_data)
-            diagnosis_codes = self.generate_diagnosis_codes(claim_data)
-            
-            claims.append(GeneratedClaim(
-                claim_data=claim_data,
-                line_items=line_items,
-                diagnosis_codes=diagnosis_codes
-            ))
-        
-        return claims
-
-
-class DataLoader:
-    """Loads generated claims data into PostgreSQL database"""
-
-    def __init__(self, db: PostgresDatabase):
-        self.db = db
-        self.logger = logging.getLogger(__name__)
-
-    async def load_claims_batch(self, claims: List[GeneratedClaim]) -> int:
-        """Load a batch of claims into the database"""
-        claims_data = []
-        line_items_data = []
-        diagnosis_codes_data = []
-
-        # Prepare data for bulk insert
-        for claim in claims:
-            # Prepare claim data
-            claim_tuple = (
-                claim.claim_data["claim_id"],
-                claim.claim_data["facility_id"],  # String value
-                claim.claim_data["department_id"],
-                claim.claim_data["patient_account_number"],
-                claim.claim_data["patient_name"],
-                claim.claim_data["first_name"],
-                claim.claim_data["last_name"],
-                claim.claim_data["medical_record_number"],
-                claim.claim_data["date_of_birth"],
-                claim.claim_data["gender"],
-                claim.claim_data["service_from_date"],
-                claim.claim_data["service_to_date"],
-                claim.claim_data["primary_diagnosis"],
-                claim.claim_data["financial_class"],
-                claim.claim_data["secondary_insurance"],
-                claim.claim_data["total_charge_amount"],
-                claim.claim_data["processing_status"],
-                claim.claim_data["processing_stage"],
-                claim.claim_data["active"],
-                claim.claim_data["created_at"],
-                claim.claim_data["updated_at"],
-                claim.claim_data["raw_data"],
-                claim.claim_data["validation_results"],
-                claim.claim_data["ml_predictions"],
-                claim.claim_data["processing_metrics"],
-                claim.claim_data["error_details"],
-                claim.claim_data["priority"],
-                claim.claim_data["submitted_by"],
-                claim.claim_data["correlation_id"],
-            )
-            claims_data.append(claim_tuple)
-
-            # Prepare line items data
-            for line_item in claim.line_items:
-                line_tuple = (
-                    line_item["claim_id"],
-                    line_item["line_number"],
-                    line_item["procedure_code"],
-                    line_item["modifier1"],
-                    line_item["modifier2"],
-                    line_item["modifier3"],
-                    line_item["modifier4"],
-                    line_item["units"],
-                    line_item["charge_amount"],
-                    line_item["service_from_date"],
-                    line_item["service_to_date"],
-                    line_item["diagnosis_pointer"],
-                    line_item["place_of_service"],
-                    line_item["revenue_code"],
-                    line_item["created_at"],
-                    line_item["rvu_value"],
-                    line_item["reimbursement_amount"],
-                )
-                line_items_data.append(line_tuple)
-
-            # Prepare diagnosis codes data
-            for diagnosis in claim.diagnosis_codes:
-                diag_tuple = (
-                    diagnosis["claim_id"],
-                    diagnosis["service_to_date"],  # Include service_to_date for partitioning
-                    diagnosis["diagnosis_sequence"],
-                    diagnosis["diagnosis_code"],
-                    diagnosis["diagnosis_description"],
-                    diagnosis["diagnosis_type"],
-                    diagnosis["created_at"],
-                )
-                diagnosis_codes_data.append(diag_tuple)
-
-        try:
-            # Insert claims
-            claims_columns = [
-                "claim_id",
-                "facility_id",
-                "department_id",
-                "patient_account_number",
-                "patient_name",
-                "first_name",
-                "last_name",
-                "medical_record_number",
-                "date_of_birth",
-                "gender",
-                "service_from_date",
-                "service_to_date",
-                "primary_diagnosis",
-                "financial_class",
-                "secondary_insurance",
-                "total_charge_amount",
-                "processing_status",
-                "processing_stage",
-                "active",
-                "created_at",
-                "updated_at",
-                "raw_data",
-                "validation_results",
-                "ml_predictions",
-                "processing_metrics",
-                "error_details",
-                "priority",
-                "submitted_by",
-                "correlation_id",
-            ]
-
-            claims_inserted = await self.db.copy_records(
-                "claims", claims_columns, claims_data
-            )
-            self.logger.info(f"Inserted {claims_inserted} claims")
-
-            # Insert line items
-            line_items_columns = [
-                "claim_id",
-                "line_number",
-                "procedure_code",
-                "modifier1",
-                "modifier2",
-                "modifier3",
-                "modifier4",
-                "units",
-                "charge_amount",
-                "service_from_date",
-                "service_to_date",
-                "diagnosis_pointer",
-                "place_of_service",
-                "revenue_code",
-                "created_at",
-                "rvu_value",
-                "reimbursement_amount",
-            ]
-
-            lines_inserted = await self.db.copy_records(
-                "claims_line_items", line_items_columns, line_items_data
-            )
-            self.logger.info(f"Inserted {lines_inserted} line items")
-
-            # Insert diagnosis codes
-            diagnosis_columns = [
-                "claim_id",
-                "service_to_date",  # Include service_to_date column
-                "diagnosis_sequence",
-                "diagnosis_code",
-                "diagnosis_description",
-                "diagnosis_type",
-                "created_at",
-            ]
-
-            diag_inserted = await self.db.copy_records(
-                "claims_diagnosis_codes", diagnosis_columns, diagnosis_codes_data
-            )
-            self.logger.info(f"Inserted {diag_inserted} diagnosis codes")
-
-            return claims_inserted
-
-        except Exception as e:
-            self.logger.error(f"Error inserting batch: {e}")
-            raise
-
-
-async def create_batch_metadata(db: PostgresDatabase, total_claims: int) -> str:
-    """Create a batch metadata record for tracking"""
-    batch_id = f"GEN_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-    await db.execute(
-        """
-        INSERT INTO batch_metadata (
-            batch_id, submitted_by, submitted_at, total_claims,
-            status, priority, processing_options
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-        """,
-        batch_id,
-        "data_generator",
-        datetime.now(),
-        total_claims,
-        "completed",
-        "normal",
-        # FIXED: Use json.dumps instead of asyncpg.types.Json
-        json.dumps({"generated": True, "source": "sample_data_generator"}),
-    )
-
-    return batch_id
-
-
-async def generate_and_load_sample_data(
-    total_claims: int = 100000, batch_size: int = 1000
-):
-    """Main function to generate and load sample claims data"""
-
+async def setup_reference_data():
+    """
+    Main function to set up all reference data required for claims processing.
+    Creates and populates:
+    - Facilities (PostgreSQL and SQL Server)
+    - Financial classes 
+    - RVU data (SQL Server)
+    """
+    
     # Set up logging
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
     logger = logging.getLogger(__name__)
-
-    logger.info(f"Starting generation of {total_claims:,} sample claims...")
-
-    # Load configuration and connect to database
+    
+    logger.info("Starting reference data setup...")
+    
+    # Load configuration
     config = load_config()
-    db = PostgresDatabase(config.postgres)
-
+    
+    # Initialize database connections
+    pg_db = PostgresDatabase(config.postgres)
+    sql_db = SQLServerDatabase(config.sqlserver)
+    
     try:
-        await db.connect()
-        logger.info("Connected to PostgreSQL database")
-
-        # Create batch metadata
-        batch_id = await create_batch_metadata(db, total_claims)
-        logger.info(f"Created batch metadata: {batch_id}")
-
-        # Initialize generator and loader
-        generator = SampleDataGenerator()
-        loader = DataLoader(db)
-
-        # Process in batches
-        total_loaded = 0
-        batches = (total_claims + batch_size - 1) // batch_size  # Ceiling division
-
-        for batch_num in range(batches):
-            current_batch_size = min(batch_size, total_claims - total_loaded)
-
-            logger.info(
-                f"Processing batch {batch_num + 1}/{batches} ({current_batch_size} claims)"
-            )
-
-            # Generate batch
-            claims_batch = generator.generate_batch(current_batch_size)
-
-            # Load batch
-            loaded = await loader.load_claims_batch(claims_batch)
-            total_loaded += loaded
-
-            logger.info(
-                f"Batch {batch_num + 1} completed. Total loaded: {total_loaded:,}/{total_claims:,}"
-            )
-
-        logger.info(
-            f"Successfully generated and loaded {total_loaded:,} sample claims!"
-        )
-
-        # Update batch metadata
-        await db.execute(
-            """
-            UPDATE batch_metadata 
-            SET completed_at = $1, processed_claims = $2, valid_claims = $3
-            WHERE batch_id = $4
-        """,
-            datetime.now(),
-            total_loaded,
-            total_loaded,
-            batch_id,
-        )
-
+        # Connect to databases
+        await pg_db.connect()
+        await sql_db.connect()
+        logger.info("Connected to both PostgreSQL and SQL Server databases")
+        
+        # Setup facilities in both databases
+        await setup_facilities(pg_db, sql_db, logger)
+        
+        # Setup financial classes
+        await setup_financial_classes(pg_db, sql_db, logger)
+        
+        # Setup RVU data in SQL Server
+        await setup_rvu_data(sql_db, logger)
+        
+        logger.info("Reference data setup completed successfully!")
+        
     except Exception as e:
-        logger.error(f"Error during data generation: {e}")
+        logger.error(f"Error during reference data setup: {e}")
         raise
     finally:
-        await db.close()
-        logger.info("Database connection closed")
+        await pg_db.close()
+        await sql_db.close()
+        logger.info("Database connections closed")
+
+
+async def setup_facilities(pg_db: PostgresDatabase, sql_db: SQLServerDatabase, logger):
+    """Setup facilities in both PostgreSQL and SQL Server"""
+    logger.info("Setting up facilities...")
+    
+    # Define facility data - 50 facilities as referenced in the sample data
+    facilities_data = []
+    for i in range(1, 51):
+        facility_data = (
+            str(i),  # facility_id as VARCHAR(20)
+            f"FAC{i:03d}",  # facility_name (FAC001, FAC002, etc.)
+            f"Test Facility {i}",  # facility_description
+            "Hospital" if i <= 25 else "Clinic",  # facility_type
+            f"{100 + i} Medical Center Drive",  # address
+            datetime.now(),  # installed_date
+            50 + (i * 2),  # beds
+            f"City{i}",  # city
+            "CA" if i <= 25 else "NY",  # state
+            f"{90000 + i:05d}",  # zip_code
+            f"555-{i:03d}-0000",  # phone
+            True,  # active
+            datetime.now(),  # updated_date
+            1,  # updated_by
+            (i - 1) % 5 + 1,  # region_id (1-5)
+            1,  # fiscal_month
+        )
+        facilities_data.append(facility_data)
+    
+    # Insert into PostgreSQL
+    pg_query = """
+        INSERT INTO facilities (
+            facility_id, facility_name, facility_description, facility_type,
+            address, installed_date, beds, city, state, zip_code, phone,
+            active, updated_date, updated_by, region_id, fiscal_month
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        ON CONFLICT (facility_id) DO UPDATE SET
+            facility_name = EXCLUDED.facility_name,
+            facility_description = EXCLUDED.facility_description,
+            updated_date = EXCLUDED.updated_date
+    """
+    
+    for facility in facilities_data:
+        await pg_db.execute(pg_query, *facility)
+    
+    logger.info(f"Inserted {len(facilities_data)} facilities into PostgreSQL")
+    
+    # Insert into SQL Server
+    sql_query = """
+        MERGE facilities AS target
+        USING (SELECT ? as facility_id, ? as facility_name, ? as facility_description, 
+               ? as facility_type, ? as address, ? as installed_date, ? as beds,
+               ? as city, ? as state, ? as zip_code, ? as phone, ? as active,
+               ? as updated_date, ? as updated_by, ? as region_id, ? as fiscal_month) AS source
+        ON target.facility_id = source.facility_id
+        WHEN MATCHED THEN
+            UPDATE SET facility_name = source.facility_name,
+                      facility_description = source.facility_description,
+                      updated_date = source.updated_date
+        WHEN NOT MATCHED THEN
+            INSERT (facility_id, facility_name, facility_description, facility_type,
+                   address, installed_date, beds, city, state, zip_code, phone,
+                   active, updated_date, updated_by, region_id, fiscal_month)
+            VALUES (source.facility_id, source.facility_name, source.facility_description,
+                   source.facility_type, source.address, source.installed_date, source.beds,
+                   source.city, source.state, source.zip_code, source.phone, source.active,
+                   source.updated_date, source.updated_by, source.region_id, source.fiscal_month);
+    """
+    
+    for facility in facilities_data:
+        await sql_db.execute(sql_query, facility)
+    
+    logger.info(f"Inserted {len(facilities_data)} facilities into SQL Server")
+
+
+async def setup_financial_classes(pg_db: PostgresDatabase, sql_db: SQLServerDatabase, logger):
+    """Setup financial classes"""
+    logger.info("Setting up financial classes...")
+    
+    # Define financial class data
+    financial_classes = [
+        ("COM", "Commercial Insurance", 1, Decimal("0.8500")),
+        ("MED", "Medicaid", 2, Decimal("0.6000")),
+        ("MCR", "Medicare", 3, Decimal("0.7500")),
+        ("PPO", "PPO Insurance", 4, Decimal("0.8000")),
+        ("HMO", "HMO Insurance", 5, Decimal("0.7800")),
+        ("WRK", "Workers Compensation", 6, Decimal("0.9000")),
+        ("OTH", "Other Insurance", 7, Decimal("0.7000")),
+        ("SELF", "Self Pay", 8, Decimal("1.0000")),
+    ]
+    
+    # Setup core standard payers first (for SQL Server foreign key)
+    payers_data = [
+        (1, "Commercial", "CM"),
+        (2, "Medicaid", "MD"),
+        (3, "Medicare", "MC"),
+        (4, "PPO", "PP"),
+        (5, "HMO", "HM"),
+        (6, "Workers Comp", "WC"),
+        (7, "Other", "OT"),
+        (8, "Self Pay", "SP"),
+    ]
+    
+    # Insert payers into SQL Server
+    payer_query = """
+        MERGE core_standard_payers AS target
+        USING (SELECT ? as payer_id, ? as payer_name, ? as payer_code) AS source
+        ON target.payer_id = source.payer_id
+        WHEN NOT MATCHED THEN
+            INSERT (payer_id, payer_name, payer_code)
+            VALUES (source.payer_id, source.payer_name, source.payer_code);
+    """
+    
+    for payer in payers_data:
+        await sql_db.execute(payer_query, payer)
+    
+    logger.info(f"Inserted {len(payers_data)} payers into SQL Server")
+    
+    # Now insert financial classes for each facility
+    for facility_id in range(1, 51):
+        facility_id_str = str(facility_id)
+        
+        for fc_code, fc_name, payer_id, reimb_rate in financial_classes:
+            # PostgreSQL - simplified financial classes
+            pg_query = """
+                INSERT INTO financial_classes (
+                    financial_class_code, financial_class_name, active, created_at
+                ) VALUES ($1, $2, $3, $4)
+                ON CONFLICT (financial_class_code) DO NOTHING
+            """
+            await pg_db.execute(pg_query, fc_code, fc_name, True, datetime.now())
+            
+            # SQL Server - facility-specific financial classes
+            sql_query = """
+                MERGE facility_financial_classes AS target
+                USING (SELECT ? as facility_id, ? as financial_class_id, ? as financial_class_name,
+                       ? as payer_id, ? as reimbursement_rate, ? as processing_priority,
+                       ? as auto_posting_enabled, ? as active, ? as effective_date,
+                       ? as created_at, ? as HCC) AS source
+                ON target.facility_id = source.facility_id AND target.financial_class_id = source.financial_class_id
+                WHEN NOT MATCHED THEN
+                    INSERT (facility_id, financial_class_id, financial_class_name, payer_id,
+                           reimbursement_rate, processing_priority, auto_posting_enabled, active,
+                           effective_date, created_at, HCC)
+                    VALUES (source.facility_id, source.financial_class_id, source.financial_class_name,
+                           source.payer_id, source.reimbursement_rate, source.processing_priority,
+                           source.auto_posting_enabled, source.active, source.effective_date,
+                           source.created_at, source.HCC);
+            """
+            
+            await sql_db.execute(
+                sql_query,
+                facility_id_str,  # facility_id
+                fc_code,  # financial_class_id
+                fc_name,  # financial_class_name
+                payer_id,  # payer_id
+                reimb_rate,  # reimbursement_rate
+                "normal",  # processing_priority
+                True,  # auto_posting_enabled
+                True,  # active
+                datetime.now().date(),  # effective_date
+                datetime.now(),  # created_at
+                "N/A",  # HCC
+            )
+    
+    logger.info("Inserted financial classes into both databases")
+
+
+async def setup_rvu_data(sql_db: SQLServerDatabase, logger):
+    """Setup RVU data in SQL Server"""
+    logger.info("Setting up RVU data...")
+    
+    # Common procedure codes with their RVU values
+    rvu_data = [
+        # Office visits
+        ("99213", Decimal("1.30"), "Office visit, established patient, low complexity"),
+        ("99214", Decimal("2.00"), "Office visit, established patient, moderate complexity"),
+        ("99215", Decimal("2.80"), "Office visit, established patient, high complexity"),
+        ("99203", Decimal("1.60"), "Office visit, new patient, low complexity"),
+        ("99204", Decimal("2.60"), "Office visit, new patient, moderate complexity"),
+        ("99205", Decimal("3.50"), "Office visit, new patient, high complexity"),
+        
+        # Emergency visits
+        ("99282", Decimal("1.00"), "Emergency department visit, low complexity"),
+        ("99283", Decimal("1.80"), "Emergency department visit, moderate complexity"),
+        ("99284", Decimal("3.20"), "Emergency department visit, high complexity"),
+        ("99285", Decimal("5.00"), "Emergency department visit, very high complexity"),
+        
+        # Lab procedures
+        ("36415", Decimal("0.25"), "Venipuncture"),
+        ("85025", Decimal("0.30"), "Complete blood count"),
+        ("80053", Decimal("0.50"), "Comprehensive metabolic panel"),
+        ("80061", Decimal("0.40"), "Lipid panel"),
+        
+        # Radiology
+        ("71020", Decimal("0.70"), "Chest X-ray, 2 views"),
+        ("71030", Decimal("0.90"), "Chest X-ray, complete"),
+        ("73060", Decimal("0.60"), "Knee X-ray, 2 views"),
+        ("73070", Decimal("0.80"), "Ankle X-ray, 2 views"),
+        
+        # Surgery
+        ("29881", Decimal("8.50"), "Arthroscopy, knee, surgical"),
+        ("29882", Decimal("10.20"), "Arthroscopy, knee, with meniscectomy"),
+        ("64483", Decimal("4.50"), "Injection, lumbar facet joint"),
+        ("64484", Decimal("5.20"), "Injection, lumbar facet joint, additional"),
+        
+        # Mental health
+        ("90834", Decimal("1.80"), "Psychotherapy, 45 minutes"),
+        ("90837", Decimal("2.40"), "Psychotherapy, 60 minutes"),
+        ("90853", Decimal("1.20"), "Group psychotherapy"),
+        ("96116", Decimal("2.50"), "Neuropsychological testing"),
+        
+        # Preventive care
+        ("G0438", Decimal("2.30"), "Annual wellness visit, initial"),
+        ("G0439", Decimal("2.00"), "Annual wellness visit, subsequent"),
+        ("99490", Decimal("1.50"), "Chronic care management, 20 minutes"),
+        ("99491", Decimal("2.00"), "Chronic care management, 30 minutes"),
+    ]
+    
+    # Insert RVU data
+    rvu_query = """
+        MERGE rvu_data AS target
+        USING (SELECT ? as procedure_code, ? as work_rvu, ? as description,
+               ? as effective_date, ? as active) AS source
+        ON target.procedure_code = source.procedure_code
+        WHEN MATCHED THEN
+            UPDATE SET work_rvu = source.work_rvu,
+                      description = source.description,
+                      effective_date = source.effective_date
+        WHEN NOT MATCHED THEN
+            INSERT (procedure_code, work_rvu, description, effective_date, active)
+            VALUES (source.procedure_code, source.work_rvu, source.description,
+                   source.effective_date, source.active);
+    """
+    
+    for proc_code, rvu_value, description in rvu_data:
+        await sql_db.execute(
+            rvu_query,
+            proc_code,
+            rvu_value,
+            description,
+            datetime.now().date(),
+            True
+        )
+    
+    logger.info(f"Inserted {len(rvu_data)} RVU records into SQL Server")
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Generate sample claims data")
-    parser.add_argument(
-        "--claims",
-        type=int,
-        default=100000,
-        help="Number of claims to generate (default: 100000)",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=1000,
-        help="Batch size for database operations (default: 1000)",
-    )
-
-    args = parser.parse_args()
-
-    # Run the generator
-    asyncio.run(generate_and_load_sample_data(args.claims, args.batch_size))
+    """Allow the script to be run standalone"""
+    asyncio.run(setup_reference_data())
