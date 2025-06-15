@@ -31,7 +31,7 @@
                 facility_region
                     columns: region_id (int), region_name
                 facilities
-                    columns: facility_id (int), facility_name (varchar (100)), installed_date (datetime), beds (int), city (varchar (24)), state (char (2)), updated_date (datetime), updated_by (int), region_id (key back to facility_region), fiscal_month (int)
+                    columns: facility_id (int), facility_name (varchar (100)), facility_type (varchar (50)), address (varchar (200)), installed_date (datetime), beds (int), city (varchar (24)), state (char (2)), zip_code (varchar (10)), phone (varchar (20)), active (bit), updated_date (datetime), updated_by (int), region_id (key back to facility_region), fiscal_month (int)
                 facility_financial_classes
                     columns: facility_id (key back to facility_id), financial_class_id (varchar (10)), financial_class_name (varchar (100)), payer_id (key back to core_standard_payers.payer_id), reimbursement_rate (decimal(5,4)), processing_priority(vharchar(10)), auto_posting_enabled(bit), active(bit), effective_date(date), end_date(date), created_at(datetime), HCC (char (3))
                 facility_place_of_service
