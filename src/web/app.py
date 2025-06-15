@@ -12,6 +12,7 @@ from ..monitoring.metrics import metrics
 from ..utils.tracing import start_trace, start_trace_from_traceparent
 from .rate_limit import RateLimiter
 from .status import batch_status, processing_status
+from .compliance import create_compliance_router
 
 try:
     from starlette.middleware.base import BaseHTTPMiddleware
@@ -107,6 +108,7 @@ def create_app(
         "/batch_status": {"auditor", "user", "admin"},
         "/health": {"auditor", "user", "admin"},
         "/readiness": {"auditor", "user", "admin"},
+        "/compliance/dashboard": {"auditor", "user", "admin"},
         "/metrics": {"admin"},
         "/profiling/start": {"admin"},
         "/profiling/stop": {"admin"},
@@ -234,6 +236,11 @@ def create_app(
     async def shutdown() -> None:
         await sql.close()
         await pg.close()
+
+    compliance_router = create_compliance_router(sql, _check_key, _check_role)
+    for (method, path), handler in compliance_router.routes.items():
+        if method == "GET":
+            app.get(path)(handler)
 
     @app.get("/api/failed_claims")
     async def api_failed_claims(

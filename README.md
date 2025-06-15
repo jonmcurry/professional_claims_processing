@@ -96,7 +96,8 @@ uvicorn src.web.app:app --reload
 The `/failed_claims` page lists recent failed claims and the `/status` endpoint
 returns processing counts so you can display a real-time indicator in the UI.
 Database and query metrics are exposed from the `/metrics` endpoint for
-operational monitoring. Full API documentation is available at
+operational monitoring. The `/compliance/dashboard` route summarizes
+audit events and data retention status. Full API documentation is available at
 `/docs` when the server is running. The raw OpenAPI specification can be
 downloaded from `/openapi.json`.
 

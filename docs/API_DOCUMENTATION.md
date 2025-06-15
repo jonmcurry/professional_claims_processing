@@ -10,8 +10,13 @@ The main API endpoints include:
 - `/status` – processing statistics for the current run.
 - `/batch_status` – details about the active batch.
 - `/health` and `/readiness` – service health checks.
+- `/compliance/dashboard` – summary of audit logs and retention status.
 
 Authentication requires an API key in the `X-API-Key` header. Example request using `curl`:
 ```bash
 curl -H "X-API-Key: <key>" http://<host>:8000/status
 ```
+
+### Compliance Dashboard Screenshot
+
+![Compliance Dashboard](images/compliance_dashboard.png)
