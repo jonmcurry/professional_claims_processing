@@ -449,16 +449,32 @@ BEGIN
 END;
 GO
 
+-- Create the stored procedure in a separate batch after table creation
+IF OBJECT_ID('sp_archive_failed_claims', 'P') IS NOT NULL
+    DROP PROCEDURE sp_archive_failed_claims;
+GO
+
 CREATE PROCEDURE sp_archive_failed_claims @cutoff DATETIME2
 AS
 BEGIN
     SET NOCOUNT ON;
-    INSERT INTO archived_failed_claims SELECT * FROM failed_claims WHERE failed_at < @cutoff;
-    DELETE FROM failed_claims WHERE failed_at < @cutoff;
+    
+    -- Ensure the archived_failed_claims table exists before proceeding
+    IF OBJECT_ID('archived_failed_claims', 'U') IS NOT NULL
+    BEGIN
+        INSERT INTO archived_failed_claims 
+        SELECT * FROM failed_claims WHERE failed_at < @cutoff;
+        
+        DELETE FROM failed_claims WHERE failed_at < @cutoff;
+    END
+    ELSE
+    BEGIN
+        RAISERROR('archived_failed_claims table does not exist. Cannot archive claims.', 16, 1);
+    END
 END
 GO
 
-GO
+-- Create indexes first, then move the partition rebuild after all other statements
 CREATE INDEX idx_sql_claims_claim_id ON claims (claim_id);
 GO
 CREATE INDEX idx_sql_claims_patient_account ON claims (patient_account_number);
@@ -485,8 +501,13 @@ CREATE INDEX ix_unresolved_failed_claims
     -- Use ISNULL to treat NULL values as unresolved while avoiding OR.
     WHERE ISNULL(resolution_status, '') <> 'resolved';
 GO
-ALTER TABLE archived_failed_claims REBUILD PARTITION = ALL
-    WITH (DATA_COMPRESSION = PAGE);
+
+-- Only rebuild partition if the table exists
+IF OBJECT_ID('archived_failed_claims', 'U') IS NOT NULL
+BEGIN
+    ALTER TABLE archived_failed_claims REBUILD PARTITION = ALL
+        WITH (DATA_COMPRESSION = PAGE);
+END
 GO
 
 CREATE VIEW dbo.v_facility_totals WITH SCHEMABINDING AS
