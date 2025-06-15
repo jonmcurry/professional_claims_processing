@@ -1,9 +1,11 @@
 import asyncio
 import contextlib
 import gc
+import json
 import os
 import time
 import weakref
+from pathlib import Path
 from typing import Any, Awaitable, Dict, Iterable, List, Optional, Set
 
 import psutil
@@ -399,6 +401,12 @@ class ClaimsPipeline:
         self.semaphore_manager = DynamicSemaphoreManager(cfg)
         self._concurrency_monitor_task: Optional[asyncio.Task] = None
 
+        # Service health monitoring
+        self.mode = "normal"
+        self.health_state = {"postgres": True, "sqlserver": True, "redis": True}
+        self.local_queue_path = Path("claim_backup_queue.jsonl")
+        self._recovery_task: Optional[asyncio.Task] = None
+
     async def startup_optimized(self) -> None:
         """Ultra-optimized startup with dynamic concurrency management."""
         startup_start = time.perf_counter()
@@ -555,6 +563,9 @@ class ClaimsPipeline:
         self._concurrency_monitor_task = asyncio.create_task(
             self._concurrency_monitor_loop()
         )
+
+        # Start dependency recovery monitoring
+        self._recovery_task = asyncio.create_task(self._recovery_loop())
 
         monitoring_time = time.perf_counter() - monitoring_start
         self._preparation_stats["monitoring_time"] = monitoring_time
@@ -741,11 +752,58 @@ class ClaimsPipeline:
             metrics.inc(f"errors_{category.value}")
             return default
 
+    async def _check_services_health(self) -> bool:
+        """Check dependent service health and update mode."""
+        pg_ok = await self.pg.health_check() if hasattr(self.pg, "health_check") else True
+        sql_ok = await self.sql.health_check() if hasattr(self.sql, "health_check") else True
+        redis_ok = await self.distributed_cache.health_check() if self.distributed_cache else True
+
+        self.health_state.update({"postgres": pg_ok, "sqlserver": sql_ok, "redis": redis_ok})
+
+        metrics.set("postgres_available", 1.0 if pg_ok else 0.0)
+        metrics.set("sqlserver_available", 1.0 if sql_ok else 0.0)
+        metrics.set("redis_available", 1.0 if redis_ok else 0.0)
+
+        all_ok = pg_ok and sql_ok and redis_ok
+        if not all_ok and self.mode != "backup":
+            self.mode = "backup"
+            metrics.set("pipeline_mode_backup", 1.0)
+            self.logger.error("Dependencies unavailable - switching to backup mode")
+        elif all_ok and self.mode == "backup":
+            self.mode = "normal"
+            metrics.set("pipeline_mode_backup", 0.0)
+            self.logger.info("Dependencies healthy - resuming normal mode")
+        return all_ok
+
+    async def _queue_claims_locally(self, claims: List[Dict[str, Any]]) -> None:
+        """Append claims to a local disk queue."""
+        if not claims:
+            return
+        with self.local_queue_path.open("a", encoding="utf-8") as fh:
+            for claim in claims:
+                fh.write(json.dumps(claim) + "\n")
+        metrics.inc("claims_queued_backup", len(claims))
+
+    async def _recovery_loop(self) -> None:
+        """Periodically check if dependencies have recovered."""
+        while True:
+            await asyncio.sleep(10)
+            await self._run_safely(
+                self._check_services_health(),
+                "Recovery health check error",
+                stage="recovery_check",
+            )
+
     async def process_batch_ultra_optimized(self) -> Dict[str, Any]:
         """Ultra-optimized batch processing with dynamic concurrency management."""
         if not self.request_filter:
             self.request_filter = RequestContextFilter()
             self.logger.addFilter(self.request_filter)
+
+        await self._check_services_health()
+        if self.mode == "backup":
+            self.logger.warning("Batch skipped due to backup mode")
+            return {}
 
         trace_id = start_trace()
         batch_start = time.perf_counter()
@@ -1975,6 +2033,13 @@ class ClaimsPipeline:
             except asyncio.CancelledError:
                 pass
 
+        if self._recovery_task:
+            self._recovery_task.cancel()
+            try:
+                await self._recovery_task
+            except asyncio.CancelledError:
+                pass
+
         # Perform final cleanup
         await self._perform_memory_cleanup()
 
@@ -1989,6 +2054,12 @@ class ClaimsPipeline:
     async def process_claim(self, claim: Dict[str, Any]) -> None:
         """Process single claim with memory management and dynamic concurrency."""
         # Use memory pool for single claim processing
+        await self._check_services_health()
+        if self.mode == "backup":
+            await self._queue_claims_locally([claim])
+            self.logger.warning("Queued claim locally due to backup mode", extra={"claim_id": claim.get("claim_id")})
+            return {"status": "queued"}
+
         correlation_id_var.set(claim.get("correlation_id", ""))
         pooled_claim = self._memory_pool.acquire("claims", dict)
         try:
@@ -2066,6 +2137,12 @@ class ClaimsPipeline:
 
     async def process_claims_batch(self, claims: List[Dict[str, Any]]) -> List[tuple]:
         """Process a batch of claims and return results with dynamic concurrency."""
+        await self._check_services_health()
+        if self.mode == "backup":
+            await self._queue_claims_locally(claims)
+            self.logger.warning("Queued batch locally due to backup mode")
+            return []
+
         # Use memory pooling for batch processing
         batch_objects = None
         try:
