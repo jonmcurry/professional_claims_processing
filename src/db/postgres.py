@@ -633,6 +633,47 @@ class PostgresDatabase(BaseDatabase):
             query, *params, use_replica=use_replica, traceparent=traceparent
         )
 
+    async def execute(
+        self, query: str, *params: Any, traceparent: str | None = None
+    ) -> int:
+        """Execute a single statement and return affected row count."""
+        self._operation_count += 1
+
+        if self._operation_count % self._memory_check_frequency == 0:
+            await self._periodic_memory_check()
+
+        if not await self.circuit_breaker.allow():
+            raise CircuitBreakerOpenError("Postgres circuit open")
+
+        await self._ensure_pool()
+        assert self.pool
+
+        query = self._with_traceparent(query, traceparent)
+
+        start = time.perf_counter()
+        async with self.pool.acquire() as conn:
+            try:
+                result = await conn.execute(query, *params)
+                duration = (time.perf_counter() - start) * 1000
+                metrics.inc("postgres_query_ms", duration)
+                metrics.inc("postgres_query_count")
+                latencies.record("postgres_query", duration)
+                if duration > self.cfg.threshold_ms:
+                    logger.warning(
+                        "slow_query",
+                        extra={"query": query, "duration_ms": duration},
+                    )
+                await self.circuit_breaker.record_success()
+
+                try:
+                    return int(result.split()[-1])
+                except Exception:
+                    return 0
+
+            except Exception as e:
+                await self.circuit_breaker.record_failure()
+                raise QueryError(str(e)) from e
+
     async def execute_many(
         self,
         query: str,
@@ -649,6 +690,19 @@ class PostgresDatabase(BaseDatabase):
             batch_size=1000,
             traceparent=traceparent,
         )
+
+    async def copy_records(
+        self, table: str, columns: Iterable[str], records: Iterable[Iterable[Any]]
+    ) -> int:
+        """Insert multiple records using execute_many."""
+        rows = list(records)
+        if not rows:
+            return 0
+
+        placeholders = ", ".join(f"${i + 1}" for i in range(len(columns)))
+        query = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})"
+        inserted = await self.execute_many(query, rows)
+        return inserted
 
     async def close_with_cleanup(self) -> None:
         """Enhanced close with memory cleanup."""
