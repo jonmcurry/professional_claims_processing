@@ -421,7 +421,30 @@ ON ps_failed_at(failed_at);
 
 -- Procedure to archive old failed claims
 IF OBJECT_ID('archived_failed_claims', 'U') IS NULL
-    SELECT * INTO archived_failed_claims FROM failed_claims WHERE 1 = 0;
+    CREATE TABLE archived_failed_claims (
+        claim_id VARCHAR(50) NOT NULL,
+        batch_id VARCHAR(50) NULL,
+        facility_id VARCHAR(20) NULL,
+        patient_account_number VARCHAR(50) NULL,
+        original_data NVARCHAR(MAX) NULL,
+        failure_reason NVARCHAR(1000) NOT NULL,
+        failure_category VARCHAR(50) NOT NULL,
+        processing_stage VARCHAR(50) NOT NULL,
+        failed_at DATETIME2(7) NULL,
+        repair_suggestions NVARCHAR(MAX) NULL,
+        resolution_status VARCHAR(20) NULL,
+        assigned_to VARCHAR(100) NULL,
+        resolved_at DATETIME2(7) NULL,
+        resolution_notes NVARCHAR(2000) NULL,
+        resolution_action VARCHAR(50) NULL,
+        error_pattern_id VARCHAR(50) NULL,
+        priority_level VARCHAR(10) NULL,
+        impact_level VARCHAR(10) NULL,
+        potential_revenue_loss DECIMAL(12,2) NULL,
+        created_at DATETIME2(7) NULL,
+        updated_at DATETIME2(7) NULL,
+        coder_id VARCHAR(50)
+    );
 GO
 
 CREATE PROCEDURE sp_archive_failed_claims @cutoff DATETIME2
