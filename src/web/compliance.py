@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, Tuple
 
 from fastapi import Header, Request
 
 from ..maintenance.enforce_retention_policy import ARCHIVE_PATH, RETENTION_YEARS
+from ..analysis.failure_patterns import top_failure_reasons
+from ..analysis.revenue import (
+    calculate_potential_revenue_loss,
+    revenue_loss_by_category,
+)
 
 
 class SimpleRouter:
@@ -58,11 +63,37 @@ def create_compliance_router(
                 except Exception:
                     latest = None
 
+        failure_patterns = await top_failure_reasons(db, limit=5)
+
+        since = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%d")
+        trend_rows = await db.fetch(
+            "SELECT summary_date, total_claims_processed, total_claims_failed "
+            "FROM daily_processing_summary WHERE summary_date >= ? ORDER BY summary_date",
+            since,
+        )
+        processing_trends = [
+            {
+                "date": row.get("summary_date"),
+                "processed": row.get("total_claims_processed", 0),
+                "failed": row.get("total_claims_failed", 0),
+            }
+            for row in trend_rows
+        ]
+
+        total_revenue = await calculate_potential_revenue_loss(db)
+        revenue_by_category = await revenue_loss_by_category(db)
+
         return {
             "total_audit_events": count,
             "archive_files": len(files),
             "latest_archive": latest,
             "retention_years": RETENTION_YEARS,
+            "failure_patterns": failure_patterns,
+            "processing_trends": processing_trends,
+            "revenue_impact": {
+                "total": total_revenue,
+                "by_category": revenue_by_category,
+            },
         }
 
     return router
