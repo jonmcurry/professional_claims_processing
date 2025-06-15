@@ -263,6 +263,12 @@ CREATE TABLE claims (
     updated_at DATETIME2(7) NULL
 );
 GO
+ALTER TABLE claims
+    ADD CONSTRAINT fk_claims_financial_class FOREIGN KEY (financial_class_id)
+        REFERENCES facility_financial_classes(financial_class_id);
+ALTER TABLE claims
+    ADD CONSTRAINT fk_claims_secondary_insurance FOREIGN KEY (secondary_insurance)
+        REFERENCES facility_financial_classes(financial_class_id);
 
 CREATE TABLE claims_diagnosis (
     patient_account_number VARCHAR(50) NOT NULL,
@@ -424,6 +430,10 @@ GO
 CREATE INDEX idx_sql_claims_claim_id ON claims (claim_id);
 GO
 CREATE INDEX idx_sql_claims_patient_account ON claims (patient_account_number);
+GO
+CREATE INDEX idx_sql_claims_financial_class_id ON claims (financial_class_id);
+GO
+CREATE INDEX idx_sql_claims_secondary_insurance ON claims (secondary_insurance);
 GO
 CREATE INDEX idx_sql_failed_claims_claim_id ON failed_claims (claim_id);
 GO
