@@ -459,11 +459,15 @@ ALTER TABLE archived_failed_claims REBUILD PARTITION = ALL
 GO
 
 CREATE VIEW dbo.v_facility_totals WITH SCHEMABINDING AS
-SELECT facility_id, SUM(total_charge_amount) AS total_charge, COUNT_BIG(*) AS cnt
+SELECT facility_id,
+       SUM(ISNULL(total_charge_amount, 0)) AS total_charge,
+       COUNT_BIG(*) AS cnt
 FROM dbo.daily_processing_summary
 GROUP BY facility_id;
 GO
-CREATE UNIQUE CLUSTERED INDEX cix_v_facility_totals ON dbo.v_facility_totals (facility_id);
+DROP INDEX IF EXISTS cix_v_facility_totals ON dbo.v_facility_totals;
+CREATE UNIQUE CLUSTERED INDEX cix_v_facility_totals
+    ON dbo.v_facility_totals (facility_id);
 GO
 
 
