@@ -79,7 +79,7 @@ CREATE TABLE facility_region (
 GO
 
 CREATE TABLE facilities (
-    facility_id INT PRIMARY KEY,
+    facility_id VHARCHAR(50) PRIMARY KEY,
     facility_name VARCHAR(100),
     facility_type VARCHAR(50),
     address VARCHAR(200),
@@ -112,7 +112,7 @@ CREATE TABLE core_standard_payers (
 GO
 
 CREATE TABLE facility_financial_classes (
-    facility_id INT,
+    facility_id VARCHAR(20),
     financial_class_id VARCHAR(10) PRIMARY KEY,
     financial_class_name VARCHAR(100),
     payer_id INT,
@@ -141,7 +141,7 @@ CREATE INDEX idx_facility_financial_classes_payer_id
 GO
 
 CREATE TABLE facility_place_of_service (
-    facility_id INT,
+    facility_id VARCHAR(20),
     place_of_service VARCHAR(2),
     place_of_service_name VARCHAR(30),
     origin INT
@@ -159,7 +159,7 @@ GO
 CREATE TABLE facility_departments (
     department_code VARCHAR(10),
     department_name VARCHAR(50),
-    facility_id INT,
+    facility_id VARCHAR(20),
     active BIT,
     created_at DATETIME,
     updated_at DATETIME
@@ -175,7 +175,7 @@ CREATE INDEX idx_facility_departments_facility_id
 GO
 
 CREATE TABLE facility_coders (
-    facility_id INT,
+    facility_id VARCHAR(20),
     coder_id VARCHAR(50) PRIMARY KEY,
     coder_last_name VARCHAR(50),
     coder_first_name VARCHAR(50)

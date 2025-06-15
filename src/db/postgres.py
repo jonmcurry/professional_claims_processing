@@ -282,14 +282,21 @@ class PostgresDatabase(BaseDatabase):
         if self._operation_count % self._memory_check_frequency == 0:
             await self._periodic_memory_check()
 
-        # Check memory before large operations
-        if "LIMIT" not in query.upper() and "TOP" not in query.upper():
-            # For unlimited queries, add memory protection
-            query = self._add_memory_protection_to_query(query)
+        if not await self.circuit_breaker.allow():
+            raise CircuitBreakerOpenError("Postgres circuit open")
+
+        await self._ensure_pool()
+        
+        # Select pool based on use_replica setting
+        pool = (
+            self.replica_pool if use_replica and self.replica_pool 
+            else self.pool
+        )
+        assert pool
 
         query = self._with_traceparent(query, traceparent)
 
-        # Check cache first with memory-aware eviction
+        # Check cache first with memory management
         cache_key = f"query:{query}:{str(params)}"
         cached = await self._get_from_cache_with_memory_check(cache_key)
         if cached is not None:
@@ -300,83 +307,121 @@ class PostgresDatabase(BaseDatabase):
         result_container = self._memory_pool.acquire("pg_results", list)
 
         try:
-            if not await self.circuit_breaker.allow():
-                raise CircuitBreakerOpenError("Postgres circuit open")
-
-            await self._ensure_pool()
-            assert self.pool
-
-            # Use replica for read operations when available
-            pool = (
-                self.replica_pool if (use_replica and self.replica_pool) else self.pool
-            )
-            assert pool
-
+            initial_memory = self._get_process_memory()
             start = time.perf_counter()
+            
             async with pool.acquire() as conn:
-                # Monitor connection memory
-                conn_id = id(conn)
-                initial_memory = self._get_process_memory()
-                self._connection_memory_tracking[conn_id] = initial_memory
+                try:
+                    # Execute query and fetch results
+                    records = await conn.fetch(query, *params)
+                    
+                    # Convert records to dictionaries with memory management
+                    result_container.clear()
+                    for row in records:
+                        row_dict = self._memory_pool.acquire("pg_row_dict", dict)
+                        row_dict.clear()
+                        row_dict.update(dict(row))
+                        result_container.append(row_dict)
 
-                rows = await conn.fetch(query, *params)
+                    duration = (time.perf_counter() - start) * 1000
+                    metrics.inc("postgres_query_ms", duration)
+                    metrics.inc("postgres_query_count")
+                    latencies.record("postgres_query", duration)
+                    record_query(query, duration)
+                    
+                    if duration > self.cfg.threshold_ms:
+                        logger.warning(
+                            "slow_query",
+                            extra={"query": query, "duration_ms": duration},
+                        )
+                    
+                    await self.circuit_breaker.record_success()
 
-                # Check memory growth
-                final_memory = self._get_process_memory()
-                memory_growth = final_memory - initial_memory
+                    # Check memory growth
+                    final_memory = self._get_process_memory()
+                    memory_growth = final_memory - initial_memory
 
-                if memory_growth > 100:  # More than 100MB growth
-                    print(
-                        f"Warning: High memory growth in query: {memory_growth:.1f}MB"
-                    )
-                    # Trigger emergency cleanup
-                    await self._emergency_memory_cleanup()
+                    if memory_growth > 50:  # More than 50MB growth
+                        print(
+                            f"Warning: PostgreSQL query used {memory_growth:.1f}MB memory"
+                        )
+                        metrics.inc("postgres_high_memory_queries")
 
-            duration = (time.perf_counter() - start) * 1000
-            metrics.inc("postgres_query_ms", duration)
-            metrics.inc("postgres_query_count")
-            latencies.record("postgres_query", duration)
-            record_query(query, duration)
-            if duration > self.cfg.threshold_ms:
-                logger.warning(
-                    "slow_query",
-                    extra={"query": query, "duration_ms": duration},
-                )
-            await self.circuit_breaker.record_success()
+                    # Cache results with memory management
+                    await self._cache_with_memory_management(cache_key, result_container.copy())
+                    metrics.inc("postgres_cache_misses")
 
-            # Convert to dictionaries using memory pool
-            result_container.clear()
-            for row in rows:
-                row_dict = self._memory_pool.acquire("pg_row_dict", dict)
-                row_dict.clear()
-                row_dict.update(dict(row))
-                result_container.append(row_dict)
+                    return result_container
 
-            # Cache results with memory management
-            await self._cache_with_memory_management(cache_key, result_container.copy())
-            metrics.inc("postgres_cache_misses")
+                except Exception as e:
+                    await self.circuit_breaker.record_failure()
+                    
+                    # Handle memory-related exceptions
+                    if "memory" in str(e).lower() or "out of" in str(e).lower():
+                        print(f"Memory-related database error: {e}")
+                        metrics.inc("database_memory_errors")
+                        # Trigger cleanup and retry with smaller batch
+                        await self._emergency_memory_cleanup()
 
-            return result_container
+                        # Retry with limited results
+                        limited_query = self._add_memory_protection_to_query(query, limit=1000)
+                        return await self.fetch_optimized_with_memory_management(
+                            limited_query, *params, use_replica=use_replica, traceparent=traceparent
+                        )
 
-        except Exception as e:
-            # Handle memory-related exceptions
-            if "memory" in str(e).lower() or "out of" in str(e).lower():
-                print(f"Memory-related database error: {e}")
-                metrics.inc("database_memory_errors")
-                # Trigger cleanup and retry with smaller batch
-                await self._emergency_memory_cleanup()
+                    raise QueryError(str(e)) from e
 
-                # Retry with limited results
-                limited_query = self._add_memory_protection_to_query(query, limit=1000)
-                return await self.fetch_optimized(
-                    limited_query, *params, use_replica=use_replica
-                )
-
-            await self.circuit_breaker.record_failure()
-            raise QueryError(str(e)) from e
         finally:
             # Return container to pool
             self._memory_pool.release("pg_results", result_container)
+
+    async def _get_from_cache_with_memory_check(self, cache_key: str) -> Optional[Any]:
+        """Get from cache with memory management check."""
+        # Check if cache memory usage is too high
+        if self._current_cache_memory > self._result_cache_max_memory:
+            await self._cleanup_cache_by_memory()
+
+        return self.query_cache.get(cache_key)
+
+    async def _emergency_memory_cleanup(self) -> None:
+        """Emergency memory cleanup operations."""
+        print("PostgreSQL: Emergency memory cleanup initiated")
+
+        # Clear query cache
+        if hasattr(self.query_cache, "store"):
+            cache_size = len(self.query_cache.store)
+            self.query_cache.store.clear()
+            self._current_cache_memory = 0
+            print(f"Emergency: cleared {cache_size} cached queries")
+
+        # Clear prepared statement cache for unused statements
+        current_time = time.time()
+        unused_statements = []
+
+        for stmt_name in list(self._prepared.keys()):
+            # Remove statements not used recently (this is simplified)
+            if stmt_name.startswith("temp_") or "test_" in stmt_name:
+                unused_statements.append(stmt_name)
+
+        for stmt_name in unused_statements:
+            del self._prepared[stmt_name]
+            self._prepared_statements.pop(stmt_name, None)
+
+        # Clear memory pool
+        if hasattr(self._memory_pool, "cleanup_all"):
+            pool_cleanup_stats = self._memory_pool.cleanup_all()
+            print(f"Emergency: cleared memory pools: {pool_cleanup_stats}")
+
+        # Clear connection memory tracking
+        self._connection_memory_tracking.clear()
+
+        # Force garbage collection
+        import gc
+        collected = gc.collect()
+
+        metrics.inc("database_emergency_cleanups")
+        metrics.set("emergency_gc_collected", collected)
+        print(f"Emergency cleanup completed, collected {collected} objects")
 
     def _add_memory_protection_to_query(self, query: str, limit: int = 50000) -> str:
         """Add memory protection limits to queries."""
@@ -420,54 +465,14 @@ class PostgresDatabase(BaseDatabase):
         # Clean prepared statements cache
         self._cleanup_unused_prepared_statements()
 
+        # Clean memory pool periodically
+        if hasattr(self._memory_pool, "cleanup_unused"):
+            self._memory_pool.cleanup_unused()
+
         # Schedule garbage collection
         collected = gc.collect()
         metrics.set("postgres_routine_gc_collected", collected)
-
-    async def _emergency_memory_cleanup(self) -> None:
-        """Emergency memory cleanup for database operations."""
-        print("PostgreSQL: Emergency memory cleanup initiated")
-
-        # Clear query cache
-        if hasattr(self.query_cache, "store"):
-            cache_size = len(self.query_cache.store)
-            self.query_cache.store.clear()
-            self._current_cache_memory = 0
-            print(f"Emergency: cleared {cache_size} cached queries")
-
-        # Clear prepared statement cache for unused statements
-        current_time = time.time()
-        unused_statements = []
-
-        for stmt_name in list(self._prepared.keys()):
-            # Remove statements not used recently (this is simplified)
-            if stmt_name.startswith("temp_") or "test_" in stmt_name:
-                unused_statements.append(stmt_name)
-
-        for stmt_name in unused_statements:
-            del self._prepared[stmt_name]
-            self._prepared_statements.pop(stmt_name, None)
-
-        # Clear memory pool
-        pool_cleanup_stats = self._memory_pool.cleanup_all()
-        print(f"Emergency: cleared memory pools: {pool_cleanup_stats}")
-
-        # Clear connection memory tracking
-        self._connection_memory_tracking.clear()
-
-        # Force garbage collection
-        collected = gc.collect()
-
-        metrics.inc("database_emergency_cleanups")
-        metrics.set("emergency_gc_collected", collected)
-
-    async def _get_from_cache_with_memory_check(self, cache_key: str) -> Optional[Any]:
-        """Get from cache with memory usage check."""
-        # Check if cache memory usage is too high
-        if self._current_cache_memory > self._result_cache_max_memory:
-            await self._cleanup_cache_by_memory()
-
-        return self.query_cache.get(cache_key)
+        print("Performed routine PostgreSQL memory cleanup")
 
     async def _cache_with_memory_management(self, cache_key: str, data: Any) -> None:
         """Cache data with memory management."""
@@ -596,6 +601,40 @@ class PostgresDatabase(BaseDatabase):
                 await self._emergency_memory_cleanup()
 
         return total_processed
+
+    async def execute_many_optimized(
+        self,
+        query: str,
+        params_seq: Iterable[Iterable[Any]],
+        *,
+        concurrency: int = 4,
+        batch_size: int = 1000,
+    ) -> int:
+        """Optimized execute_many implementation."""
+        params_list = list(params_seq)
+        if not params_list:
+            return 0
+
+        if not await self.circuit_breaker.allow():
+            raise CircuitBreakerOpenError("Postgres circuit open")
+
+        await self._ensure_pool()
+        assert self.pool
+
+        total_affected = 0
+        
+        try:
+            async with self.pool.acquire() as conn:
+                # Use executemany for better performance
+                result = await conn.executemany(query, params_list)
+                total_affected = len(params_list)  # Estimate
+                await self.circuit_breaker.record_success()
+                
+        except Exception as e:
+            await self.circuit_breaker.record_failure()
+            raise QueryError(str(e)) from e
+
+        return total_affected
 
     async def _calculate_memory_aware_batch_size(self, total_records: int) -> int:
         """Calculate batch size based on available memory."""
@@ -728,7 +767,8 @@ class PostgresDatabase(BaseDatabase):
         self._connection_memory_tracking.clear()
 
         # Clear memory pool
-        self._memory_pool.cleanup_all()
+        if hasattr(self._memory_pool, "cleanup_all"):
+            self._memory_pool.cleanup_all()
 
         # Close connections
         if self.pool:

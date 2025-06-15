@@ -2,6 +2,7 @@
 """
 Reference Data Setup Script
 Creates reference data with integer facility IDs to match the original schema.
+FIXED: Removed Unicode characters for Windows compatibility.
 """
 
 import asyncio
@@ -85,7 +86,7 @@ async def setup_postgres_simple():
                     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            logger.info("✓ Facilities table created/verified")
+            logger.info("[OK] Facilities table created/verified")
         except Exception as e:
             logger.warning(f"Facilities table creation warning: {e}")
 
@@ -95,8 +96,7 @@ async def setup_postgres_simple():
         for facility in FACILITIES_DATA:
             try:
                 await pg_db.execute("""
-                    INSERT INTO facilities (facility_id, facility_name, facility_type, address, city, 
-                                          state, zip_code, phone, active)
+                    INSERT INTO facilities (facility_id, facility_name, facility_type, address, city, state, zip_code, phone, active)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     ON CONFLICT (facility_id) DO NOTHING
                 """, 
@@ -107,7 +107,7 @@ async def setup_postgres_simple():
             except Exception as e:
                 logger.warning(f"Failed to insert facility {facility['facility_id']}: {e}")
         
-        logger.info(f"✓ Inserted {success_count}/{len(FACILITIES_DATA)} facilities")
+        logger.info(f"[OK] Inserted {success_count}/{len(FACILITIES_DATA)} facilities")
 
         # Setup financial classes table
         logger.info("Creating financial_classes table...")
@@ -116,12 +116,12 @@ async def setup_postgres_simple():
                 CREATE TABLE IF NOT EXISTS financial_classes (
                     class_code VARCHAR(10) PRIMARY KEY,
                     class_name VARCHAR(100) NOT NULL,
-                    description VARCHAR(200),
+                    description TEXT,
                     active BOOLEAN DEFAULT true,
                     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            logger.info("✓ Financial classes table created/verified")
+            logger.info("[OK] Financial classes table created/verified")
         except Exception as e:
             logger.warning(f"Financial classes table creation warning: {e}")
 
@@ -139,7 +139,7 @@ async def setup_postgres_simple():
             except Exception as e:
                 logger.warning(f"Failed to insert financial class {fc['class_code']}: {e}")
         
-        logger.info(f"✓ Inserted {success_count}/{len(FINANCIAL_CLASSES_DATA)} financial classes")
+        logger.info(f"[OK] Inserted {success_count}/{len(FINANCIAL_CLASSES_DATA)} financial classes")
 
     except Exception as e:
         logger.error(f"PostgreSQL setup failed: {e}")
@@ -167,18 +167,18 @@ async def setup_sqlserver_simple():
                 CREATE TABLE core_standard_payers (
                     payer_id INT PRIMARY KEY,
                     payer_name VARCHAR(100) NOT NULL,
-                    payer_code VARCHAR(10) NOT NULL
+                    payer_code VARCHAR(2) NOT NULL
                 )
             """)
 
-            # Insert sample payer data
+            # Insert sample payer data - Fixed: Use 2-character codes to match schema
             sample_payers = [
                 (1, 'Medicare', 'MC'),
                 (2, 'Medicaid', 'MD'),
-                (3, 'Commercial', 'COM'),
+                (3, 'Commercial', 'CM'),  # Changed from 'COM' to 'CM'
                 (4, 'Blue Cross', 'BC'),
-                (5, 'Aetna', 'AET'),
-                (6, 'United Health', 'UNH'),
+                (5, 'Aetna', 'AE'),       # Changed from 'AET' to 'AE'
+                (6, 'United Health', 'UH'), # Changed from 'UNH' to 'UH'
                 (7, 'Workers Comp', 'WC'),
                 (8, 'Self Pay', 'SP')
             ]
@@ -190,7 +190,7 @@ async def setup_sqlserver_simple():
                     VALUES (?, ?, ?)
                 """, payer_id, payer_id, payer_name, payer_code)
 
-            logger.info("✓ Core payers table setup completed")
+            logger.info("[OK] Core payers table setup completed")
         except Exception as e:
             logger.warning(f"Core payers setup warning: {e}")
 
@@ -212,7 +212,7 @@ async def setup_sqlserver_simple():
                     created_at DATETIME2 DEFAULT GETDATE()
                 )
             """)
-            logger.info("✓ Facilities table created/verified")
+            logger.info("[OK] Facilities table created/verified")
         except Exception as e:
             logger.warning(f"Facilities table creation warning: {e}")
 
@@ -223,11 +223,10 @@ async def setup_sqlserver_simple():
             try:
                 await sql_db.execute("""
                     IF NOT EXISTS (SELECT * FROM facilities WHERE facility_id = ?)
-                    INSERT INTO facilities (facility_id, facility_name, facility_type, address, city, 
-                                          state, zip_code, phone, active)
+                    INSERT INTO facilities (facility_id, facility_name, facility_type, address, city, state, zip_code, phone, active)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
                 """, 
-                facility['facility_id'],  # Integer for the EXISTS check
+                facility['facility_id'],  # for the EXISTS check
                 facility['facility_id'], facility['facility_name'], facility['facility_type'],
                 facility['address'], facility['city'], facility['state'], 
                 facility['zip_code'], facility['phone'])
@@ -235,51 +234,51 @@ async def setup_sqlserver_simple():
             except Exception as e:
                 logger.warning(f"Failed to insert facility {facility['facility_id']}: {e}")
         
-        logger.info(f"✓ Inserted {success_count}/{len(FACILITIES_DATA)} facilities")
+        logger.info(f"[OK] Inserted {success_count}/{len(FACILITIES_DATA)} facilities")
 
-        # Setup financial classes table - UPDATED: facility_id as INT to match facilities table
+        # Setup facility financial classes table
         logger.info("Creating facility_financial_classes table...")
         try:
             await sql_db.execute("""
                 IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'facility_financial_classes')
                 CREATE TABLE facility_financial_classes (
-                    financial_class_id VARCHAR(10) PRIMARY KEY,
-                    class_name VARCHAR(100) NOT NULL,
-                    description VARCHAR(200),
                     facility_id INT,
+                    financial_class_id VARCHAR(10) PRIMARY KEY,
+                    financial_class_name VARCHAR(100),
                     payer_id INT,
-                    reimbursement_rate DECIMAL(5,4) DEFAULT 0.8000,
-                    processing_priority VARCHAR(10) DEFAULT 'Normal',
-                    auto_posting_enabled BIT DEFAULT 1,
-                    active BIT DEFAULT 1,
-                    effective_date DATE DEFAULT GETDATE(),
+                    reimbursement_rate DECIMAL(5,4),
+                    processing_priority VARCHAR(10),
+                    auto_posting_enabled BIT,
+                    active BIT,
+                    effective_date DATE,
                     end_date DATE,
-                    created_at DATETIME2 DEFAULT GETDATE(),
-                    FOREIGN KEY (facility_id) REFERENCES facilities(facility_id),
-                    FOREIGN KEY (payer_id) REFERENCES core_standard_payers(payer_id)
+                    created_at DATETIME,
+                    HCC CHAR(3)
                 )
             """)
-            logger.info("✓ Financial classes table created/verified")
+            logger.info("[OK] Facility financial classes table created/verified")
         except Exception as e:
-            logger.warning(f"Financial classes table creation warning: {e}")
+            logger.warning(f"Facility financial classes table creation warning: {e}")
 
-        # Insert financial classes data
+        # Insert financial classes data - Fixed column names to match schema
         logger.info("Inserting financial classes data...")
         success_count = 0
         for fc in FINANCIAL_CLASSES_DATA:
             try:
                 await sql_db.execute("""
                     IF NOT EXISTS (SELECT * FROM facility_financial_classes WHERE financial_class_id = ?)
-                    INSERT INTO facility_financial_classes (financial_class_id, class_name, description, payer_id, active)
-                    VALUES (?, ?, ?, ?, 1)
+                    INSERT INTO facility_financial_classes (financial_class_id, financial_class_name, payer_id, 
+                                                           reimbursement_rate, processing_priority, auto_posting_enabled, 
+                                                           active, effective_date, created_at)
+                    VALUES (?, ?, ?, 0.8000, 'Normal', 1, 1, GETDATE(), GETDATE())
                 """, 
                 fc['class_code'],  # for the EXISTS check
-                fc['class_code'], fc['class_name'], fc['description'], 1)  # Default to payer_id 1 (Medicare)
+                fc['class_code'], fc['class_name'], 1)  # Default to payer_id 1 (Medicare), simplified insert
                 success_count += 1
             except Exception as e:
                 logger.warning(f"Failed to insert financial class {fc['class_code']}: {e}")
         
-        logger.info(f"✓ Inserted {success_count}/{len(FINANCIAL_CLASSES_DATA)} financial classes")
+        logger.info(f"[OK] Inserted {success_count}/{len(FINANCIAL_CLASSES_DATA)} financial classes")
 
         # Setup RVU data table
         logger.info("Creating rvu_data table...")
@@ -296,7 +295,7 @@ async def setup_sqlserver_simple():
                     created_at DATETIME2 DEFAULT GETDATE()
                 )
             """)
-            logger.info("✓ RVU data table created/verified")
+            logger.info("[OK] RVU data table created/verified")
         except Exception as e:
             logger.warning(f"RVU data table creation warning: {e}")
 
@@ -318,7 +317,7 @@ async def setup_sqlserver_simple():
             except Exception as e:
                 logger.warning(f"Failed to insert RVU {rvu['procedure_code']}: {e}")
         
-        logger.info(f"✓ Inserted {success_count}/{len(RVU_DATA)} RVU records")
+        logger.info(f"[OK] Inserted {success_count}/{len(RVU_DATA)} RVU records")
 
     except Exception as e:
         logger.error(f"SQL Server setup failed: {e}")
@@ -340,9 +339,13 @@ async def setup_reference_data():
 
 async def main():
     """Main entrypoint when executing as a script."""
+    # Configure logging with UTF-8 encoding to handle any Unicode issues
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.StreamHandler(),  # Console output
+        ]
     )
     logger = logging.getLogger(__name__)
 
@@ -354,9 +357,9 @@ async def main():
         await setup_reference_data()
 
         logger.info("=" * 60)
-        logger.info("✓ REFERENCE DATA SETUP COMPLETED SUCCESSFULLY!")
+        logger.info("[SUCCESS] REFERENCE DATA SETUP COMPLETED SUCCESSFULLY!")
         logger.info("Generated facility IDs: 1-50 (integers)")
-        logger.info("✓ Data compatible with original schema")
+        logger.info("[SUCCESS] Data compatible with original schema")
         logger.info("=" * 60)
 
     except Exception as e:

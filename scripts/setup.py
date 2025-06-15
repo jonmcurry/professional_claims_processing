@@ -458,15 +458,66 @@ class DatabaseSetupOrchestrator:
 
             # Determine server version to check feature support
             server_version = 0
+            supports_toast_compress = False
             try:
-                version_rows = await pg_db.fetch("SHOW server_version_num")
-                if version_rows:
+                # Try alternative methods to get PostgreSQL version
+                version_rows = None
+                
+                # Method 1: Try SHOW server_version_num (this was failing)
+                try:
+                    version_rows = await pg_db.fetch("SHOW server_version_num")
+                except Exception as e1:
+                    self.logger.debug(f"Method 1 failed (SHOW server_version_num): {e1}")
+                    
+                    # Method 2: Try SELECT version()
+                    try:
+                        version_rows = await pg_db.fetch("SELECT version()")
+                        if version_rows and version_rows[0].get('version'):
+                            # Parse version string like "PostgreSQL 13.7 on x86_64..."
+                            version_str = version_rows[0]['version']
+                            import re
+                            version_match = re.search(r'PostgreSQL (\d+)\.(\d+)', version_str)
+                            if version_match:
+                                major = int(version_match.group(1))
+                                minor = int(version_match.group(2))
+                                server_version = major * 10000 + minor * 100
+                                version_rows = [{"server_version_num": str(server_version)}]
+                            else:
+                                version_rows = None
+                    except Exception as e2:
+                        self.logger.debug(f"Method 2 failed (SELECT version()): {e2}")
+                        
+                        # Method 3: Try current_setting function
+                        try:
+                            version_rows = await pg_db.fetch("SELECT current_setting('server_version_num') as server_version_num")
+                        except Exception as e3:
+                            self.logger.debug(f"Method 3 failed (current_setting): {e3}")
+                            
+                            # Method 4: Direct connection query
+                            try:
+                                if hasattr(pg_db, 'pool') and pg_db.pool:
+                                    async with pg_db.pool.acquire() as conn:
+                                        result = await conn.fetchval("SHOW server_version_num")
+                                        if result:
+                                            version_rows = [{"server_version_num": result}]
+                            except Exception as e4:
+                                self.logger.debug(f"Method 4 failed (direct connection): {e4}")
+                
+                if version_rows and version_rows[0].get("server_version_num"):
                     server_version = int(version_rows[0]["server_version_num"])
+                    supports_toast_compress = server_version >= 150000
+                    self.logger.info(f"Detected PostgreSQL version: {server_version} (supports toast compression: {supports_toast_compress})")
+                else:
+                    # Default to assuming older version for safety
+                    self.logger.warning("Could not determine PostgreSQL version, assuming older version without toast compression support")
+                    server_version = 140000  # Assume 14.0 as safe default
+                    supports_toast_compress = False
+                    
             except Exception as e:
-                self.logger.warning(
-                    f"Could not determine PostgreSQL version: {e}"
-                )
-            supports_toast_compress = server_version >= 150000
+                self.logger.warning(f"Could not determine PostgreSQL version: {e}")
+                # Default to assuming older version for safety
+                server_version = 140000  # Assume 14.0 as safe default
+                supports_toast_compress = False
 
             # Try to get existing objects, but handle errors gracefully
             existing_objects = {}
