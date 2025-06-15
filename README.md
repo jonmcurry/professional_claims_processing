@@ -103,6 +103,26 @@ downloaded from `/openapi.json`.
 Additional endpoint details are summarized in
 [docs/API_DOCUMENTATION.md](docs/API_DOCUMENTATION.md).
 
+## Frontend
+The `ui/` directory contains a small React application used to view failed
+claims. To run it in development mode:
+
+```bash
+cd ui
+npm install
+npm run dev
+```
+
+This starts the Vite dev server on <http://localhost:5173> and proxies API
+requests to the FastAPI backend running on port 8000. Build a production bundle
+with:
+
+```bash
+npm run build
+```
+
+Static files will be emitted to `ui/dist/`.
+
 ## Tests
 Tests use `pytest`.
 
