@@ -1537,6 +1537,12 @@ class ClaimService:
             user,
             claim_id,
         )
+        self.audit_event(
+            "failed_claims",
+            claim_id,
+            "assign",
+            new_values={"user": user},
+        )
 
     async def resolve_failed_claim(
         self, claim_id: str, action: str, notes: str | None = None
@@ -1549,6 +1555,12 @@ class ClaimService:
             claim_id,
         )
         metrics.inc("failed_claims_manual")
+        self.audit_event(
+            "failed_claims",
+            claim_id,
+            "resolve",
+            new_values={"action": action, "notes": notes},
+        )
 
     async def delete_claim(self, account: str, facility: str) -> None:
         """Delete a claim (used for compensation transactions)."""
@@ -1556,6 +1568,12 @@ class ClaimService:
             "DELETE FROM claims WHERE patient_account_number = ? AND facility_id = ?",
             account,
             facility,
+        )
+        self.audit_event(
+            "claims",
+            account,
+            "delete",
+            reason="compensation",
         )
 
     def get_memory_status(self) -> Dict[str, Any]:

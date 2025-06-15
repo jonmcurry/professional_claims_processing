@@ -55,7 +55,9 @@ async def test_manual_resolution(monkeypatch):
     sql = DummySQL()
     service = ClaimService(DummyPG(), sql)
     monkeypatch.setattr("src.utils.audit.record_audit_event", noop)
+    metrics.reset("failed_claims_manual")
     await service.assign_failed_claim("x", "user1")
     await service.resolve_failed_claim("x", "retry", "ok")
     assert any("UPDATE failed_claims SET assigned_to" in q[0] for q in sql.queries)
     assert metrics.get("failed_claims_manual") == 1
+    metrics.reset("failed_claims_manual")

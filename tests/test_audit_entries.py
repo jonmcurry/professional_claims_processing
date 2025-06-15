@@ -1,5 +1,6 @@
 import pytest
 
+from src.monitoring.metrics import metrics
 from src.services.claim_service import ClaimService
 
 
@@ -11,12 +12,19 @@ class DummySQL:
     def __init__(self):
         self.args = None
         self.fail = False
+        self.executed = []
 
-    async def execute_many_optimized(self, query, params_seq, *, concurrency=1, batch_size=1):
+    async def execute_many_optimized(
+        self, query, params_seq, *, concurrency=1, batch_size=1
+    ):
         if self.fail:
             raise Exception("boom")
         self.args = (query, list(params_seq))
         return len(self.args[1])
+
+    async def execute(self, query: str, *params):
+        self.executed.append((query, params))
+        return 1
 
 
 @pytest.mark.asyncio
@@ -65,3 +73,58 @@ async def test_process_audit_entries_bulk_error(monkeypatch):
     await service._process_audit_entries(entries)
 
     assert recorded == entries
+
+
+@pytest.mark.asyncio
+async def test_failed_claim_assignment_audited():
+    sql = DummySQL()
+    service = ClaimService(DummyPG(), sql)
+
+    recorded = []
+
+    def fake_audit(table, record_id, operation, new_values=None, reason=None):
+        recorded.append((table, record_id, operation, new_values, reason))
+
+    service.audit_event = fake_audit
+
+    await service.assign_failed_claim("c1", "user1")
+
+    assert recorded == [("failed_claims", "c1", "assign", {"user": "user1"}, None)]
+
+
+@pytest.mark.asyncio
+async def test_failed_claim_resolution_audited():
+    sql = DummySQL()
+    service = ClaimService(DummyPG(), sql)
+
+    recorded = []
+
+    def fake_audit(table, record_id, operation, new_values=None, reason=None):
+        recorded.append((table, record_id, operation, new_values, reason))
+
+    service.audit_event = fake_audit
+
+    metrics.reset("failed_claims_manual")
+    await service.resolve_failed_claim("c2", "retry", "ok")
+    metrics.reset("failed_claims_manual")
+
+    assert recorded == [
+        ("failed_claims", "c2", "resolve", {"action": "retry", "notes": "ok"}, None)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delete_claim_audited():
+    sql = DummySQL()
+    service = ClaimService(DummyPG(), sql)
+
+    recorded = []
+
+    def fake_audit(table, record_id, operation, new_values=None, reason=None):
+        recorded.append((table, record_id, operation, new_values, reason))
+
+    service.audit_event = fake_audit
+
+    await service.delete_claim("acc", "F1")
+
+    assert recorded == [("claims", "acc", "delete", None, "compensation")]
