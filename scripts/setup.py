@@ -72,8 +72,8 @@ class DatabaseSetupOrchestrator:
             database="postgres",  # Connect to default database
             replica_host=self.config.postgres.replica_host,
             replica_port=self.config.postgres.replica_port,
-            min_pool_size=self.config.postgres.min_pool_size,
-            max_pool_size=self.config.postgres.max_pool_size,
+            min_pool_size=1,  # Use minimal pool for setup
+            max_pool_size=2,  # Use minimal pool for setup
             threshold_ms=self.config.postgres.threshold_ms,
             retries=self.config.postgres.retries,
             retry_delay=self.config.postgres.retry_delay,
@@ -83,27 +83,64 @@ class DatabaseSetupOrchestrator:
         
         pg_db = PostgresDatabase(temp_config)
         try:
+            self.logger.info("Connecting to PostgreSQL server...")
             await pg_db.connect()
+            self.logger.info("Connected to PostgreSQL successfully")
             
             # Check if target database exists
+            self.logger.info(f"Checking if database '{self.config.postgres.database}' exists...")
             result = await pg_db.fetch(
                 "SELECT 1 FROM pg_database WHERE datname = $1",
                 self.config.postgres.database
             )
             
             if not result:
-                self.logger.info(f"Creating PostgreSQL database: {self.config.postgres.database}")
-                # Note: CREATE DATABASE cannot be run in a transaction
-                await pg_db.execute(f"CREATE DATABASE {self.config.postgres.database}")
-                self.logger.info("PostgreSQL database created successfully")
+                self.logger.info(f"Database '{self.config.postgres.database}' does not exist, creating it...")
+                
+                # Use a more explicit approach for database creation
+                create_db_query = f'CREATE DATABASE "{self.config.postgres.database}"'
+                self.logger.info(f"Executing: {create_db_query}")
+                
+                try:
+                    await pg_db.execute(create_db_query)
+                    self.logger.info("PostgreSQL database created successfully")
+                except Exception as create_error:
+                    self.logger.error(f"Failed to create database: {str(create_error)}")
+                    self.logger.error(f"Error type: {type(create_error).__name__}")
+                    
+                    # Try alternative approach
+                    self.logger.info("Trying alternative database creation method...")
+                    try:
+                        # Get a direct connection and try creating database
+                        conn = await pg_db.pool.acquire()
+                        try:
+                            await conn.execute(create_db_query)
+                            self.logger.info("Database created using direct connection")
+                        finally:
+                            await pg_db.pool.release(conn)
+                    except Exception as alt_error:
+                        self.logger.error(f"Alternative method also failed: {str(alt_error)}")
+                        raise create_error  # Re-raise original error
             else:
                 self.logger.info("PostgreSQL database already exists")
                 
         except Exception as e:
-            self.logger.error(f"Error ensuring PostgreSQL database exists: {e}")
+            self.logger.error(f"Error ensuring PostgreSQL database exists: {str(e)}")
+            self.logger.error(f"Error type: {type(e).__name__}")
+            
+            # Log more details about the connection
+            self.logger.error(f"Connection details:")
+            self.logger.error(f"  Host: {self.config.postgres.host}")
+            self.logger.error(f"  Port: {self.config.postgres.port}")
+            self.logger.error(f"  User: {self.config.postgres.user}")
+            self.logger.error(f"  Database: postgres")
+            
             raise
         finally:
-            await pg_db.close()
+            try:
+                await pg_db.close()
+            except:
+                pass
 
     async def _ensure_sqlserver_database(self):
         """Ensure SQL Server database exists, create if it doesn't"""
@@ -116,9 +153,9 @@ class DatabaseSetupOrchestrator:
             user=self.config.sqlserver.user,
             password=self.config.sqlserver.password,
             database="master",  # Connect to master database
-            pool_size=self.config.sqlserver.pool_size,
-            min_pool_size=self.config.sqlserver.min_pool_size,
-            max_pool_size=self.config.sqlserver.max_pool_size,
+            pool_size=2,  # Use minimal pool for setup
+            min_pool_size=1,
+            max_pool_size=2,
             threshold_ms=self.config.sqlserver.threshold_ms,
             retries=self.config.sqlserver.retries,
             retry_delay=self.config.sqlserver.retry_delay,
@@ -128,26 +165,45 @@ class DatabaseSetupOrchestrator:
         
         sql_db = SQLServerDatabase(temp_config)
         try:
+            self.logger.info("Connecting to SQL Server...")
             await sql_db.connect()
+            self.logger.info("Connected to SQL Server successfully")
             
             # Check if target database exists
+            self.logger.info(f"Checking if database '{self.config.sqlserver.database}' exists...")
             result = await sql_db.fetch(
                 "SELECT 1 FROM sys.databases WHERE name = ?",
                 self.config.sqlserver.database
             )
             
             if not result:
-                self.logger.info(f"Creating SQL Server database: {self.config.sqlserver.database}")
-                await sql_db.execute(f"CREATE DATABASE [{self.config.sqlserver.database}]")
+                self.logger.info(f"Database '{self.config.sqlserver.database}' does not exist, creating it...")
+                
+                create_db_query = f"CREATE DATABASE [{self.config.sqlserver.database}]"
+                self.logger.info(f"Executing: {create_db_query}")
+                
+                await sql_db.execute(create_db_query)
                 self.logger.info("SQL Server database created successfully")
             else:
                 self.logger.info("SQL Server database already exists")
                 
         except Exception as e:
-            self.logger.error(f"Error ensuring SQL Server database exists: {e}")
+            self.logger.error(f"Error ensuring SQL Server database exists: {str(e)}")
+            self.logger.error(f"Error type: {type(e).__name__}")
+            
+            # Log more details about the connection
+            self.logger.error(f"Connection details:")
+            self.logger.error(f"  Host: {self.config.sqlserver.host}")
+            self.logger.error(f"  Port: {self.config.sqlserver.port}")
+            self.logger.error(f"  User: {self.config.sqlserver.user}")
+            self.logger.error(f"  Database: master")
+            
             raise
         finally:
-            await sql_db.close()
+            try:
+                await sql_db.close()
+            except:
+                pass
 
     async def run_schema_setup(self, pg_schema_path: str, sql_schema_path: str):
         """Load and execute database schema files"""

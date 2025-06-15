@@ -136,7 +136,7 @@ class SQLServerDatabase(BaseDatabase):
         self._health_check_interval = 30.0
 
         # Memory management additions
-        self._memory_pool = sql_memory_pool
+        self._memory_pool = memory_pool
         self._connection_memory_limit = 100 * 1024 * 1024  # 100MB per connection
         self._total_memory_limit = 500 * 1024 * 1024  # 500MB total
         self._memory_check_frequency = 50  # Check every 50 operations

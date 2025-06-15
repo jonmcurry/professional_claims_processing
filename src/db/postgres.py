@@ -175,19 +175,15 @@ class PostgresDatabase(BaseDatabase):
 
     async def _init_connection(self, conn: "asyncpg.Connection") -> None:
         """Initialize a new connection with prepared statements and optimizations."""
-        # Set connection-level optimizations
-        await conn.execute(
-            "SET synchronous_commit = OFF"
-        )  # For staging/non-critical data
-        await conn.execute("SET wal_writer_delay = '50ms'")
-        await conn.execute("SET checkpoint_completion_target = 0.9")
-
-        # Memory-specific settings
-        await conn.execute(
-            "SET work_mem = '256MB'"
-        )  # Increased for better sort/hash performance
-        await conn.execute("SET maintenance_work_mem = '512MB'")
-        await conn.execute("SET effective_cache_size = '2GB'")
+        
+        # Only set session-level parameters that are safe to change
+        try:
+            await conn.execute("SET work_mem = '64MB'")  # Reduced for safety
+            await conn.execute("SET maintenance_work_mem = '128MB'")  # Reduced for safety
+            await conn.execute("SET effective_cache_size = '1GB'")  # Reduced for safety
+        except Exception as e:
+            # Log warning but don't fail connection initialization
+            print(f"Warning: Could not set PostgreSQL session parameters: {e}")
 
         # Prepare cached statements on new connection
         for stmt_name, query in self._prepared.items():
