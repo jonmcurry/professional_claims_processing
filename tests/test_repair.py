@@ -2,15 +2,6 @@ import sys
 import types
 
 sys.modules.setdefault("joblib", types.ModuleType("joblib"))
-durable_module = types.ModuleType("durable")
-durable_lang = types.ModuleType("lang")
-durable_lang.ruleset = lambda name: (lambda func: func)
-durable_lang.when_all = lambda cond: (lambda func: func)
-durable_lang.m = object()
-durable_lang.post = lambda name, data: None
-setattr(durable_module, "lang", durable_lang)
-sys.modules.setdefault("durable", durable_module)
-sys.modules.setdefault("durable.lang", durable_lang)
 
 from src.processing.repair import ClaimRepairSuggester, MLRepairAdvisor
 
@@ -44,3 +35,4 @@ def test_repair_suggestions_with_ml(monkeypatch):
     res = suggester.suggest(["invalid_dob"], {"claim_id": "1"})
     assert "Check date_of_birth" in res
     assert "ML fix" in res
+

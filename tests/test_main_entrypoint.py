@@ -4,15 +4,6 @@ import types
 # Stub durable.lang so tests run without the dependency
 sys.modules.setdefault("asyncpg", types.ModuleType("asyncpg"))
 sys.modules.setdefault("joblib", types.ModuleType("joblib"))
-durable_module = types.ModuleType("durable")
-durable_lang = types.ModuleType("lang")
-durable_lang.ruleset = lambda name: (lambda func: func)
-durable_lang.when_all = lambda cond: (lambda func: func)
-durable_lang.m = object()
-durable_lang.post = lambda name, data: None
-setattr(durable_module, "lang", durable_lang)
-sys.modules.setdefault("durable", durable_module)
-sys.modules.setdefault("durable.lang", durable_lang)
 
 from src.processing import main
 
@@ -36,3 +27,4 @@ def test_main_invokes_pipeline(monkeypatch):
     main.main()
     assert called.started
     assert called.processed
+

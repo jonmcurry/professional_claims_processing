@@ -33,8 +33,14 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a high-level system diagram
 - Recommended: create a virtual environment
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+# Create virtual environment
+python -m venv venv
+# Activate virtual environment
+venv\Scripts\activate
+# Upgrade pip
+python -m pip install --upgrade pip
+
+# Install requirements
 pip install -r requirements.txt
 # The cryptography package is required for encryption support.
 # It is included in the requirements file but must be installed for the
@@ -97,7 +103,7 @@ The `/failed_claims` page lists recent failed claims and the `/status` endpoint
 returns processing counts so you can display a real-time indicator in the UI.
 Database and query metrics are exposed from the `/metrics` endpoint for
 operational monitoring. The `/compliance/dashboard` route now returns
-audit events, archive status, failure pattern data, processing trends and
+audit events, archive status, failure pattern data, processing trends and 
 revenue impact metrics. Full API documentation is available at
 `/docs` when the server is running. The raw OpenAPI specification can be
 downloaded from `/openapi.json`.

@@ -21,7 +21,7 @@ from ..models.filter_model import FilterModel
 from ..models.monitor import ModelMonitor
 from ..monitoring import pool_monitor, resource_monitor
 from ..monitoring.metrics import metrics, sla_monitor
-from ..rules.durable_engine import DurableRulesEngine
+from ..rules.engine import RulesEngine
 from ..security.compliance import mask_claim_data
 from ..services.claim_service import ClaimService
 from ..utils.audit import record_audit_event
@@ -358,7 +358,7 @@ class ClaimsPipeline:
         # ML and processing components
         self.model: FilterModel | ABTestModel | None = None
         self.model_monitor: ModelMonitor | None = None
-        self.rules_engine: DurableRulesEngine | None = None
+        self.rules_engine: RulesEngine | None = None
         self.validator: ClaimValidator | None = None
 
         # Enhanced caching with optimization
@@ -498,7 +498,7 @@ class ClaimsPipeline:
             self.model_monitor = ModelMonitor(self.cfg.model.version)
 
         # Initialize rules engine
-        self.rules_engine = DurableRulesEngine([])
+        self.rules_engine = RulesEngine([])
 
         # Initialize distributed caching
         if self.features.enable_cache and self.cfg.cache.redis_url:
@@ -2411,3 +2411,4 @@ class ClaimsPipeline:
             },
             "emergency_throttling": self.semaphore_manager.emergency_active,
         }
+

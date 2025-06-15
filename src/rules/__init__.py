@@ -1,7 +1,5 @@
-from .engine import Rule
+from .engine import Rule, RulesEngine
 
-try:  # pragma: no cover - durable_rules optional
-    from .durable_engine import DurableRulesEngine
-except Exception:  # pragma: no cover - fallback simple engine
-    DurableRulesEngine = None  # type: ignore
-
+# Use custom rules engine - durable-rules dependency removed
+# The custom engine provides better performance, maintainability, and control
+__all__ = ['Rule', 'RulesEngine']

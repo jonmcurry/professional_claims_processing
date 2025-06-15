@@ -8,15 +8,6 @@ import pytest
 sys.modules.setdefault("asyncpg", types.ModuleType("asyncpg"))
 sys.modules.setdefault("joblib", types.ModuleType("joblib"))
 
-durable_module = types.ModuleType("durable")
-durable_lang = types.ModuleType("lang")
-durable_lang.ruleset = lambda name: (lambda func: func)
-durable_lang.when_all = lambda cond: (lambda func: func)
-durable_lang.m = object()
-durable_lang.post = lambda name, data: None
-setattr(durable_module, "lang", durable_lang)
-sys.modules.setdefault("durable", durable_module)
-sys.modules.setdefault("durable.lang", durable_lang)
 
 from src.processing.pipeline import ClaimsPipeline
 from src.config.config import (
@@ -120,4 +111,5 @@ async def test_pipeline_triggers_error_detector(monkeypatch):
 
     await pipeline.process_batch()
     assert called
+
 

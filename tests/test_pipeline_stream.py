@@ -7,15 +7,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 sys.modules.setdefault("asyncpg", types.ModuleType("asyncpg"))
 sys.modules.setdefault("joblib", types.ModuleType("joblib"))
-durable_module = types.ModuleType("durable")
-durable_lang = types.ModuleType("lang")
-durable_lang.ruleset = lambda name: (lambda func: func)
-durable_lang.when_all = lambda cond: (lambda func: func)
-durable_lang.m = object()
-durable_lang.post = lambda name, data: None
-setattr(durable_module, "lang", durable_lang)
-sys.modules.setdefault("durable", durable_module)
-sys.modules.setdefault("durable.lang", durable_lang)
 
 from src.processing.pipeline import ClaimsPipeline
 from src.config.config import (
@@ -170,3 +161,4 @@ def test_process_stream_parallel(monkeypatch):
 
     assert sorted(pipeline.sql.inserted) == [("111", "F1"), ("222", "F1")]
     assert pipeline.rvu_cache.prefetched == [{"P1"}, {"P1"}]
+
