@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Dict, Iterable, List, Optional, Set
 
 import psutil
+import inspect
 
 from ..alerting import AlertManager, EmailNotifier
 from ..analysis.error_pattern_detector import ErrorPatternDetector
@@ -405,7 +406,13 @@ class ClaimsPipeline:
         self.mode = "normal"
         self.health_state = {"postgres": True, "sqlserver": True, "redis": True}
         self.local_queue_path = Path("claim_backup_queue.jsonl")
-        self._recovery_task: Optional[asyncio.Task] = None
+        from ..maintenance import RecoveryManager
+        self.recovery_manager = RecoveryManager(self, cfg)
+
+    async def _run_error_detection_check(self) -> None:
+        if self.error_detector:
+            self.error_detector.db = self.sql
+            await self.error_detector.maybe_check()
 
     async def startup_optimized(self) -> None:
         """Ultra-optimized startup with dynamic concurrency management."""
@@ -565,7 +572,7 @@ class ClaimsPipeline:
         )
 
         # Start dependency recovery monitoring
-        self._recovery_task = asyncio.create_task(self._recovery_loop())
+        self.recovery_manager.start()
 
         monitoring_time = time.perf_counter() - monitoring_start
         self._preparation_stats["monitoring_time"] = monitoring_time
@@ -758,7 +765,10 @@ class ClaimsPipeline:
         sql_ok = await self.sql.health_check() if hasattr(self.sql, "health_check") else True
         redis_ok = await self.distributed_cache.health_check() if self.distributed_cache else True
 
-        self.health_state.update({"postgres": pg_ok, "sqlserver": sql_ok, "redis": redis_ok})
+        if not hasattr(self, "health_state"):
+            self.health_state = {"postgres": pg_ok, "sqlserver": sql_ok, "redis": redis_ok}
+        else:
+            self.health_state.update({"postgres": pg_ok, "sqlserver": sql_ok, "redis": redis_ok})
 
         metrics.set("postgres_available", 1.0 if pg_ok else 0.0)
         metrics.set("sqlserver_available", 1.0 if sql_ok else 0.0)
@@ -784,15 +794,6 @@ class ClaimsPipeline:
                 fh.write(json.dumps(claim) + "\n")
         metrics.inc("claims_queued_backup", len(claims))
 
-    async def _recovery_loop(self) -> None:
-        """Periodically check if dependencies have recovered."""
-        while True:
-            await asyncio.sleep(10)
-            await self._run_safely(
-                self._check_services_health(),
-                "Recovery health check error",
-                stage="recovery_check",
-            )
 
     async def process_batch_ultra_optimized(self) -> Dict[str, Any]:
         """Ultra-optimized batch processing with dynamic concurrency management."""
@@ -1258,7 +1259,7 @@ class ClaimsPipeline:
                     },
                 )
 
-                await self.error_detector.maybe_check()
+                await self._run_error_detection_check()
 
                 return {
                     "processed": len(valid_claims),
@@ -1639,15 +1640,25 @@ class ClaimsPipeline:
             return
 
         try:
-            await self.sql.execute_many(
-                """INSERT INTO failed_claims (
-                    claim_id, facility_id, patient_account_number, 
-                    failure_reason, failure_category, processing_stage, 
-                    failed_at, original_data, repair_suggestions
-                ) VALUES (?, ?, ?, ?, ?, ?, GETDATE(), ?, ?)""",
-                failed_claims_data,
-                concurrency=4,
-            )
+            if "concurrency" in inspect.signature(self.sql.execute_many).parameters:
+                await self.sql.execute_many(
+                    """INSERT INTO failed_claims (
+                        claim_id, facility_id, patient_account_number,
+                        failure_reason, failure_category, processing_stage,
+                        failed_at, original_data, repair_suggestions
+                    ) VALUES (?, ?, ?, ?, ?, ?, GETDATE(), ?, ?)""",
+                    failed_claims_data,
+                    concurrency=4,
+                )
+            else:
+                await self.sql.execute_many(
+                    """INSERT INTO failed_claims (
+                        claim_id, facility_id, patient_account_number,
+                        failure_reason, failure_category, processing_stage,
+                        failed_at, original_data, repair_suggestions
+                    ) VALUES (?, ?, ?, ?, ?, ?, GETDATE(), ?, ?)""",
+                    failed_claims_data,
+                )
             metrics.inc("bulk_failed_claims_recorded", len(failed_claims_data))
         except Exception as e:
             self.logger.exception(
@@ -1664,11 +1675,17 @@ class ClaimsPipeline:
             return
 
         try:
-            await self.pg.execute_many(
-                "INSERT INTO processing_checkpoints (claim_id, stage, checkpoint_at) VALUES ($1, $2, NOW()) ON CONFLICT (claim_id, stage) DO UPDATE SET checkpoint_at = NOW()",
-                checkpoints,
-                concurrency=4,
-            )
+            if "concurrency" in inspect.signature(self.pg.execute_many).parameters:
+                await self.pg.execute_many(
+                    "INSERT INTO processing_checkpoints (claim_id, stage, checkpoint_at) VALUES ($1, $2, NOW()) ON CONFLICT (claim_id, stage) DO UPDATE SET checkpoint_at = NOW()",
+                    checkpoints,
+                    concurrency=4,
+                )
+            else:
+                await self.pg.execute_many(
+                    "INSERT INTO processing_checkpoints (claim_id, stage, checkpoint_at) VALUES ($1, $2, NOW()) ON CONFLICT (claim_id, stage) DO UPDATE SET checkpoint_at = NOW()",
+                    checkpoints,
+                )
             metrics.inc("bulk_checkpoints_recorded", len(checkpoints))
         except Exception as e:
             self.logger.exception(
@@ -1945,7 +1962,7 @@ class ClaimsPipeline:
             total_time = time.perf_counter() - batch_start
             sla_monitor.record_batch(total_time, len(enriched_claims))
 
-            await self.error_detector.maybe_check()
+            await self._run_error_detection_check()()
 
             return {"processed": len(valid_claims), "failed": len(failed_claims_data)}
 
@@ -2033,12 +2050,7 @@ class ClaimsPipeline:
             except asyncio.CancelledError:
                 pass
 
-        if self._recovery_task:
-            self._recovery_task.cancel()
-            try:
-                await self._recovery_task
-            except asyncio.CancelledError:
-                pass
+        await self.recovery_manager.stop()
 
         # Perform final cleanup
         await self._perform_memory_cleanup()
