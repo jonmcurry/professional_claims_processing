@@ -21,6 +21,8 @@ Interactive documentation is available when the service is running.
 | `GET` | `/profiling/start` | Begin CPU profiling |
 | `GET` | `/profiling/stop` | Stop profiling and return stats |
 | `GET` | `/compliance/dashboard` | Compliance metrics including audit counts, archive status, failure patterns, processing trends, and revenue impact |
+| `POST` | `/api/assign_failed_claim` | Assign a failed claim to a user |
+| `POST` | `/api/resolve_failed_claim` | Mark a failed claim as resolved |
 
 ### Example Request
 

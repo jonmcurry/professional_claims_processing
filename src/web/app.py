@@ -109,6 +109,8 @@ def create_app(
         "/health": {"auditor", "user", "admin"},
         "/readiness": {"auditor", "user", "admin"},
         "/compliance/dashboard": {"auditor", "user", "admin"},
+        "/api/assign_failed_claim": {"user", "admin"},
+        "/api/resolve_failed_claim": {"user", "admin"},
         "/metrics": {"admin"},
         "/profiling/start": {"admin"},
         "/profiling/stop": {"admin"},
@@ -255,6 +257,64 @@ def create_app(
             "SELECT TOP 100 * FROM failed_claims ORDER BY failed_at DESC"
         )
         return rows
+
+    @app.post("/api/assign_failed_claim")
+    async def assign_failed_claim(
+        claim_id: str,
+        user: str,
+        request: Request,
+        x_api_key: str = Header(...),
+        x_user_role: str | None = Header(None),
+    ):
+        role = x_user_role or request.headers.get("X-User-Role")
+        await _check_key(request, x_api_key)
+        await _check_role(request, request.url.path, role)
+        if not claim_id or not user:
+            raise HTTPException(status_code=400, detail="claim_id and user required")
+        await sql.execute(
+            "UPDATE failed_claims SET assigned_to = ?, resolution_status = 'assigned' WHERE claim_id = ?",
+            user,
+            claim_id,
+        )
+        await record_audit_event(
+            sql,
+            "failed_claims",
+            claim_id,
+            "assign",
+            new_values={"user": user},
+        )
+        return {"status": "assigned"}
+
+    @app.post("/api/resolve_failed_claim")
+    async def resolve_failed_claim(
+        claim_id: str,
+        action: str,
+        notes: str = "",
+        request: Request | None = None,
+        x_api_key: str = Header(...),
+        x_user_role: str | None = Header(None),
+    ):
+        request = request or Request({})
+        role = x_user_role or request.headers.get("X-User-Role")
+        await _check_key(request, x_api_key)
+        await _check_role(request, request.url.path, role)
+        if not claim_id or not action:
+            raise HTTPException(status_code=400, detail="claim_id and action required")
+        await sql.execute(
+            "UPDATE failed_claims SET resolution_status = 'resolved', resolved_at = GETDATE(), resolution_action = ?, resolution_notes = ? WHERE claim_id = ?",
+            action,
+            notes,
+            claim_id,
+        )
+        metrics.inc("failed_claims_manual")
+        await record_audit_event(
+            sql,
+            "failed_claims",
+            claim_id,
+            "resolve",
+            new_values={"action": action, "notes": notes},
+        )
+        return {"status": "resolved"}
 
     @app.get("/failed_claims", response_class=HTMLResponse)
     async def failed_claims_page(

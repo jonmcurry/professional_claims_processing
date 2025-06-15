@@ -11,6 +11,9 @@ from src.web.status import batch_status, processing_status
 
 
 class DummyDB:
+    def __init__(self):
+        self.executed = []
+
     async def connect(self):
         pass
 
@@ -18,6 +21,7 @@ class DummyDB:
         return [{"claim_id": "1", "failure_reason": "bad data", "failed_at": "now"}]
 
     async def execute(self, query: str, *params):
+        self.executed.append((query, params))
         return 1
 
     async def health_check(self):
@@ -225,3 +229,23 @@ def test_admin_endpoint_permissions(client, path, role, expected):
         headers["X-User-Role"] = role
     resp = client.get(path, headers=headers)
     assert resp.status_code == expected
+
+
+def test_assign_failed_claim(client):
+    headers = {"X-API-Key": "test", "X-User-Role": "user"}
+    resp = client.post(
+        "/api/assign_failed_claim",
+        json={"claim_id": "1", "user": "u"},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+
+
+def test_resolve_failed_claim(client):
+    headers = {"X-API-Key": "test", "X-User-Role": "user"}
+    resp = client.post(
+        "/api/resolve_failed_claim",
+        json={"claim_id": "1", "action": "retry", "notes": "done"},
+        headers=headers,
+    )
+    assert resp.status_code == 200

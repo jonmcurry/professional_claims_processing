@@ -105,6 +105,8 @@ Additional endpoint details are summarized in
 [docs/API_DOCUMENTATION.md](docs/API_DOCUMENTATION.md).
 See [docs/DASHBOARD_USAGE.md](docs/DASHBOARD_USAGE.md) for information on the
 interactive dashboard.
+The API also exposes `/api/assign_failed_claim` and `/api/resolve_failed_claim`
+for managing failed claims. A minimal UI is available at `/resolve`.
 
 ## Frontend
 The `ui/` directory contains a small React application used to view failed
