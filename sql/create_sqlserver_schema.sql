@@ -456,7 +456,7 @@ CREATE INDEX ix_active_claims
 GO
 CREATE INDEX ix_unresolved_failed_claims
     ON failed_claims (claim_id)
-    WHERE ISNULL(resolution_status, '') <> 'resolved';
+    WHERE resolution_status IS NULL OR resolution_status <> 'resolved'
 GO
 ALTER TABLE archived_failed_claims REBUILD PARTITION = ALL
     WITH (DATA_COMPRESSION = PAGE);
