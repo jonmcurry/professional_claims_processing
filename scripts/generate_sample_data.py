@@ -2,6 +2,7 @@
 """
 Sample Claims Data Generator
 Generates 100,000 realistic healthcare claims and loads them into PostgreSQL staging database.
+Updated to use integer facility IDs to match the original schema.
 """
 
 import asyncio
@@ -23,8 +24,8 @@ from src.db.postgres import PostgresDatabase
 # Initialize Faker for realistic data generation
 fake = Faker()
 
-# Healthcare-specific data pools
-FACILITY_IDS = [f"FAC{i:03d}" for i in range(1, 51)]  # 50 facilities
+# Healthcare-specific data pools - UPDATED: Use integer facility IDs
+FACILITY_IDS = list(range(1, 51))  # 50 facilities: 1-50 instead of FAC001-FAC050
 FINANCIAL_CLASSES = ["COM", "MED", "MCR", "PPO", "HMO", "WRK", "OTH", "SELF"]
 GENDER_CODES = ["M", "F"]
 PLACES_OF_SERVICE = ["11", "12", "21", "22", "23", "31", "32", "49", "50", "81"]
@@ -121,7 +122,7 @@ class SampleDataGenerator:
     def generate_claim_data(self) -> Dict[str, Any]:
         """Generate a single claim's base data"""
         claim_id = f"CLM{uuid.uuid4().hex[:8].upper()}"
-        facility_id = random.choice(FACILITY_IDS)
+        facility_id = random.choice(FACILITY_IDS)  # Now returns integer (1-50)
         patient_account = self.generate_patient_account_number()
 
         # Generate realistic dates
@@ -142,7 +143,7 @@ class SampleDataGenerator:
 
         return {
             "claim_id": claim_id,
-            "facility_id": facility_id,
+            "facility_id": facility_id,  # Integer value (1-50)
             "department_id": random.randint(100, 999),
             "patient_account_number": patient_account,
             "patient_name": patient_name,
@@ -252,6 +253,8 @@ class SampleDataGenerator:
                 "diagnosis_description": f"Description for {diag_code}",
                 "diagnosis_type": "primary" if seq == 1 else "secondary",
                 "created_at": datetime.now(),
+                # UPDATED: Add service_to_date for partitioned table compatibility
+                "service_to_date": claim_data["service_to_date"],
             }
             diagnosis_codes.append(diagnosis)
 
@@ -293,7 +296,7 @@ class DataLoader:
             # Prepare claim data
             claim_tuple = (
                 claim.claim_data["claim_id"],
-                claim.claim_data["facility_id"],
+                claim.claim_data["facility_id"],  # Integer value
                 claim.claim_data["department_id"],
                 claim.claim_data["patient_account_number"],
                 claim.claim_data["patient_name"],
@@ -351,6 +354,7 @@ class DataLoader:
             for diagnosis in claim.diagnosis_codes:
                 diag_tuple = (
                     diagnosis["claim_id"],
+                    diagnosis["service_to_date"],  # UPDATED: Include service_to_date for partitioned table
                     diagnosis["diagnosis_sequence"],
                     diagnosis["diagnosis_code"],
                     diagnosis["diagnosis_description"],
@@ -428,6 +432,7 @@ class DataLoader:
             # Insert diagnosis codes
             diagnosis_columns = [
                 "claim_id",
+                "service_to_date",  # UPDATED: Include service_to_date column
                 "diagnosis_sequence",
                 "diagnosis_code",
                 "diagnosis_description",

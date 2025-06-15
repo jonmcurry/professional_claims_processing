@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Fixed Reference Data Setup Script
-Creates reference data with proper data type handling and error recovery.
+Reference Data Setup Script
+Creates reference data with integer facility IDs to match the original schema.
 """
 
 import asyncio
@@ -16,10 +16,10 @@ from src.config.config import load_config
 from src.db.postgres import PostgresDatabase
 from src.db.sqlserver import SQLServerDatabase
 
-# Reference data definitions
+# Reference data definitions - UPDATED: Use integer facility IDs
 FACILITIES_DATA = [
     {
-        "facility_id": f"FAC{i:03d}",
+        "facility_id": i,  # Integer instead of string
         "facility_name": f"Healthcare Facility {i:03d}",
         "facility_type": "Hospital" if i % 3 == 0 else "Clinic",
         "address": f"{1000 + i} Medical Way",
@@ -29,7 +29,7 @@ FACILITIES_DATA = [
         "phone": f"555-{i:03d}-{(i*37) % 10000:04d}",
         "active": True,
     }
-    for i in range(1, 51)  # 50 facilities
+    for i in range(1, 51)  # 50 facilities: IDs 1-50
 ]
 
 FINANCIAL_CLASSES_DATA = [
@@ -58,7 +58,7 @@ RVU_DATA = [
 
 
 async def setup_postgres_simple():
-    """Simple PostgreSQL reference data setup with improved error handling"""
+    """PostgreSQL reference data setup with integer facility IDs"""
     logger = logging.getLogger(__name__)
     
     config = load_config()
@@ -68,12 +68,12 @@ async def setup_postgres_simple():
         await pg_db.connect()
         logger.info("Connected to PostgreSQL database")
 
-        # Setup facilities table
+        # Setup facilities table - UPDATED: facility_id as INTEGER
         logger.info("Creating facilities table...")
         try:
             await pg_db.execute("""
                 CREATE TABLE IF NOT EXISTS facilities (
-                    facility_id VARCHAR(20) PRIMARY KEY,
+                    facility_id INTEGER PRIMARY KEY,
                     facility_name VARCHAR(200) NOT NULL,
                     facility_type VARCHAR(50),
                     address VARCHAR(200),
@@ -82,14 +82,14 @@ async def setup_postgres_simple():
                     zip_code VARCHAR(10),
                     phone VARCHAR(20),
                     active BOOLEAN DEFAULT true,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             logger.info("✓ Facilities table created/verified")
         except Exception as e:
             logger.warning(f"Facilities table creation warning: {e}")
 
-        # Insert facilities data
+        # Insert facilities data with integer IDs
         logger.info("Inserting facilities data...")
         success_count = 0
         for facility in FACILITIES_DATA:
@@ -118,7 +118,7 @@ async def setup_postgres_simple():
                     class_name VARCHAR(100) NOT NULL,
                     description VARCHAR(200),
                     active BOOLEAN DEFAULT true,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             logger.info("✓ Financial classes table created/verified")
@@ -149,7 +149,7 @@ async def setup_postgres_simple():
 
 
 async def setup_sqlserver_simple():
-    """Fixed SQL Server reference data setup with correct data types"""
+    """SQL Server reference data setup with integer facility IDs"""
     logger = logging.getLogger(__name__)
     
     config = load_config()
@@ -194,13 +194,13 @@ async def setup_sqlserver_simple():
         except Exception as e:
             logger.warning(f"Core payers setup warning: {e}")
 
-        # Setup facilities table with correct data types (VARCHAR instead of INT)
+        # Setup facilities table with INTEGER facility_id (original schema)
         logger.info("Creating facilities table...")
         try:
             await sql_db.execute("""
                 IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'facilities')
                 CREATE TABLE facilities (
-                    facility_id VARCHAR(20) PRIMARY KEY,
+                    facility_id INT PRIMARY KEY,
                     facility_name VARCHAR(200) NOT NULL,
                     facility_type VARCHAR(50),
                     address VARCHAR(200),
@@ -216,7 +216,7 @@ async def setup_sqlserver_simple():
         except Exception as e:
             logger.warning(f"Facilities table creation warning: {e}")
 
-        # Insert facilities data with proper parameter binding
+        # Insert facilities data with integer IDs
         logger.info("Inserting facilities data...")
         success_count = 0
         for facility in FACILITIES_DATA:
@@ -227,7 +227,7 @@ async def setup_sqlserver_simple():
                                           state, zip_code, phone, active)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
                 """, 
-                facility['facility_id'],  # for the EXISTS check
+                facility['facility_id'],  # Integer for the EXISTS check
                 facility['facility_id'], facility['facility_name'], facility['facility_type'],
                 facility['address'], facility['city'], facility['state'], 
                 facility['zip_code'], facility['phone'])
@@ -237,7 +237,7 @@ async def setup_sqlserver_simple():
         
         logger.info(f"✓ Inserted {success_count}/{len(FACILITIES_DATA)} facilities")
 
-        # Setup financial classes table with all required columns
+        # Setup financial classes table - UPDATED: facility_id as INT to match facilities table
         logger.info("Creating facility_financial_classes table...")
         try:
             await sql_db.execute("""
@@ -246,7 +246,7 @@ async def setup_sqlserver_simple():
                     financial_class_id VARCHAR(10) PRIMARY KEY,
                     class_name VARCHAR(100) NOT NULL,
                     description VARCHAR(200),
-                    facility_id VARCHAR(20),
+                    facility_id INT,
                     payer_id INT,
                     reimbursement_rate DECIMAL(5,4) DEFAULT 0.8000,
                     processing_priority VARCHAR(10) DEFAULT 'Normal',
@@ -255,6 +255,7 @@ async def setup_sqlserver_simple():
                     effective_date DATE DEFAULT GETDATE(),
                     end_date DATE,
                     created_at DATETIME2 DEFAULT GETDATE(),
+                    FOREIGN KEY (facility_id) REFERENCES facilities(facility_id),
                     FOREIGN KEY (payer_id) REFERENCES core_standard_payers(payer_id)
                 )
             """)
@@ -262,7 +263,7 @@ async def setup_sqlserver_simple():
         except Exception as e:
             logger.warning(f"Financial classes table creation warning: {e}")
 
-        # Insert financial classes data with proper column names
+        # Insert financial classes data
         logger.info("Inserting financial classes data...")
         success_count = 0
         for fc in FINANCIAL_CLASSES_DATA:
@@ -346,7 +347,7 @@ async def main():
     logger = logging.getLogger(__name__)
 
     logger.info("=" * 60)
-    logger.info("FIXED REFERENCE DATA SETUP")
+    logger.info("REFERENCE DATA SETUP - INTEGER FACILITY IDS")
     logger.info("=" * 60)
 
     try:
@@ -354,6 +355,8 @@ async def main():
 
         logger.info("=" * 60)
         logger.info("✓ REFERENCE DATA SETUP COMPLETED SUCCESSFULLY!")
+        logger.info("Generated facility IDs: 1-50 (integers)")
+        logger.info("✓ Data compatible with original schema")
         logger.info("=" * 60)
 
     except Exception as e:
