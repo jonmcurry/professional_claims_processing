@@ -629,8 +629,11 @@ class DatabaseSetupOrchestrator:
         """
 
         if sql_server:
-            # SQL Server uses GO as batch separator
-            raw_statements = sql_content.split("GO")
+            # SQL Server uses GO as batch separator. Split on lines that
+            # contain only GO, ignoring case and surrounding whitespace.
+            raw_statements = re.split(
+                r"^\s*GO\s*$", sql_content, flags=re.IGNORECASE | re.MULTILINE
+            )
         else:
             raw_statements = []
             current = []
