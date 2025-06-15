@@ -163,6 +163,10 @@ class SQLServerDatabase(BaseDatabase):
             self.circuit_breaker,
             CircuitBreakerOpenError("SQLServer circuit open"),
             _open,
+            retries=self.cfg.retries,
+            delay=self.cfg.retry_delay,
+            max_delay=self.cfg.retry_max_delay,
+            jitter=self.cfg.retry_jitter,
         )
 
     def _create_connection_optimized(self) -> pyodbc.Connection:
