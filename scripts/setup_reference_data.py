@@ -278,8 +278,19 @@ async def setup_sqlserver_simple():
         await sql_db.close()
 
 
+async def setup_reference_data():
+    """Run reference data setup for both databases."""
+    logger = logging.getLogger(__name__)
+
+    logger.info("Setting up PostgreSQL reference data...")
+    await setup_postgres_simple()
+
+    logger.info("Setting up SQL Server reference data...")
+    await setup_sqlserver_simple()
+
+
 async def main():
-    """Main function"""
+    """Main entrypoint when executing as a script."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -291,16 +302,12 @@ async def main():
     logger.info("=" * 60)
 
     try:
-        logger.info("Setting up PostgreSQL reference data...")
-        await setup_postgres_simple()
-        
-        logger.info("Setting up SQL Server reference data...")
-        await setup_sqlserver_simple()
-        
+        await setup_reference_data()
+
         logger.info("=" * 60)
         logger.info("✓ REFERENCE DATA SETUP COMPLETED SUCCESSFULLY!")
         logger.info("=" * 60)
-        
+
     except Exception as e:
         logger.error(f"Setup failed: {e}")
         raise
