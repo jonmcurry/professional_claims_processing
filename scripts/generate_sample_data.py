@@ -467,14 +467,14 @@ async def create_batch_metadata(db: PostgresDatabase, total_claims: int) -> str:
             batch_id, submitted_by, submitted_at, total_claims,
             status, priority, processing_options
         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-    """,
+        """,
         batch_id,
         "data_generator",
         datetime.now(),
         total_claims,
         "completed",
         "normal",
-        {"generated": True, "source": "sample_data_generator"},
+        asyncpg.types.Json({"generated": True, "source": "sample_data_generator"}),
     )
 
     return batch_id
