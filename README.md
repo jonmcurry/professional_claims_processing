@@ -31,6 +31,8 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a high-level system diagram
 ## Requirements
 - Python 3.10 or newer
 - Recommended: create a virtual environment
+- Faker is required for the sample data generator and installs with the
+  requirements.
 
 ```bash
 # Create virtual environment
