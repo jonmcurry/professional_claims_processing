@@ -421,6 +421,7 @@ ON ps_failed_at(failed_at);
 
 -- Procedure to archive old failed claims
 IF OBJECT_ID('archived_failed_claims', 'U') IS NULL
+BEGIN
     CREATE TABLE archived_failed_claims (
         claim_id VARCHAR(50) NOT NULL,
         batch_id VARCHAR(50) NULL,
@@ -445,6 +446,7 @@ IF OBJECT_ID('archived_failed_claims', 'U') IS NULL
         updated_at DATETIME2(7) NULL,
         coder_id VARCHAR(50)
     );
+END;
 GO
 
 CREATE PROCEDURE sp_archive_failed_claims @cutoff DATETIME2
@@ -479,7 +481,7 @@ CREATE INDEX ix_active_claims
 GO
 CREATE INDEX ix_unresolved_failed_claims
     ON failed_claims (claim_id)
-    WHERE resolution_status IS NULL OR resolution_status <> 'resolved'
+    WHERE (resolution_status IS NULL OR resolution_status <> 'resolved');
 GO
 ALTER TABLE archived_failed_claims REBUILD PARTITION = ALL
     WITH (DATA_COMPRESSION = PAGE);
