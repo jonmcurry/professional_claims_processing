@@ -37,6 +37,12 @@ class FastAPI:
             return func
         return decorator
 
+    def post(self, path, response_class=None):
+        def decorator(func):
+            self.routes[("POST", path)] = func
+            return func
+        return decorator
+
     def middleware(self, _):
         def decorator(func):
             self.middleware_handlers.append(func)
