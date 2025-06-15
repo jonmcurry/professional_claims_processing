@@ -236,6 +236,10 @@ class PostgresDatabase(BaseDatabase):
             self.circuit_breaker,
             CircuitBreakerOpenError("Postgres circuit open"),
             _open,
+            retries=self.cfg.retries,
+            delay=self.cfg.retry_delay,
+            max_delay=self.cfg.retry_max_delay,
+            jitter=self.cfg.retry_jitter,
         )
 
     async def fetch_optimized_with_memory_management(

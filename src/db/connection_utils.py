@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from typing import Awaitable, Callable, TypeVar
 
 from ..monitoring.metrics import metrics
@@ -15,11 +16,20 @@ async def connect_with_retry(
     connect_fn: Callable[[], Awaitable[T]],
     retries: int = 3,
     delay: float = 0.5,
+    *,
+    max_delay: float | None = None,
+    jitter: float = 0.0,
 ) -> T:
-    """Attempt a connection with retries and circuit breaker support."""
+    """Attempt a connection with retries and circuit breaker support.
+
+    Implements an exponential backoff strategy with optional jitter and
+    maximum delay. The default behaviour matches ``retry_async`` in
+    ``src.utils.retries`` so tests can reason about timing behaviour.
+    """
     if not await cb.allow():
         raise open_error
     last_exc: Exception | None = None
+    backoff = delay
     for attempt in range(retries):
         try:
             result = await connect_fn()
@@ -28,8 +38,17 @@ async def connect_with_retry(
         except Exception as exc:  # noqa: BLE001 - propagate actual error
             last_exc = exc
             await cb.record_failure()
-            if attempt < retries - 1:
-                await asyncio.sleep(delay)
+            if attempt >= retries - 1:
+                break
+            sleep_time = backoff
+            if jitter:
+                jitter_range = jitter * sleep_time
+                sleep_time += random.uniform(-jitter_range, jitter_range)
+                sleep_time = max(0.0, sleep_time)
+            await asyncio.sleep(sleep_time)
+            backoff *= 2
+            if max_delay is not None:
+                backoff = min(backoff, max_delay)
     raise DatabaseConnectionError(str(last_exc)) from last_exc
 
 def report_pool_metrics(

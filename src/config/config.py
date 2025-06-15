@@ -109,6 +109,10 @@ class PostgresConfig:
     min_pool_size: int = 25
     max_pool_size: int = 150
     threshold_ms: int = 1000
+    retries: int = 3
+    retry_delay: float = 0.5
+    retry_max_delay: float | None = None
+    retry_jitter: float = 0.0
 
 
 @dataclass
@@ -123,6 +127,10 @@ class SQLServerConfig:
     min_pool_size: int = 25
     max_pool_size: int = 80
     threshold_ms: int = 1000
+    retries: int = 3
+    retry_delay: float = 0.5
+    retry_max_delay: float | None = None
+    retry_jitter: float = 0.0
 
 
 @dataclass
@@ -465,14 +473,22 @@ def create_default_config() -> AppConfig:
             port=5432,
             user="claims_user",
             password="password",
-            database="staging_process"
+            database="staging_process",
+            retries=3,
+            retry_delay=0.5,
+            retry_max_delay=None,
+            retry_jitter=0.0
         ),
         sqlserver=SQLServerConfig(
             host="localhost",
             port=1433,
             user="claims_user",
             password="password",
-            database="smart_pro_claims"
+            database="smart_pro_claims",
+            retries=3,
+            retry_delay=0.5,
+            retry_max_delay=None,
+            retry_jitter=0.0
         ),
         processing=ProcessingConfig(),
         security=SecurityConfig(
@@ -502,7 +518,11 @@ def save_config(cfg: AppConfig, path: str = "config.yaml") -> None:
             "replica_port": cfg.postgres.replica_port,
             "min_pool_size": cfg.postgres.min_pool_size,
             "max_pool_size": cfg.postgres.max_pool_size,
-            "threshold_ms": cfg.postgres.threshold_ms
+            "threshold_ms": cfg.postgres.threshold_ms,
+            "retries": cfg.postgres.retries,
+            "retry_delay": cfg.postgres.retry_delay,
+            "retry_max_delay": cfg.postgres.retry_max_delay,
+            "retry_jitter": cfg.postgres.retry_jitter
         },
         "sqlserver": {
             "host": cfg.sqlserver.host,
@@ -513,7 +533,11 @@ def save_config(cfg: AppConfig, path: str = "config.yaml") -> None:
             "pool_size": cfg.sqlserver.pool_size,
             "min_pool_size": cfg.sqlserver.min_pool_size,
             "max_pool_size": cfg.sqlserver.max_pool_size,
-            "threshold_ms": cfg.sqlserver.threshold_ms
+            "threshold_ms": cfg.sqlserver.threshold_ms,
+            "retries": cfg.sqlserver.retries,
+            "retry_delay": cfg.sqlserver.retry_delay,
+            "retry_max_delay": cfg.sqlserver.retry_max_delay,
+            "retry_jitter": cfg.sqlserver.retry_jitter
         },
         "processing": {
             "batch_size": cfg.processing.batch_size,
