@@ -1,22 +1,32 @@
 # API Documentation
 
-The FastAPI application automatically generates an OpenAPI specification and interactive Swagger UI.
+The FastAPI service exposes a REST API secured with API key authentication.
+Interactive documentation is available when the service is running.
 
-- **Swagger UI**: visit `http://<host>:8000/docs` while the service is running to explore the endpoints and schemas.
-- **OpenAPI JSON**: the raw specification is available at `http://<host>:8000/openapi.json`.
+- **Swagger UI**: `http://<host>:8000/docs`
+- **OpenAPI JSON**: `http://<host>:8000/openapi.json`
 
-The main API endpoints include:
-- `/failed_claims` – view recently failed claims.
-- `/status` – processing statistics for the current run.
-- `/batch_status` – details about the active batch.
-- `/health` and `/readiness` – service health checks.
-- `/compliance/dashboard` – summary of audit logs and retention status.
+## Endpoints
 
-Authentication requires an API key in the `X-API-Key` header. Example request using `curl`:
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| `GET` | `/failed_claims` | HTML view of the most recent claim failures |
+| `GET` | `/api/failed_claims` | JSON list of failed claims |
+| `GET` | `/status` | Processing statistics for the current run |
+| `GET` | `/batch_status` | Detailed batch information |
+| `GET` | `/health` | Health status of downstream services |
+| `GET` | `/readiness` | Readiness probe for Kubernetes |
+| `GET` | `/liveness` | Simple liveness probe |
+| `GET` | `/metrics` | Prometheus formatted metrics |
+| `GET` | `/profiling/start` | Begin CPU profiling |
+| `GET` | `/profiling/stop` | Stop profiling and return stats |
+| `GET` | `/compliance/dashboard` | Summary of audit logs and archival status |
+
+### Example Request
+
 ```bash
 curl -H "X-API-Key: <key>" http://<host>:8000/status
 ```
 
-### Compliance Dashboard Screenshot
+Responses are JSON encoded except for the `/failed_claims` HTML page.
 
-![Compliance Dashboard](images/compliance_dashboard.png)

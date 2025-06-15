@@ -100,6 +100,8 @@ operational monitoring. The `/compliance/dashboard` route summarizes
 audit events and data retention status. Full API documentation is available at
 `/docs` when the server is running. The raw OpenAPI specification can be
 downloaded from `/openapi.json`.
+Additional endpoint details are summarized in
+[docs/API_DOCUMENTATION.md](docs/API_DOCUMENTATION.md).
 
 ## Tests
 Tests use `pytest`.
@@ -180,5 +182,6 @@ Additional utilities are provided to understand failed claims and revenue impact
 - Deployment steps are covered in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 - Operational runbook tasks can be found in [docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md).
 - Common troubleshooting tips live in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+- Change management guidelines are documented in [docs/CHANGE_MANAGEMENT.md](docs/CHANGE_MANAGEMENT.md).
 - The project includes a `Dockerfile` and Kubernetes manifest under `k8s/` for containerized deployments.
 - Continuous integration runs via GitHub Actions defined in `.github/workflows/ci.yml`.

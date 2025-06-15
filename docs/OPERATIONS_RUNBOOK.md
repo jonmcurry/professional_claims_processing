@@ -20,6 +20,14 @@ This runbook describes routine tasks for keeping the claims processing system he
   ```
 - For persistent database issues, switch to the standby instance and update `config.yaml` accordingly.
 
+## Monthly Tasks
+- Review change management log for completed deployments.
+- Rotate encryption keys if required by policy.
+
+## Incident Response
+- Declare an incident in the monitoring system and page on-call staff.
+- Document the resolution steps in the incident tracker.
+
 ## Automatic Recovery
 The processing pipeline runs a **recovery manager** in the background. It watches
 for degraded or backup mode and will:
