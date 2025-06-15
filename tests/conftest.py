@@ -8,6 +8,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 if "numpy" not in sys.modules:
     sys.modules["numpy"] = types.ModuleType("numpy")
 
+# Stub pyodbc so tests can import database modules without the actual driver
+if "pyodbc" not in sys.modules:
+    pyodbc_mod = types.SimpleNamespace(connect=lambda *a, **k: None, Connection=object)
+    sys.modules["pyodbc"] = pyodbc_mod
+
 if "yaml" not in sys.modules:
     yaml_mod = types.ModuleType("yaml")
     yaml_mod.safe_load = lambda *a, **k: {}
