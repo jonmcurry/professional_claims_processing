@@ -20,7 +20,7 @@ CREATE TABLE business_rules (
 );
 
 CREATE TABLE claims (
-    claim_id VARCHAR(50) PRIMARY KEY,
+    claim_id VARCHAR(50),
     facility_id VARCHAR(20),
     department_id INTEGER,
     patient_account_number VARCHAR(50),
@@ -48,7 +48,8 @@ CREATE TABLE claims (
     error_details JSONB,
     priority VARCHAR(10),
     submitted_by VARCHAR(100),
-    correlation_id VARCHAR(50)
+    correlation_id VARCHAR(50),
+    PRIMARY KEY (claim_id, service_to_date)
 ) PARTITION BY RANGE (service_to_date);
 
 CREATE TABLE claims_default PARTITION OF claims DEFAULT;
@@ -75,6 +76,7 @@ CREATE TABLE claims_line_items (
 
 CREATE TABLE claims_diagnosis_codes (
     claim_id VARCHAR(50) NOT NULL,
+    service_to_date DATE NOT NULL,
     diagnosis_sequence INTEGER NOT NULL,
     diagnosis_code VARCHAR(20) NOT NULL,
     diagnosis_description VARCHAR(255),
@@ -201,10 +203,10 @@ CREATE TABLE failed_claims (
 
 -- Foreign key constraints
 ALTER TABLE claims_line_items
-    ADD CONSTRAINT fk_claim_line_claim FOREIGN KEY (claim_id) REFERENCES claims (claim_id);
+    ADD CONSTRAINT fk_claim_line_claim FOREIGN KEY (claim_id, service_to_date) REFERENCES claims (claim_id, service_to_date);
 
 ALTER TABLE claims_diagnosis_codes
-    ADD CONSTRAINT fk_diagnosis_claim FOREIGN KEY (claim_id) REFERENCES claims (claim_id);
+    ADD CONSTRAINT fk_diagnosis_claim FOREIGN KEY (claim_id, service_to_date) REFERENCES claims (claim_id, service_to_date);
 
 -- Archive procedure for old claims
 CREATE TABLE IF NOT EXISTS archived_claims (LIKE claims INCLUDING ALL);
