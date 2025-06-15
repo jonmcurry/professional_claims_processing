@@ -17,7 +17,7 @@ import asyncpg
 from faker import Faker
 
 from src.config.config import load_config
-from src.database.postgres import PostgresDatabase
+from src.db.postgres import PostgresDatabase
 
 # Initialize Faker for realistic data generation
 fake = Faker()
