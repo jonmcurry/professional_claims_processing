@@ -456,6 +456,18 @@ class DatabaseSetupOrchestrator:
             await pg_db.connect(prepare_queries=False)
             self.logger.info("Connected to PostgreSQL database")
 
+            # Determine server version to check feature support
+            server_version = 0
+            try:
+                version_rows = await pg_db.fetch("SHOW server_version_num")
+                if version_rows:
+                    server_version = int(version_rows[0]["server_version_num"])
+            except Exception as e:
+                self.logger.warning(
+                    f"Could not determine PostgreSQL version: {e}"
+                )
+            supports_toast_compress = server_version >= 150000
+
             # Try to get existing objects, but handle errors gracefully
             existing_objects = {}
             try:
@@ -500,6 +512,15 @@ class DatabaseSetupOrchestrator:
                             skip_cmd in statement.upper()
                             for skip_cmd in ["CREATE DATABASE", "\\C", "USE "]
                         ):
+                            continue
+
+                        if (
+                            not supports_toast_compress
+                            and "toast.compress" in statement.lower()
+                        ):
+                            self.logger.info(
+                                "Skipping toast compression statement due to unsupported PostgreSQL version"
+                            )
                             continue
 
                         await pg_db.execute(statement)
