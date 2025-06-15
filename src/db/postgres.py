@@ -197,8 +197,17 @@ class PostgresDatabase(BaseDatabase):
                 print(f"Warning: Failed to prepare statement {stmt_name}: {e}")
                 continue
 
-    async def connect(self) -> None:
-        """Enhanced connection with pre-warming and health monitoring."""
+    async def connect(self, prepare_queries: bool = True) -> None:
+        """Enhanced connection with pre-warming and health monitoring.
+
+        Parameters
+        ----------
+        prepare_queries: bool, optional
+            When ``True`` (default) the connection pools will be warmed and
+            common prepared statements will be created.  During initial setup
+            the required tables may not exist yet, so this can be disabled to
+            avoid noisy preparation errors.
+        """
 
         async def _open() -> None:
             # Create main pool with optimizations
@@ -245,8 +254,9 @@ class PostgresDatabase(BaseDatabase):
             # Aggressive connection pool pre-warming
             await self._warm_connection_pools()
 
-            # Pre-prepare common queries
-            await self._prepare_common_queries()
+            if prepare_queries:
+                # Pre-prepare common queries
+                await self._prepare_common_queries()
 
         await connect_with_retry(
             self.circuit_breaker,

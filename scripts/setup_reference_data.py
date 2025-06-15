@@ -65,7 +65,7 @@ async def setup_postgres_simple():
     pg_db = PostgresDatabase(config.postgres)
     
     try:
-        await pg_db.connect()
+        await pg_db.connect(prepare_queries=False)
         logger.info("Connected to PostgreSQL database")
 
         # Setup facilities table - UPDATED: facility_id as INTEGER

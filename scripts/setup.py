@@ -82,7 +82,7 @@ class DatabaseSetupOrchestrator:
         pg_db = PostgresDatabase(temp_config)
         try:
             self.logger.info("Connecting to PostgreSQL server...")
-            await pg_db.connect()
+            await pg_db.connect(prepare_queries=False)
             self.logger.info("Connected to PostgreSQL successfully")
             
             # Check if target database exists
@@ -453,7 +453,7 @@ class DatabaseSetupOrchestrator:
 
         pg_db = PostgresDatabase(self.config.postgres)
         try:
-            await pg_db.connect()
+            await pg_db.connect(prepare_queries=False)
             self.logger.info("Connected to PostgreSQL database")
 
             # Try to get existing objects, but handle errors gracefully
