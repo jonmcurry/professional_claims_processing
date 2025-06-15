@@ -41,7 +41,10 @@ venv\Scripts\activate
 python -m pip install --upgrade pip
 
 # Install requirements
-pip install -r requirements.txt
+# Install uv
+pip install uv
+# Install requirements (much faster than just using pip standalone)
+uv pip install -r requirements.txt
 # The cryptography package is required for encryption support.
 # It is included in the requirements file but must be installed for the
 # application to start correctly.
