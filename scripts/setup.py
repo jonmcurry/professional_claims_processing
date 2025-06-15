@@ -1,35 +1,21 @@
 #!/usr/bin/env python3
 """
-Database Setup and Data Generation Master Script
+Fixed Database Setup Script - Handles SQL Server CREATE DATABASE Transaction Issue
 
-This script orchestrates the complete database setup process:
-1. Creates databases if they don't exist
-2. Loads database schema files for PostgreSQL and SQL Server
-3. Runs setup_reference_data.py to create and populate reference tables
-4. Runs generate_sample_data.py to create 100,000 sample claims
-
-Usage:
-    python scripts/setup_database_and_data.py [options]
-
-Options:
-    --skip-database     Skip database creation (assumes databases exist)
-    --skip-schema       Skip schema creation (assumes tables exist)
-    --skip-reference    Skip reference data setup
-    --skip-sample-data  Skip sample data generation
-    --claims N          Number of claims to generate (default: 100000)
-    --batch-size N      Batch size for data operations (default: 1000)
-    --pg-schema PATH    Path to PostgreSQL schema file (default: sql/create_postgres_schema.sql)
-    --sql-schema PATH   Path to SQL Server schema file (default: sql/create_sqlserver_schema.sql)
+This version properly handles SQL Server's requirement that CREATE DATABASE
+must be executed outside of transactions.
 """
 
 import argparse
 import asyncio
 import logging
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, List, Set, Tuple
 
 # Add src to Python path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -41,9 +27,21 @@ from src.config.config import load_config
 from src.db.postgres import PostgresDatabase
 from src.db.sql_server import SQLServerDatabase
 
+# Import pyodbc to create direct connections for database creation
+import pyodbc
+
+
+class SchemaObject:
+    """Represents a database schema object (table, index, view, etc.)"""
+    def __init__(self, name: str, obj_type: str, definition: str = "", dependencies: List[str] = None):
+        self.name = name
+        self.obj_type = obj_type  # 'table', 'index', 'view', 'procedure', 'constraint'
+        self.definition = definition
+        self.dependencies = dependencies or []
+
 
 class DatabaseSetupOrchestrator:
-    """Orchestrates the complete database setup and data generation process"""
+    """Orchestrates the complete database setup and data generation process with schema verification"""
 
     def __init__(self, config):
         self.config = config
@@ -97,44 +95,33 @@ class DatabaseSetupOrchestrator:
             if not result:
                 self.logger.info(f"Database '{self.config.postgres.database}' does not exist, creating it...")
                 
-                # Use a more explicit approach for database creation
-                create_db_query = f'CREATE DATABASE "{self.config.postgres.database}"'
-                self.logger.info(f"Executing: {create_db_query}")
-                
+                # Use direct connection to create database
                 try:
-                    await pg_db.execute(create_db_query)
-                    self.logger.info("PostgreSQL database created successfully")
+                    conn = await pg_db.pool.acquire()
+                    try:
+                        create_db_query = f'CREATE DATABASE "{self.config.postgres.database}"'
+                        self.logger.info(f"Executing: {create_db_query}")
+                        await conn.execute(create_db_query)
+                        self.logger.info("PostgreSQL database created successfully")
+                    finally:
+                        await pg_db.pool.release(conn)
                 except Exception as create_error:
                     self.logger.error(f"Failed to create database: {str(create_error)}")
-                    self.logger.error(f"Error type: {type(create_error).__name__}")
-                    
-                    # Try alternative approach
-                    self.logger.info("Trying alternative database creation method...")
-                    try:
-                        # Get a direct connection and try creating database
-                        conn = await pg_db.pool.acquire()
-                        try:
-                            await conn.execute(create_db_query)
-                            self.logger.info("Database created using direct connection")
-                        finally:
-                            await pg_db.pool.release(conn)
-                    except Exception as alt_error:
-                        self.logger.error(f"Alternative method also failed: {str(alt_error)}")
-                        raise create_error  # Re-raise original error
+                    # Check if it was created by another process
+                    result = await pg_db.fetch(
+                        "SELECT 1 FROM pg_database WHERE datname = $1",
+                        self.config.postgres.database
+                    )
+                    if not result:
+                        raise create_error
+                    else:
+                        self.logger.info("Database exists now (created by another process)")
             else:
                 self.logger.info("PostgreSQL database already exists")
                 
         except Exception as e:
             self.logger.error(f"Error ensuring PostgreSQL database exists: {str(e)}")
             self.logger.error(f"Error type: {type(e).__name__}")
-            
-            # Log more details about the connection
-            self.logger.error(f"Connection details:")
-            self.logger.error(f"  Host: {self.config.postgres.host}")
-            self.logger.error(f"  Port: {self.config.postgres.port}")
-            self.logger.error(f"  User: {self.config.postgres.user}")
-            self.logger.error(f"  Database: postgres")
-            
             raise
         finally:
             try:
@@ -146,35 +133,30 @@ class DatabaseSetupOrchestrator:
         """Ensure SQL Server database exists, create if it doesn't"""
         self.logger.info("Checking SQL Server database...")
         
-        # Create a temporary config to connect to the 'master' database
-        temp_config = self.config.sqlserver.__class__(
-            host=self.config.sqlserver.host,
-            port=self.config.sqlserver.port,
-            user=self.config.sqlserver.user,
-            password=self.config.sqlserver.password,
-            database="master",  # Connect to master database
-            pool_size=2,  # Use minimal pool for setup
-            min_pool_size=1,
-            max_pool_size=2,
-            threshold_ms=self.config.sqlserver.threshold_ms,
-            retries=self.config.sqlserver.retries,
-            retry_delay=self.config.sqlserver.retry_delay,
-            retry_max_delay=self.config.sqlserver.retry_max_delay,
-            retry_jitter=self.config.sqlserver.retry_jitter,
-        )
-        
-        sql_db = SQLServerDatabase(temp_config)
         try:
-            self.logger.info("Connecting to SQL Server...")
-            await sql_db.connect()
+            # Create direct pyodbc connection for database creation
+            # SQL Server requires CREATE DATABASE to be executed outside of transactions
+            self.logger.info("Creating direct SQL Server connection for database operations...")
+            
+            connection_string = (
+                f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+                f"SERVER={self.config.sqlserver.host},{self.config.sqlserver.port};"
+                f"DATABASE=master;"  # Connect to master database
+                f"UID={self.config.sqlserver.user};"
+                f"PWD={self.config.sqlserver.password};"
+                f"APP=ClaimsProcessor_Setup;"
+                f"Connection Timeout=30;"
+                f"TrustServerCertificate=yes;"
+            )
+            
+            conn = pyodbc.connect(connection_string, autocommit=True)  # IMPORTANT: autocommit=True
             self.logger.info("Connected to SQL Server successfully")
             
             # Check if target database exists
             self.logger.info(f"Checking if database '{self.config.sqlserver.database}' exists...")
-            result = await sql_db.fetch(
-                "SELECT 1 FROM sys.databases WHERE name = ?",
-                self.config.sqlserver.database
-            )
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM sys.databases WHERE name = ?", self.config.sqlserver.database)
+            result = cursor.fetchone()
             
             if not result:
                 self.logger.info(f"Database '{self.config.sqlserver.database}' does not exist, creating it...")
@@ -182,10 +164,14 @@ class DatabaseSetupOrchestrator:
                 create_db_query = f"CREATE DATABASE [{self.config.sqlserver.database}]"
                 self.logger.info(f"Executing: {create_db_query}")
                 
-                await sql_db.execute(create_db_query)
+                # Execute without transaction (autocommit is enabled)
+                cursor.execute(create_db_query)
                 self.logger.info("SQL Server database created successfully")
             else:
                 self.logger.info("SQL Server database already exists")
+            
+            cursor.close()
+            conn.close()
                 
         except Exception as e:
             self.logger.error(f"Error ensuring SQL Server database exists: {str(e)}")
@@ -199,27 +185,264 @@ class DatabaseSetupOrchestrator:
             self.logger.error(f"  Database: master")
             
             raise
-        finally:
-            try:
-                await sql_db.close()
-            except:
-                pass
 
-    async def run_schema_setup(self, pg_schema_path: str, sql_schema_path: str):
-        """Load and execute database schema files"""
-        self.logger.info("Starting database schema setup...")
+    async def _get_postgres_schema_objects(self, db: PostgresDatabase) -> Dict[str, SchemaObject]:
+        """Get existing schema objects from PostgreSQL database"""
+        self.logger.info("Retrieving existing PostgreSQL schema objects...")
+        
+        objects = {}
+        
+        try:
+            # Get tables - simplified query
+            tables = await db.fetch(
+                "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = $1",
+                'public'
+            )
+            
+            for table in tables:
+                table_name = table['table_name']
+                table_type = 'view' if table['table_type'] == 'VIEW' else 'table'
+                objects[table_name] = SchemaObject(table_name, table_type)
+            
+            self.logger.info(f"Found {len(objects)} tables/views")
+        except Exception as e:
+            self.logger.warning(f"Failed to get tables: {e}")
+        
+        try:
+            # Get indexes - simplified query
+            indexes = await db.fetch(
+                "SELECT indexname, tablename FROM pg_indexes WHERE schemaname = $1",
+                'public'
+            )
+            
+            index_count = 0
+            for index in indexes:
+                index_name = index['indexname']
+                if not index_name.endswith('_pkey'):  # Skip primary key indexes
+                    objects[index_name] = SchemaObject(
+                        index_name, 'index', 
+                        dependencies=[index['tablename']]
+                    )
+                    index_count += 1
+            
+            self.logger.info(f"Found {index_count} indexes")
+        except Exception as e:
+            self.logger.warning(f"Failed to get indexes: {e}")
+        
+        try:
+            # Get constraints - simplified query
+            constraints = await db.fetch(
+                """SELECT constraint_name, table_name, constraint_type
+                   FROM information_schema.table_constraints 
+                   WHERE table_schema = $1 
+                   AND constraint_type IN ('FOREIGN KEY', 'CHECK', 'UNIQUE')""",
+                'public'
+            )
+            
+            constraint_count = 0
+            for constraint in constraints:
+                constraint_name = constraint['constraint_name']
+                objects[constraint_name] = SchemaObject(
+                    constraint_name, 'constraint',
+                    dependencies=[constraint['table_name']]
+                )
+                constraint_count += 1
+            
+            self.logger.info(f"Found {constraint_count} constraints")
+        except Exception as e:
+            self.logger.warning(f"Failed to get constraints: {e}")
+        
+        try:
+            # Get procedures/functions - simplified query
+            procedures = await db.fetch(
+                "SELECT routine_name FROM information_schema.routines WHERE routine_schema = $1",
+                'public'
+            )
+            
+            proc_count = 0
+            for proc in procedures:
+                proc_name = proc['routine_name']
+                objects[proc_name] = SchemaObject(proc_name, 'procedure')
+                proc_count += 1
+            
+            self.logger.info(f"Found {proc_count} procedures/functions")
+        except Exception as e:
+            self.logger.warning(f"Failed to get procedures: {e}")
+        
+        self.logger.info(f"Found {len(objects)} total existing schema objects in PostgreSQL")
+        return objects
 
-        # Setup PostgreSQL schema
-        await self._setup_postgres_schema(pg_schema_path)
+    async def _get_sqlserver_schema_objects(self, db: SQLServerDatabase) -> Dict[str, SchemaObject]:
+        """Get existing schema objects from SQL Server database"""
+        self.logger.info("Retrieving existing SQL Server schema objects...")
+        
+        objects = {}
+        
+        try:
+            # Get tables and views - simplified query
+            tables = await db.fetch(
+                """SELECT name, type_desc 
+                   FROM sys.objects 
+                   WHERE type IN ('U', 'V') AND schema_id = SCHEMA_ID('dbo')"""
+            )
+            
+            for table in tables:
+                table_name = table['name']
+                table_type = 'view' if table['type_desc'] == 'VIEW' else 'table'
+                objects[table_name] = SchemaObject(table_name, table_type)
+            
+            self.logger.info(f"Found {len([o for o in objects.values() if o.obj_type in ['table', 'view']])} tables/views")
+        except Exception as e:
+            self.logger.warning(f"Failed to get tables: {e}")
+        
+        try:
+            # Get indexes - simplified query
+            indexes = await db.fetch(
+                """SELECT i.name as index_name, t.name as table_name
+                   FROM sys.indexes i
+                   INNER JOIN sys.tables t ON i.object_id = t.object_id
+                   WHERE i.name IS NOT NULL AND t.schema_id = SCHEMA_ID('dbo')"""
+            )
+            
+            index_count = 0
+            for index in indexes:
+                index_name = index['index_name']
+                if not index_name.startswith('PK_'):  # Skip primary key indexes
+                    objects[index_name] = SchemaObject(
+                        index_name, 'index',
+                        dependencies=[index['table_name']]
+                    )
+                    index_count += 1
+            
+            self.logger.info(f"Found {index_count} indexes")
+        except Exception as e:
+            self.logger.warning(f"Failed to get indexes: {e}")
+        
+        try:
+            # Get procedures - simplified query
+            procedures = await db.fetch(
+                "SELECT name FROM sys.procedures WHERE schema_id = SCHEMA_ID('dbo')"
+            )
+            
+            proc_count = 0
+            for proc in procedures:
+                proc_name = proc['name']
+                objects[proc_name] = SchemaObject(proc_name, 'procedure')
+                proc_count += 1
+            
+            self.logger.info(f"Found {proc_count} procedures")
+        except Exception as e:
+            self.logger.warning(f"Failed to get procedures: {e}")
+        
+        self.logger.info(f"Found {len(objects)} total existing schema objects in SQL Server")
+        return objects
 
-        # Setup SQL Server schema
-        await self._setup_sqlserver_schema(sql_schema_path)
+    def _parse_schema_file_objects(self, schema_content: str, is_sqlserver: bool = False) -> Set[str]:
+        """Parse schema file to extract expected object names"""
+        expected_objects = set()
+        
+        # Table patterns
+        table_patterns = [
+            r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\w+\.)?(\w+)',
+            r'CREATE\s+TABLE\s+(?:\[?(\w+)\]?)',
+        ]
+        
+        # Index patterns
+        index_patterns = [
+            r'CREATE\s+(?:UNIQUE\s+)?(?:CLUSTERED\s+)?(?:COLUMNSTORE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)',
+            r'CREATE\s+(?:UNIQUE\s+)?(?:CLUSTERED\s+)?(?:COLUMNSTORE\s+)?INDEX\s+(?:\[?(\w+)\]?)',
+        ]
+        
+        # View patterns
+        view_patterns = [
+            r'CREATE\s+(?:MATERIALIZED\s+)?VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\w+\.)?(\w+)',
+            r'CREATE\s+(?:MATERIALIZED\s+)?VIEW\s+(?:\[?\w+\]?\.)?(?:\[?(\w+)\]?)',
+        ]
+        
+        # Procedure patterns
+        procedure_patterns = [
+            r'CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+(?:\w+\.)?(\w+)',
+            r'CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:\w+\.)?(\w+)',
+        ]
+        
+        all_patterns = table_patterns + index_patterns + view_patterns + procedure_patterns
+        
+        for pattern in all_patterns:
+            matches = re.finditer(pattern, schema_content, re.IGNORECASE | re.MULTILINE)
+            for match in matches:
+                obj_name = match.group(1)
+                if obj_name and not obj_name.lower() in ['exists', 'not', 'if']:
+                    expected_objects.add(obj_name.lower())
+        
+        return expected_objects
 
-        self.logger.info("Database schema setup completed successfully!")
+    async def _drop_dependent_objects(self, db, objects_to_drop: List[SchemaObject], is_sqlserver: bool = False):
+        """Drop objects in dependency order (indexes before tables, etc.)"""
+        
+        # Sort objects by type for proper dependency order
+        drop_order = ['index', 'constraint', 'view', 'procedure', 'table']
+        
+        for obj_type in drop_order:
+            type_objects = [obj for obj in objects_to_drop if obj.obj_type == obj_type]
+            
+            for obj in type_objects:
+                try:
+                    if obj.obj_type == 'table':
+                        if is_sqlserver:
+                            drop_sql = f"DROP TABLE [{obj.name}]"
+                        else:
+                            drop_sql = f"DROP TABLE IF EXISTS {obj.name} CASCADE"
+                    elif obj.obj_type == 'view':
+                        if is_sqlserver:
+                            drop_sql = f"DROP VIEW [{obj.name}]"
+                        else:
+                            drop_sql = f"DROP VIEW IF EXISTS {obj.name} CASCADE"
+                    elif obj.obj_type == 'index':
+                        if is_sqlserver:
+                            drop_sql = f"DROP INDEX [{obj.name}] ON [{obj.dependencies[0] if obj.dependencies else 'unknown'}]"
+                        else:
+                            drop_sql = f"DROP INDEX IF EXISTS {obj.name}"
+                    elif obj.obj_type == 'procedure':
+                        if is_sqlserver:
+                            drop_sql = f"DROP PROCEDURE [{obj.name}]"
+                        else:
+                            drop_sql = f"DROP FUNCTION IF EXISTS {obj.name}() CASCADE"
+                    elif obj.obj_type == 'constraint':
+                        if is_sqlserver:
+                            table_name = obj.dependencies[0] if obj.dependencies else 'unknown'
+                            drop_sql = f"ALTER TABLE [{table_name}] DROP CONSTRAINT [{obj.name}]"
+                        else:
+                            table_name = obj.dependencies[0] if obj.dependencies else 'unknown'
+                            drop_sql = f"ALTER TABLE {table_name} DROP CONSTRAINT IF EXISTS {obj.name}"
+                    else:
+                        continue
+                    
+                    self.logger.info(f"Dropping {obj.obj_type}: {obj.name}")
+                    await db.execute(drop_sql)
+                    
+                except Exception as e:
+                    self.logger.warning(f"Failed to drop {obj.obj_type} {obj.name}: {e}")
 
-    async def _setup_postgres_schema(self, schema_path: str):
-        """Setup PostgreSQL database schema"""
-        self.logger.info("Setting up PostgreSQL schema...")
+    async def run_schema_setup_with_verification(
+        self, 
+        pg_schema_path: str, 
+        sql_schema_path: str, 
+        force_recreate: bool = False
+    ):
+        """Setup schemas with intelligent verification and recreation"""
+        self.logger.info("Starting database schema setup with verification...")
+
+        # Setup PostgreSQL schema with verification
+        await self._setup_postgres_schema_with_verification(pg_schema_path, force_recreate)
+
+        # Setup SQL Server schema with verification
+        await self._setup_sqlserver_schema_with_verification(sql_schema_path, force_recreate)
+
+        self.logger.info("Database schema setup with verification completed successfully!")
+
+    async def _setup_postgres_schema_with_verification(self, schema_path: str, force_recreate: bool = False):
+        """Setup PostgreSQL schema with verification"""
+        self.logger.info("Setting up PostgreSQL schema with verification...")
 
         if not os.path.exists(schema_path):
             raise FileNotFoundError(f"PostgreSQL schema file not found: {schema_path}")
@@ -233,9 +456,42 @@ class DatabaseSetupOrchestrator:
             await pg_db.connect()
             self.logger.info("Connected to PostgreSQL database")
 
-            # Split SQL statements and execute them
+            # Try to get existing objects, but handle errors gracefully
+            existing_objects = {}
+            try:
+                existing_objects = await self._get_postgres_schema_objects(pg_db)
+            except Exception as e:
+                self.logger.warning(f"Could not retrieve existing schema objects: {e}")
+                self.logger.info("Proceeding with fresh schema setup...")
+            
+            # Parse expected objects from schema file
+            expected_objects = self._parse_schema_file_objects(schema_sql, is_sqlserver=False)
+            
+            self.logger.info(f"Expected objects: {len(expected_objects)}")
+            self.logger.info(f"Existing objects: {len(existing_objects)}")
+            
+            # Determine what needs to be recreated
+            objects_to_drop = []
+            
+            if force_recreate and existing_objects:
+                self.logger.info("Force recreate enabled - dropping all existing objects")
+                objects_to_drop = list(existing_objects.values())
+            elif existing_objects:
+                # Check for objects that exist but shouldn't, or need updates
+                for obj_name, obj in existing_objects.items():
+                    if obj_name.lower() not in expected_objects:
+                        self.logger.info(f"Found unexpected object: {obj_name}")
+                        objects_to_drop.append(obj)
+            
+            # Drop objects that need to be recreated
+            if objects_to_drop:
+                self.logger.info(f"Dropping {len(objects_to_drop)} objects for recreation...")
+                await self._drop_dependent_objects(pg_db, objects_to_drop, is_sqlserver=False)
+            
+            # Execute schema statements
             statements = self._split_sql_statements(schema_sql)
-
+            successful_statements = 0
+            
             for i, statement in enumerate(statements):
                 if statement.strip():
                     try:
@@ -244,22 +500,17 @@ class DatabaseSetupOrchestrator:
                             skip_cmd in statement.upper()
                             for skip_cmd in ["CREATE DATABASE", "\\C", "USE "]
                         ):
-                            self.logger.info(
-                                f"Skipping statement {i+1}: Database/connection command"
-                            )
                             continue
 
-                        self.logger.debug(f"Executing PostgreSQL statement {i+1}")
                         await pg_db.execute(statement)
+                        successful_statements += 1
 
                     except Exception as e:
                         # Log error but continue with other statements
-                        self.logger.warning(
-                            f"Error executing PostgreSQL statement {i+1}: {e}"
-                        )
+                        self.logger.warning(f"Error executing PostgreSQL statement {i+1}: {e}")
                         self.logger.debug(f"Failed statement: {statement[:100]}...")
 
-            self.logger.info("PostgreSQL schema setup completed")
+            self.logger.info(f"PostgreSQL schema setup completed - {successful_statements} statements executed")
 
         except Exception as e:
             self.logger.error(f"Error setting up PostgreSQL schema: {e}")
@@ -267,9 +518,9 @@ class DatabaseSetupOrchestrator:
         finally:
             await pg_db.close()
 
-    async def _setup_sqlserver_schema(self, schema_path: str):
-        """Setup SQL Server database schema"""
-        self.logger.info("Setting up SQL Server schema...")
+    async def _setup_sqlserver_schema_with_verification(self, schema_path: str, force_recreate: bool = False):
+        """Setup SQL Server schema with verification"""
+        self.logger.info("Setting up SQL Server schema with verification...")
 
         if not os.path.exists(schema_path):
             raise FileNotFoundError(f"SQL Server schema file not found: {schema_path}")
@@ -283,8 +534,41 @@ class DatabaseSetupOrchestrator:
             await sql_db.connect()
             self.logger.info("Connected to SQL Server database")
 
-            # Split SQL statements and execute them
+            # Try to get existing objects, but handle errors gracefully
+            existing_objects = {}
+            try:
+                existing_objects = await self._get_sqlserver_schema_objects(sql_db)
+            except Exception as e:
+                self.logger.warning(f"Could not retrieve existing schema objects: {e}")
+                self.logger.info("Proceeding with fresh schema setup...")
+            
+            # Parse expected objects from schema file
+            expected_objects = self._parse_schema_file_objects(schema_sql, is_sqlserver=True)
+            
+            self.logger.info(f"Expected objects: {len(expected_objects)}")
+            self.logger.info(f"Existing objects: {len(existing_objects)}")
+            
+            # Determine what needs to be recreated
+            objects_to_drop = []
+            
+            if force_recreate and existing_objects:
+                self.logger.info("Force recreate enabled - dropping all existing objects")
+                objects_to_drop = list(existing_objects.values())
+            elif existing_objects:
+                # Check for objects that exist but shouldn't, or need updates
+                for obj_name, obj in existing_objects.items():
+                    if obj_name.lower() not in expected_objects:
+                        self.logger.info(f"Found unexpected object: {obj_name}")
+                        objects_to_drop.append(obj)
+            
+            # Drop objects that need to be recreated
+            if objects_to_drop:
+                self.logger.info(f"Dropping {len(objects_to_drop)} objects for recreation...")
+                await self._drop_dependent_objects(sql_db, objects_to_drop, is_sqlserver=True)
+            
+            # Execute schema statements
             statements = self._split_sql_statements(schema_sql, sql_server=True)
+            successful_statements = 0
 
             for i, statement in enumerate(statements):
                 if statement.strip():
@@ -294,22 +578,17 @@ class DatabaseSetupOrchestrator:
                             skip_cmd in statement.upper()
                             for skip_cmd in ["CREATE DATABASE", "USE "]
                         ):
-                            self.logger.info(
-                                f"Skipping statement {i+1}: Database/connection command"
-                            )
                             continue
 
-                        self.logger.debug(f"Executing SQL Server statement {i+1}")
                         await sql_db.execute(statement)
+                        successful_statements += 1
 
                     except Exception as e:
                         # Log error but continue with other statements
-                        self.logger.warning(
-                            f"Error executing SQL Server statement {i+1}: {e}"
-                        )
+                        self.logger.warning(f"Error executing SQL Server statement {i+1}: {e}")
                         self.logger.debug(f"Failed statement: {statement[:100]}...")
 
-            self.logger.info("SQL Server schema setup completed")
+            self.logger.info(f"SQL Server schema setup completed - {successful_statements} statements executed")
 
         except Exception as e:
             self.logger.error(f"Error setting up SQL Server schema: {e}")
@@ -378,14 +657,15 @@ class DatabaseSetupOrchestrator:
         skip_schema: bool = False,
         skip_reference: bool = False,
         skip_sample_data: bool = False,
+        force_schema: bool = False,
         total_claims: int = 100000,
         batch_size: int = 1000,
     ):
-        """Run the complete database setup process"""
+        """Run the complete database setup process with intelligent schema management"""
 
         start_time = datetime.now()
         self.logger.info("=" * 80)
-        self.logger.info("STARTING COMPLETE DATABASE SETUP AND DATA GENERATION")
+        self.logger.info("STARTING ENHANCED DATABASE SETUP WITH SCHEMA VERIFICATION")
         self.logger.info("=" * 80)
 
         try:
@@ -398,12 +678,14 @@ class DatabaseSetupOrchestrator:
             else:
                 self.logger.info("Skipping database creation (--skip-database specified)")
 
-            # Step 1: Schema Setup
+            # Step 1: Schema Setup with Verification
             if not skip_schema:
                 self.logger.info("\n" + "=" * 50)
-                self.logger.info("STEP 1: DATABASE SCHEMA SETUP")
+                self.logger.info("STEP 1: DATABASE SCHEMA SETUP WITH VERIFICATION")
                 self.logger.info("=" * 50)
-                await self.run_schema_setup(pg_schema_path, sql_schema_path)
+                if force_schema:
+                    self.logger.info("Force schema recreation enabled")
+                await self.run_schema_setup_with_verification(pg_schema_path, sql_schema_path, force_schema)
             else:
                 self.logger.info("Skipping schema setup (--skip-schema specified)")
 
@@ -432,7 +714,7 @@ class DatabaseSetupOrchestrator:
             # Summary
             duration = datetime.now() - start_time
             self.logger.info("\n" + "=" * 80)
-            self.logger.info("DATABASE SETUP COMPLETED SUCCESSFULLY!")
+            self.logger.info("ENHANCED DATABASE SETUP COMPLETED SUCCESSFULLY!")
             self.logger.info(f"Total Duration: {duration}")
             self.logger.info("=" * 80)
 
@@ -456,7 +738,7 @@ async def main():
 
     # Set up argument parsing
     parser = argparse.ArgumentParser(
-        description="Complete database setup and data generation for claims processing system",
+        description="Enhanced database setup with intelligent schema verification for claims processing system",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
@@ -472,6 +754,9 @@ async def main():
     )
     parser.add_argument(
         "--skip-sample-data", action="store_true", help="Skip sample data generation"
+    )
+    parser.add_argument(
+        "--force-schema", action="store_true", help="Force recreation of all schema objects"
     )
 
     # Data generation options
@@ -547,6 +832,7 @@ async def main():
             skip_schema=args.skip_schema,
             skip_reference=args.skip_reference,
             skip_sample_data=args.skip_sample_data,
+            force_schema=args.force_schema,
             total_claims=args.claims,
             batch_size=args.batch_size,
         )
@@ -558,6 +844,7 @@ async def main():
         return 1
     except Exception as e:
         logger.error(f"Setup failed with error: {e}")
+        logger.error("Full error traceback:", exc_info=True)
         return 1
 
 
