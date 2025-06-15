@@ -89,6 +89,13 @@ CREATE TABLE facilities (
 );
 GO
 
+ALTER TABLE facilities
+    ADD CONSTRAINT fk_facility_region FOREIGN KEY (region_id)
+        REFERENCES facility_region(region_id);
+
+CREATE INDEX idx_facilities_region_id ON facilities (region_id);
+GO
+
 CREATE TABLE facility_financial_classes (
     facility_id INT,
     financial_class_id VARCHAR(10),
