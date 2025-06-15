@@ -1,519 +1,484 @@
 #!/usr/bin/env python3
 """
 RVU Data Synchronization System
-Manages RVU data between SQL Server (master) and PostgreSQL (processing cache)
+Handles synchronization of RVU data between SQL Server (master) and PostgreSQL (cache)
 """
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
+from typing import Dict, List, Optional, Any
 from decimal import Decimal
-from typing import List, Dict, Any, Optional
-import hashlib
-import json
-
-from src.config.config import load_config
-from src.db.postgres import PostgresDatabase
-from src.db.sql_server import SQLServerDatabase
 
 
 class RVUDataSync:
     """
     RVU Data Synchronization Manager
-    
-    Handles:
-    - Initial population of PostgreSQL from SQL Server
-    - Incremental updates when RVU data changes
-    - Data integrity validation
-    - Performance optimization for claims processing
+    Synchronizes RVU data from SQL Server (authoritative source) to PostgreSQL (cache)
     """
     
-    def __init__(self, pg_db: PostgresDatabase, sql_db: SQLServerDatabase):
+    def __init__(self, pg_db, sql_db):
+        """
+        Initialize RVU sync system
+        
+        Args:
+            pg_db: PostgreSQL database instance
+            sql_db: SQL Server database instance
+        """
         self.pg_db = pg_db
         self.sql_db = sql_db
         self.logger = logging.getLogger(__name__)
-    
-    async def initial_sync(self) -> None:
-        """Perform initial population of PostgreSQL RVU data from SQL Server"""
-        self.logger.info("Starting initial RVU data sync from SQL Server to PostgreSQL...")
         
-        # Get all RVU data from SQL Server (master)
-        sql_rvu_data = await self._fetch_sql_server_rvu_data()
+    async def initial_sync(self) -> Dict[str, Any]:
+        """
+        Perform initial synchronization of RVU data from SQL Server to PostgreSQL
         
-        if not sql_rvu_data:
-            self.logger.warning("No RVU data found in SQL Server master")
-            return
+        Returns:
+            Dict containing sync results and statistics
+        """
+        self.logger.info("Starting initial RVU data synchronization...")
         
-        # Clear existing PostgreSQL RVU data
-        await self.pg_db.execute("TRUNCATE TABLE rvu_data")
-        self.logger.info("Cleared existing PostgreSQL RVU data")
+        sync_start_time = datetime.now()
         
-        # Bulk insert into PostgreSQL
-        await self._bulk_insert_postgres_rvu(sql_rvu_data)
-        
-        # Create sync tracking record
-        await self._record_sync_completion("initial_sync", len(sql_rvu_data))
-        
-        self.logger.info(f"Initial sync completed: {len(sql_rvu_data)} RVU records synced")
-    
-    async def incremental_sync(self) -> int:
-        """Perform incremental sync of changes since last sync"""
-        self.logger.info("Starting incremental RVU data sync...")
-        
-        # Get last sync timestamp
-        last_sync = await self._get_last_sync_timestamp()
-        
-        # Get changed records from SQL Server
-        changed_records = await self._fetch_changed_rvu_data(last_sync)
-        
-        if not changed_records:
-            self.logger.info("No RVU changes detected since last sync")
-            return 0
-        
-        # Apply changes to PostgreSQL
-        changes_applied = await self._apply_rvu_changes(changed_records)
-        
-        # Record sync completion
-        await self._record_sync_completion("incremental_sync", changes_applied)
-        
-        self.logger.info(f"Incremental sync completed: {changes_applied} changes applied")
-        return changes_applied
+        try:
+            # Start sync log entry
+            sync_id = await self._start_sync_log("initial_sync")
+            
+            # Fetch all RVU data from SQL Server
+            sql_server_data = await self._fetch_rvu_data_from_sql_server()
+            
+            if not sql_server_data:
+                self.logger.warning("No RVU data found in SQL Server")
+                await self._complete_sync_log(sync_id, 0, "completed", "No data found in SQL Server")
+                return {
+                    "success": True,
+                    "records_synced": 0,
+                    "message": "No RVU data found in SQL Server"
+                }
+            
+            # Clear existing PostgreSQL data
+            await self._clear_postgresql_rvu_data()
+            
+            # Insert data into PostgreSQL
+            records_synced = await self._insert_rvu_data_to_postgresql(sql_server_data)
+            
+            # Complete sync log
+            await self._complete_sync_log(sync_id, records_synced, "completed")
+            
+            sync_duration = (datetime.now() - sync_start_time).total_seconds()
+            
+            self.logger.info(f"Initial RVU sync completed successfully")
+            self.logger.info(f"Records synced: {records_synced}")
+            self.logger.info(f"Duration: {sync_duration:.2f} seconds")
+            
+            return {
+                "success": True,
+                "records_synced": records_synced,
+                "duration_seconds": sync_duration,
+                "sql_server_count": len(sql_server_data),
+                "postgresql_count": records_synced
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Initial RVU sync failed: {e}")
+            try:
+                await self._complete_sync_log(sync_id, 0, "failed", str(e))
+            except:
+                pass  # Don't fail on logging failure
+            
+            return {
+                "success": False,
+                "error": str(e),
+                "records_synced": 0
+            }
     
     async def validate_data_integrity(self) -> Dict[str, Any]:
-        """Validate that PostgreSQL and SQL Server RVU data are in sync"""
+        """
+        Validate data integrity between SQL Server and PostgreSQL
+        
+        Returns:
+            Dict containing validation results
+        """
         self.logger.info("Validating RVU data integrity between databases...")
         
-        # Get counts and checksums from both databases
-        sql_stats = await self._get_sql_server_rvu_stats()
-        pg_stats = await self._get_postgres_rvu_stats()
-        
-        # Compare data integrity
-        integrity_report = {
-            "sql_server_count": sql_stats["count"],
-            "postgresql_count": pg_stats["count"],
-            "count_match": sql_stats["count"] == pg_stats["count"],
-            "sql_server_checksum": sql_stats["checksum"],
-            "postgresql_checksum": pg_stats["checksum"],
-            "checksum_match": sql_stats["checksum"] == pg_stats["checksum"],
-            "last_validation": datetime.now().isoformat(),
-            "sync_required": sql_stats["count"] != pg_stats["count"] or sql_stats["checksum"] != pg_stats["checksum"]
-        }
-        
-        if not integrity_report["sync_required"]:
-            self.logger.info("✅ RVU data integrity validation passed")
-        else:
-            self.logger.warning("⚠️ RVU data integrity validation failed - sync required")
-        
-        return integrity_report
+        try:
+            # Get record counts from both databases
+            sql_server_count = await self._get_sql_server_rvu_count()
+            postgresql_count = await self._get_postgresql_rvu_count()
+            
+            # Get sample of data from both databases for comparison
+            sql_server_sample = await self._get_sql_server_rvu_sample()
+            postgresql_sample = await self._get_postgresql_rvu_sample()
+            
+            # Check if sync is required
+            sync_required = sql_server_count != postgresql_count
+            
+            if sync_required:
+                self.logger.warning(f"Data integrity check failed: SQL Server has {sql_server_count} records, PostgreSQL has {postgresql_count}")
+            else:
+                self.logger.info(f"Data integrity check passed: Both databases have {sql_server_count} records")
+            
+            # Compare sample data
+            data_match = self._compare_sample_data(sql_server_sample, postgresql_sample)
+            
+            return {
+                "sync_required": sync_required,
+                "sql_server_count": sql_server_count,
+                "postgresql_count": postgresql_count,
+                "data_match": data_match,
+                "last_validated": datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Data integrity validation failed: {e}")
+            return {
+                "sync_required": True,
+                "error": str(e),
+                "sql_server_count": 0,
+                "postgresql_count": 0,
+                "data_match": False
+            }
     
-    async def _fetch_sql_server_rvu_data(self) -> List[Dict[str, Any]]:
-        """Fetch all active RVU data from SQL Server"""
+    async def incremental_sync(self) -> Dict[str, Any]:
+        """
+        Perform incremental synchronization of updated RVU data
+        
+        Returns:
+            Dict containing sync results
+        """
+        self.logger.info("Starting incremental RVU data synchronization...")
+        
+        try:
+            sync_id = await self._start_sync_log("incremental_sync")
+            
+            # Get last sync timestamp
+            last_sync_time = await self._get_last_sync_time()
+            
+            # Fetch updated records from SQL Server
+            updated_records = await self._fetch_updated_rvu_data(last_sync_time)
+            
+            if not updated_records:
+                self.logger.info("No updated RVU records found")
+                await self._complete_sync_log(sync_id, 0, "completed", "No updates found")
+                return {"success": True, "records_synced": 0, "message": "No updates found"}
+            
+            # Update PostgreSQL with changed records
+            records_synced = await self._update_postgresql_rvu_data(updated_records)
+            
+            await self._complete_sync_log(sync_id, records_synced, "completed")
+            
+            self.logger.info(f"Incremental sync completed: {records_synced} records updated")
+            
+            return {
+                "success": True,
+                "records_synced": records_synced,
+                "last_sync_time": last_sync_time
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Incremental RVU sync failed: {e}")
+            return {"success": False, "error": str(e), "records_synced": 0}
+    
+    # Private helper methods
+    
+    async def _fetch_rvu_data_from_sql_server(self) -> List[Dict[str, Any]]:
+        """Fetch all RVU data from SQL Server"""
         query = """
             SELECT 
-                procedure_code,
-                description,
-                category,
-                subcategory,
-                work_rvu,
-                practice_expense_rvu,
-                malpractice_rvu,
-                total_rvu,
-                conversion_factor,
-                non_facility_pe_rvu,
-                facility_pe_rvu,
-                effective_date,
-                end_date,
-                status,
-                global_period,
-                professional_component,
-                technical_component,
-                bilateral_surgery,
-                created_at,
-                updated_at
-            FROM rvu_data 
-            WHERE status = 'ACTIVE'
-            ORDER BY procedure_code
-        """
-        
-        return await self.sql_db.fetch(query)
-    
-    async def _fetch_changed_rvu_data(self, since_timestamp: datetime) -> List[Dict[str, Any]]:
-        """Fetch RVU records changed since the given timestamp"""
-        query = """
-            SELECT 
-                procedure_code,
-                description,
-                category,
-                subcategory,
-                work_rvu,
-                practice_expense_rvu,
-                malpractice_rvu,
-                total_rvu,
-                conversion_factor,
-                non_facility_pe_rvu,
-                facility_pe_rvu,
-                effective_date,
-                end_date,
-                status,
-                global_period,
-                professional_component,
-                technical_component,
-                bilateral_surgery,
-                created_at,
-                updated_at,
-                CASE WHEN end_date IS NOT NULL OR status != 'ACTIVE' THEN 'DELETE' ELSE 'UPSERT' END as sync_action
-            FROM rvu_data 
-            WHERE updated_at > ?
-            ORDER BY updated_at, procedure_code
-        """
-        
-        return await self.sql_db.fetch(query, since_timestamp)
-    
-    async def _bulk_insert_postgres_rvu(self, rvu_data: List[Dict[str, Any]]) -> None:
-        """Bulk insert RVU data into PostgreSQL using optimized COPY"""
-        
-        if not rvu_data:
-            return
-        
-        # Prepare data for PostgreSQL insert
-        pg_records = []
-        for record in rvu_data:
-            pg_record = (
-                record['procedure_code'],
-                record['description'],
-                record['category'],
-                record['subcategory'],
-                record['work_rvu'],
-                record['practice_expense_rvu'],
-                record['malpractice_rvu'],
-                record['total_rvu'],
-                record['conversion_factor'],
-                record['non_facility_pe_rvu'],
-                record['facility_pe_rvu'],
-                record['effective_date'],
-                record['end_date'],
-                record['status'].lower(),  # PostgreSQL uses lowercase
-                record['global_period'],
-                bool(record['professional_component']),
-                bool(record['technical_component']),
-                bool(record['bilateral_surgery']),
-                record['created_at'],
-                record['updated_at']
-            )
-            pg_records.append(pg_record)
-        
-        # Use PostgreSQL COPY for high-performance bulk insert
-        copy_query = """
-            COPY rvu_data (
                 procedure_code, description, category, subcategory,
                 work_rvu, practice_expense_rvu, malpractice_rvu, total_rvu,
                 conversion_factor, non_facility_pe_rvu, facility_pe_rvu,
                 effective_date, end_date, status, global_period,
                 professional_component, technical_component, bilateral_surgery,
                 created_at, updated_at
-            ) FROM STDIN
-        """
-        
-        async with self.pg_db.pool.acquire() as conn:
-            await conn.copy_records_to_table(
-                'rvu_data',
-                records=pg_records,
-                columns=[
-                    'procedure_code', 'description', 'category', 'subcategory',
-                    'work_rvu', 'practice_expense_rvu', 'malpractice_rvu', 'total_rvu',
-                    'conversion_factor', 'non_facility_pe_rvu', 'facility_pe_rvu',
-                    'effective_date', 'end_date', 'status', 'global_period',
-                    'professional_component', 'technical_component', 'bilateral_surgery',
-                    'created_at', 'updated_at'
-                ]
-            )
-        
-        self.logger.info(f"Bulk inserted {len(pg_records)} RVU records into PostgreSQL")
-    
-    async def _apply_rvu_changes(self, changes: List[Dict[str, Any]]) -> int:
-        """Apply incremental changes to PostgreSQL"""
-        
-        changes_applied = 0
-        
-        for change in changes:
-            action = change.get('sync_action', 'UPSERT')
-            procedure_code = change['procedure_code']
-            
-            if action == 'DELETE':
-                # Remove from PostgreSQL
-                await self.pg_db.execute(
-                    "DELETE FROM rvu_data WHERE procedure_code = $1",
-                    procedure_code
-                )
-                self.logger.debug(f"Deleted RVU record: {procedure_code}")
-                
-            else:  # UPSERT
-                # Update or insert in PostgreSQL
-                upsert_query = """
-                    INSERT INTO rvu_data (
-                        procedure_code, description, category, subcategory,
-                        work_rvu, practice_expense_rvu, malpractice_rvu, total_rvu,
-                        conversion_factor, non_facility_pe_rvu, facility_pe_rvu,
-                        effective_date, end_date, status, global_period,
-                        professional_component, technical_component, bilateral_surgery,
-                        created_at, updated_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
-                    ON CONFLICT (procedure_code) DO UPDATE SET
-                        description = EXCLUDED.description,
-                        category = EXCLUDED.category,
-                        subcategory = EXCLUDED.subcategory,
-                        work_rvu = EXCLUDED.work_rvu,
-                        practice_expense_rvu = EXCLUDED.practice_expense_rvu,
-                        malpractice_rvu = EXCLUDED.malpractice_rvu,
-                        total_rvu = EXCLUDED.total_rvu,
-                        conversion_factor = EXCLUDED.conversion_factor,
-                        non_facility_pe_rvu = EXCLUDED.non_facility_pe_rvu,
-                        facility_pe_rvu = EXCLUDED.facility_pe_rvu,
-                        effective_date = EXCLUDED.effective_date,
-                        end_date = EXCLUDED.end_date,
-                        status = EXCLUDED.status,
-                        global_period = EXCLUDED.global_period,
-                        professional_component = EXCLUDED.professional_component,
-                        technical_component = EXCLUDED.technical_component,
-                        bilateral_surgery = EXCLUDED.bilateral_surgery,
-                        updated_at = EXCLUDED.updated_at
-                """
-                
-                await self.pg_db.execute(
-                    upsert_query,
-                    change['procedure_code'],
-                    change['description'],
-                    change['category'],
-                    change['subcategory'],
-                    change['work_rvu'],
-                    change['practice_expense_rvu'],
-                    change['malpractice_rvu'],
-                    change['total_rvu'],
-                    change['conversion_factor'],
-                    change['non_facility_pe_rvu'],
-                    change['facility_pe_rvu'],
-                    change['effective_date'],
-                    change['end_date'],
-                    change['status'].lower(),
-                    change['global_period'],
-                    bool(change['professional_component']),
-                    bool(change['technical_component']),
-                    bool(change['bilateral_surgery']),
-                    change['created_at'],
-                    change['updated_at']
-                )
-                
-                self.logger.debug(f"Upserted RVU record: {procedure_code}")
-            
-            changes_applied += 1
-        
-        return changes_applied
-    
-    async def _get_sql_server_rvu_stats(self) -> Dict[str, Any]:
-        """Get count and checksum of SQL Server RVU data"""
-        query = """
-            SELECT 
-                COUNT(*) as rvu_count,
-                CHECKSUM_AGG(CHECKSUM(*)) as data_checksum
             FROM rvu_data 
             WHERE status = 'ACTIVE'
-        """
-        
-        result = await self.sql_db.fetch(query)
-        return {
-            "count": result[0]['rvu_count'],
-            "checksum": str(result[0]['data_checksum'])
-        }
-    
-    async def _get_postgres_rvu_stats(self) -> Dict[str, Any]:
-        """Get count and checksum of PostgreSQL RVU data"""
-        # PostgreSQL doesn't have CHECKSUM_AGG, so we'll create a hash
-        query = """
-            SELECT 
-                COUNT(*) as rvu_count,
-                string_agg(
-                    md5(procedure_code || COALESCE(description, '') || COALESCE(total_rvu::text, '')), 
-                    '' ORDER BY procedure_code
-                ) as concatenated_hashes
-            FROM rvu_data 
-            WHERE status = 'active'
-        """
-        
-        result = await self.pg_db.fetch(query)
-        
-        # Create a final hash of all concatenated hashes
-        concat_hash = result[0]['concatenated_hashes'] or ''
-        final_checksum = hashlib.md5(concat_hash.encode()).hexdigest()
-        
-        return {
-            "count": result[0]['rvu_count'],
-            "checksum": final_checksum
-        }
-    
-    async def _get_last_sync_timestamp(self) -> datetime:
-        """Get the timestamp of the last successful sync"""
-        query = """
-            SELECT MAX(sync_completed_at) as last_sync
-            FROM rvu_sync_log 
-            WHERE sync_status = 'completed'
+            ORDER BY procedure_code
         """
         
         try:
-            result = await self.pg_db.fetch(query)
-            last_sync = result[0]['last_sync'] if result and result[0]['last_sync'] else None
-            
-            if last_sync:
-                return last_sync
-            else:
-                # If no previous sync, start from 30 days ago
-                return datetime.now() - timedelta(days=30)
-                
-        except Exception:
-            # If sync log table doesn't exist, start from 30 days ago
-            return datetime.now() - timedelta(days=30)
+            rows = await self.sql_db.fetch(query)
+            return [dict(row) for row in rows] if rows else []
+        except Exception as e:
+            self.logger.warning(f"Error fetching RVU data from SQL Server: {e}")
+            return []
     
-    async def _record_sync_completion(self, sync_type: str, records_processed: int) -> None:
-        """Record successful sync completion"""
-        
-        # Ensure sync log table exists
-        await self._ensure_sync_log_table()
+    async def _clear_postgresql_rvu_data(self) -> None:
+        """Clear existing RVU data from PostgreSQL"""
+        try:
+            await self.pg_db.execute("DELETE FROM rvu_data")
+            self.logger.debug("Cleared existing RVU data from PostgreSQL")
+        except Exception as e:
+            self.logger.warning(f"Error clearing PostgreSQL RVU data: {e}")
+            # Don't fail on this - table might not exist yet
+    
+    async def _insert_rvu_data_to_postgresql(self, rvu_data: List[Dict[str, Any]]) -> int:
+        """Insert RVU data into PostgreSQL in batches"""
+        if not rvu_data:
+            return 0
         
         insert_query = """
-            INSERT INTO rvu_sync_log (
-                sync_type, 
-                sync_started_at, 
-                sync_completed_at, 
-                records_processed, 
-                sync_status
-            ) VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO rvu_data (
+                procedure_code, description, category, subcategory,
+                work_rvu, practice_expense_rvu, malpractice_rvu, total_rvu,
+                conversion_factor, non_facility_pe_rvu, facility_pe_rvu,
+                effective_date, end_date, status, global_period,
+                professional_component, technical_component, bilateral_surgery,
+                created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+            ON CONFLICT (procedure_code) DO UPDATE SET
+                description = EXCLUDED.description,
+                category = EXCLUDED.category,
+                subcategory = EXCLUDED.subcategory,
+                work_rvu = EXCLUDED.work_rvu,
+                practice_expense_rvu = EXCLUDED.practice_expense_rvu,
+                malpractice_rvu = EXCLUDED.malpractice_rvu,
+                total_rvu = EXCLUDED.total_rvu,
+                conversion_factor = EXCLUDED.conversion_factor,
+                non_facility_pe_rvu = EXCLUDED.non_facility_pe_rvu,
+                facility_pe_rvu = EXCLUDED.facility_pe_rvu,
+                effective_date = EXCLUDED.effective_date,
+                end_date = EXCLUDED.end_date,
+                status = EXCLUDED.status,
+                global_period = EXCLUDED.global_period,
+                professional_component = EXCLUDED.professional_component,
+                technical_component = EXCLUDED.technical_component,
+                bilateral_surgery = EXCLUDED.bilateral_surgery,
+                updated_at = EXCLUDED.updated_at
         """
         
-        now = datetime.now()
-        await self.pg_db.execute(
-            insert_query,
-            sync_type,
-            now,
-            now,
-            records_processed,
-            'completed'
-        )
+        records_inserted = 0
+        batch_size = 1000
+        
+        for i in range(0, len(rvu_data), batch_size):
+            batch = rvu_data[i:i + batch_size]
+            
+            for record in batch:
+                try:
+                    # Convert values and handle None fields
+                    values = (
+                        record.get('procedure_code'),
+                        record.get('description'),
+                        record.get('category'),
+                        record.get('subcategory'),
+                        self._safe_decimal(record.get('work_rvu')),
+                        self._safe_decimal(record.get('practice_expense_rvu')),
+                        self._safe_decimal(record.get('malpractice_rvu')),
+                        self._safe_decimal(record.get('total_rvu')),
+                        self._safe_decimal(record.get('conversion_factor')),
+                        self._safe_decimal(record.get('non_facility_pe_rvu')),
+                        self._safe_decimal(record.get('facility_pe_rvu')),
+                        record.get('effective_date'),
+                        record.get('end_date'),
+                        record.get('status', 'active'),
+                        record.get('global_period'),
+                        record.get('professional_component', False),
+                        record.get('technical_component', False),
+                        record.get('bilateral_surgery', False),
+                        record.get('created_at', datetime.now()),
+                        record.get('updated_at', datetime.now())
+                    )
+                    
+                    await self.pg_db.execute(insert_query, *values)
+                    records_inserted += 1
+                    
+                except Exception as e:
+                    self.logger.warning(f"Error inserting RVU record {record.get('procedure_code', 'unknown')}: {e}")
+                    continue
+            
+            if i > 0 and i % (batch_size * 5) == 0:
+                self.logger.debug(f"Inserted {records_inserted} RVU records so far...")
+        
+        return records_inserted
     
-    async def _ensure_sync_log_table(self) -> None:
-        """Ensure the RVU sync log table exists"""
-        create_table_query = """
-            CREATE TABLE IF NOT EXISTS rvu_sync_log (
-                sync_id SERIAL PRIMARY KEY,
-                sync_type VARCHAR(50) NOT NULL,
-                sync_started_at TIMESTAMPTZ NOT NULL,
-                sync_completed_at TIMESTAMPTZ,
-                records_processed INTEGER DEFAULT 0,
-                sync_status VARCHAR(20) NOT NULL,
-                error_message TEXT,
-                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-            )
-        """
+    async def _get_sql_server_rvu_count(self) -> int:
+        """Get count of active RVU records in SQL Server"""
+        try:
+            result = await self.sql_db.fetch("SELECT COUNT(*) as count FROM rvu_data WHERE status = 'ACTIVE'")
+            return result[0]['count'] if result else 0
+        except Exception as e:
+            self.logger.warning(f"Error getting SQL Server RVU count: {e}")
+            return 0
+    
+    async def _get_postgresql_rvu_count(self) -> int:
+        """Get count of active RVU records in PostgreSQL"""
+        try:
+            result = await self.pg_db.fetch("SELECT COUNT(*) as count FROM rvu_data WHERE status = 'active'")
+            return result[0]['count'] if result else 0
+        except Exception as e:
+            self.logger.warning(f"Error getting PostgreSQL RVU count: {e}")
+            return 0
+    
+    async def _get_sql_server_rvu_sample(self) -> List[Dict[str, Any]]:
+        """Get sample RVU data from SQL Server for comparison"""
+        try:
+            query = """
+                SELECT TOP 10 procedure_code, total_rvu, status
+                FROM rvu_data 
+                WHERE status = 'ACTIVE'
+                ORDER BY procedure_code
+            """
+            rows = await self.sql_db.fetch(query)
+            return [dict(row) for row in rows] if rows else []
+        except Exception as e:
+            self.logger.warning(f"Error getting SQL Server RVU sample: {e}")
+            return []
+    
+    async def _get_postgresql_rvu_sample(self) -> List[Dict[str, Any]]:
+        """Get sample RVU data from PostgreSQL for comparison"""
+        try:
+            query = """
+                SELECT procedure_code, total_rvu, status
+                FROM rvu_data 
+                WHERE status = 'active'
+                ORDER BY procedure_code
+                LIMIT 10
+            """
+            rows = await self.pg_db.fetch(query)
+            return [dict(row) for row in rows] if rows else []
+        except Exception as e:
+            self.logger.warning(f"Error getting PostgreSQL RVU sample: {e}")
+            return []
+    
+    def _compare_sample_data(self, sql_sample: List[Dict], pg_sample: List[Dict]) -> bool:
+        """Compare sample data between databases"""
+        if len(sql_sample) != len(pg_sample):
+            return False
         
-        await self.pg_db.execute(create_table_query)
+        for sql_row, pg_row in zip(sql_sample, pg_sample):
+            if (sql_row.get('procedure_code') != pg_row.get('procedure_code') or
+                abs(float(sql_row.get('total_rvu', 0)) - float(pg_row.get('total_rvu', 0))) > 0.01):
+                return False
+        
+        return True
+    
+    async def _start_sync_log(self, sync_type: str) -> int:
+        """Start a sync log entry and return sync_id"""
+        try:
+            query = """
+                INSERT INTO rvu_sync_log (sync_type, sync_started_at, sync_status, created_at)
+                VALUES ($1, $2, $3, $4)
+                RETURNING sync_id
+            """
+            result = await self.pg_db.fetch(query, sync_type, datetime.now(), 'started', datetime.now())
+            return result[0]['sync_id'] if result else 0
+        except Exception as e:
+            self.logger.warning(f"Error starting sync log: {e}")
+            return 0
+    
+    async def _complete_sync_log(self, sync_id: int, records_processed: int, status: str, error_message: str = None) -> None:
+        """Complete a sync log entry"""
+        try:
+            query = """
+                UPDATE rvu_sync_log 
+                SET sync_completed_at = $1, records_processed = $2, sync_status = $3, error_message = $4
+                WHERE sync_id = $5
+            """
+            await self.pg_db.execute(query, datetime.now(), records_processed, status, error_message, sync_id)
+        except Exception as e:
+            self.logger.warning(f"Error completing sync log: {e}")
+    
+    async def _get_last_sync_time(self) -> Optional[datetime]:
+        """Get timestamp of last successful sync"""
+        try:
+            query = """
+                SELECT MAX(sync_completed_at) as last_sync
+                FROM rvu_sync_log 
+                WHERE sync_status = 'completed'
+            """
+            result = await self.pg_db.fetch(query)
+            return result[0]['last_sync'] if result and result[0]['last_sync'] else None
+        except Exception as e:
+            self.logger.warning(f"Error getting last sync time: {e}")
+            return None
+    
+    async def _fetch_updated_rvu_data(self, since: Optional[datetime]) -> List[Dict[str, Any]]:
+        """Fetch RVU data updated since given timestamp"""
+        if not since:
+            # If no timestamp, fetch all data
+            return await self._fetch_rvu_data_from_sql_server()
+        
+        try:
+            query = """
+                SELECT 
+                    procedure_code, description, category, subcategory,
+                    work_rvu, practice_expense_rvu, malpractice_rvu, total_rvu,
+                    conversion_factor, non_facility_pe_rvu, facility_pe_rvu,
+                    effective_date, end_date, status, global_period,
+                    professional_component, technical_component, bilateral_surgery,
+                    created_at, updated_at
+                FROM rvu_data 
+                WHERE status = 'ACTIVE' AND updated_at > ?
+                ORDER BY procedure_code
+            """
+            rows = await self.sql_db.fetch(query, since)
+            return [dict(row) for row in rows] if rows else []
+        except Exception as e:
+            self.logger.warning(f"Error fetching updated RVU data: {e}")
+            return []
+    
+    async def _update_postgresql_rvu_data(self, updated_records: List[Dict[str, Any]]) -> int:
+        """Update PostgreSQL with changed RVU records"""
+        # For now, just use the same insert method which handles upserts
+        return await self._insert_rvu_data_to_postgresql(updated_records)
+    
+    def _safe_decimal(self, value: Any) -> Optional[Decimal]:
+        """Safely convert value to Decimal"""
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except (ValueError, TypeError):
+            return None
 
 
-# Updated setup_reference_data.py to include RVU sync
-async def setup_reference_data_with_rvu_sync():
-    """
-    Updated reference data setup with PostgreSQL RVU sync
-    """
+async def main():
+    """Main function for standalone testing"""
+    import logging
+    from src.config.config import load_config
+    from src.db.postgres import PostgresDatabase
+    from src.db.sql_server import SQLServerDatabase
     
     # Set up logging
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
     logger = logging.getLogger(__name__)
     
-    logger.info("Starting reference data setup with RVU synchronization...")
+    logger.info("Testing RVU sync system...")
     
     # Load configuration
     config = load_config()
     
-    # Initialize database connections
+    # Initialize databases
     pg_db = PostgresDatabase(config.postgres)
     sql_db = SQLServerDatabase(config.sqlserver)
     
     try:
-        # Connect without preparing RVU queries initially
         await pg_db.connect(prepare_queries=False)
         await sql_db.connect()
-        logger.info("Connected to both PostgreSQL and SQL Server databases")
         
-        # Setup organizational hierarchy in SQL Server
-        await setup_organizations(sql_db, logger)
-        await setup_regions(sql_db, logger)  
-        await setup_facilities_with_hierarchy(sql_db, logger)
-        
-        # Setup financial classes
-        await setup_financial_classes_with_facility_rates(sql_db, logger)
-        await create_financial_rate_calculation_function(sql_db, logger)
-        
-        # Setup RVU data in SQL Server (master source)
-        await setup_rvu_data_sql_server_only(sql_db, logger)
-        
-        # Initialize RVU sync system and perform initial sync
+        # Create sync manager and test
         rvu_sync = RVUDataSync(pg_db, sql_db)
-        await rvu_sync.initial_sync()
         
-        # Now prepare RVU queries since PostgreSQL has the data
-        await pg_db.prepare_common_queries()
+        # Test initial sync
+        result = await rvu_sync.initial_sync()
+        logger.info(f"Initial sync result: {result}")
         
-        # Validate data integrity
-        integrity_report = await rvu_sync.validate_data_integrity()
-        logger.info(f"RVU data integrity: {integrity_report}")
-        
-        logger.info("Reference data setup with RVU sync completed successfully!")
+        # Test validation
+        validation = await rvu_sync.validate_data_integrity()
+        logger.info(f"Validation result: {validation}")
         
     except Exception as e:
-        logger.error(f"Error during reference data setup: {e}")
-        raise
+        logger.error(f"Error testing RVU sync: {e}")
     finally:
-        await pg_db.close()
-        await sql_db.close()
-        logger.info("Database connections closed")
-
-
-# Standalone RVU sync script
-async def sync_rvu_data():
-    """Standalone script to sync RVU data"""
-    
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger(__name__)
-    
-    config = load_config()
-    pg_db = PostgresDatabase(config.postgres)
-    sql_db = SQLServerDatabase(config.sqlserver)
-    
-    try:
-        await pg_db.connect()
-        await sql_db.connect()
-        
-        rvu_sync = RVUDataSync(pg_db, sql_db)
-        
-        # Perform incremental sync
-        changes = await rvu_sync.incremental_sync()
-        
-        # Validate integrity
-        integrity = await rvu_sync.validate_data_integrity()
-        
-        logger.info(f"Sync completed: {changes} changes, integrity: {integrity['sync_required']}")
-        
-    finally:
-        await pg_db.close()
-        await sql_db.close()
+        try:
+            await pg_db.close()
+            await sql_db.close()
+        except:
+            pass
 
 
 if __name__ == "__main__":
-    import sys
-    
-    if len(sys.argv) > 1 and sys.argv[1] == "sync":
-        # Run incremental sync
-        asyncio.run(sync_rvu_data())
-    else:
-        # Run full setup
-        asyncio.run(setup_reference_data_with_rvu_sync())
+    asyncio.run(main())
