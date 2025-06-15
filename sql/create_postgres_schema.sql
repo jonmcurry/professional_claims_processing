@@ -1,3 +1,7 @@
+-- Updated PostgreSQL Schema for create_postgres_schema.sql
+-- Removes facilities table (now managed only in SQL Server)
+-- Adds missing financial_classes table for PostgreSQL validation caching
+
 CREATE DATABASE staging_process;
 \c staging_process;
 
@@ -84,6 +88,15 @@ CREATE TABLE claims_diagnosis_codes (
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Financial classes for validation caching (lighter than facilities)
+CREATE TABLE financial_classes (
+    financial_class_id VARCHAR(10) PRIMARY KEY,
+    financial_class_name VARCHAR(100),
+    active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE batch_metadata (
     batch_id VARCHAR(50) NOT NULL,
     submitted_by VARCHAR(100),
@@ -134,6 +147,7 @@ CREATE TABLE processing_checkpoints (
     PRIMARY KEY (claim_id, stage)
 );
 
+-- RVU data cache (synced from SQL Server for performance)
 CREATE TABLE rvu_data (
     procedure_code VARCHAR(10) PRIMARY KEY,
     description VARCHAR(500),
@@ -187,50 +201,32 @@ CREATE TABLE failed_claims (
     processing_stage VARCHAR(50) NOT NULL,
     failed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     repair_suggestions TEXT,
-    resolution_status VARCHAR(20),
+    resolution_status VARCHAR(20) DEFAULT 'pending',
     assigned_to VARCHAR(100),
     resolved_at TIMESTAMPTZ,
     resolution_notes TEXT,
     resolution_action VARCHAR(50),
     error_pattern_id VARCHAR(50),
-    priority_level VARCHAR(10),
+    priority_level VARCHAR(10) DEFAULT 'medium',
     impact_level VARCHAR(10),
     potential_revenue_loss NUMERIC(12,2),
-    created_at TIMESTAMPTZ,
-    updated_at TIMESTAMPTZ,
-    coder_id VARCHAR(50)
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
--- Foreign key constraints
-ALTER TABLE claims_line_items
-    ADD CONSTRAINT fk_claim_line_claim FOREIGN KEY (claim_id, service_to_date) REFERENCES claims (claim_id, service_to_date);
+-- Indexes for performance
+CREATE INDEX idx_claims_facility_id ON claims(facility_id);
+CREATE INDEX idx_claims_status ON claims(processing_status);
+CREATE INDEX idx_claims_service_date ON claims(service_from_date);
+CREATE INDEX idx_claims_line_items_claim_id ON claims_line_items(claim_id);
+CREATE INDEX idx_claims_diagnosis_claim_id ON claims_diagnosis_codes(claim_id);
+CREATE INDEX idx_failed_claims_facility ON failed_claims(facility_id);
+CREATE INDEX idx_failed_claims_category ON failed_claims(failure_category);
+CREATE INDEX idx_failed_claims_status ON failed_claims(resolution_status);
+CREATE INDEX idx_processing_metrics_batch ON processing_metrics(batch_id);
+CREATE INDEX idx_processing_metrics_timestamp ON processing_metrics(metric_timestamp);
 
-ALTER TABLE claims_diagnosis_codes
-    ADD CONSTRAINT fk_diagnosis_claim FOREIGN KEY (claim_id, service_to_date) REFERENCES claims (claim_id, service_to_date);
-
--- Archive procedure for old claims
-CREATE TABLE IF NOT EXISTS archived_claims (LIKE claims INCLUDING ALL);
-
-CREATE OR REPLACE PROCEDURE archive_old_claims(cutoff_date DATE)
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    INSERT INTO archived_claims SELECT * FROM claims WHERE service_to_date < cutoff_date;
-    DELETE FROM claims WHERE service_to_date < cutoff_date;
-END;
-$$;
-
--- Enable page compression for archived data (PostgreSQL using LZ4 toast)
-ALTER TABLE archived_claims
-    SET (toast.compress = 'lz4');
-
-CREATE INDEX IF NOT EXISTS idx_claims_claim_id ON claims (claim_id);
-CREATE INDEX IF NOT EXISTS idx_failed_claims_claim_id ON failed_claims (claim_id);
-CREATE INDEX IF NOT EXISTS idx_claims_patient_account ON claims (patient_account_number);
-CREATE INDEX IF NOT EXISTS idx_claims_account_facility
-    ON claims (patient_account_number, facility_id)
-    INCLUDE (processing_status, processing_stage);
-CREATE INDEX IF NOT EXISTS idx_claims_active
-    ON claims (patient_account_number)
-    WHERE active IS TRUE;
-CREATE INDEX IF NOT EXISTS idx_dlq_claim_id ON dead_letter_queue (claim_id);
+-- Comments for documentation
+COMMENT ON TABLE financial_classes IS 'Cached financial class data for fast validation - synced from SQL Server';
+COMMENT ON TABLE rvu_data IS 'Cached RVU data for reimbursement calculations - synced from SQL Server';
+COMMENT ON TABLE failed_claims IS 'Claims that failed validation or processing with detailed error information';

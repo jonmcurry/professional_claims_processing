@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-Reference Data Setup Script
+Updated Reference Data Setup Script
 Creates and populates reference data tables required for claims validation.
-This includes facilities, financial classes, and RVU data.
+NOW WITH CLEANER ARCHITECTURE:
+- Facilities: SQL Server ONLY (single source of truth)
+- Financial classes: Both databases (PostgreSQL for fast validation cache)
+- RVU data: SQL Server primary, PostgreSQL cache
 """
 
 import asyncio
@@ -20,9 +23,9 @@ async def setup_reference_data():
     """
     Main function to set up all reference data required for claims processing.
     Creates and populates:
-    - Facilities (PostgreSQL and SQL Server)
-    - Financial classes 
-    - RVU data (SQL Server)
+    - Facilities (SQL Server ONLY - single source of truth)
+    - Financial classes (both databases - PostgreSQL for validation caching)
+    - RVU data (SQL Server primary, PostgreSQL cache)
     """
     
     # Set up logging
@@ -32,7 +35,10 @@ async def setup_reference_data():
     )
     logger = logging.getLogger(__name__)
     
-    logger.info("Starting reference data setup...")
+    logger.info("Starting reference data setup with cleaner architecture...")
+    logger.info("Facilities: SQL Server ONLY")
+    logger.info("Financial Classes: Both databases (PostgreSQL cache)")
+    logger.info("RVU Data: SQL Server primary, PostgreSQL cache")
     
     # Load configuration
     config = load_config()
@@ -47,14 +53,14 @@ async def setup_reference_data():
         await sql_db.connect()
         logger.info("Connected to both PostgreSQL and SQL Server databases")
         
-        # Setup facilities in both databases
-        await setup_facilities(pg_db, sql_db, logger)
+        # Setup facilities in SQL Server ONLY
+        await setup_facilities_sql_server_only(sql_db, logger)
         
-        # Setup financial classes
+        # Setup financial classes in both databases (PostgreSQL for validation cache)
         await setup_financial_classes(pg_db, sql_db, logger)
         
-        # Setup RVU data in SQL Server
-        await setup_rvu_data(sql_db, logger)
+        # Setup RVU data in SQL Server and cache in PostgreSQL
+        await setup_rvu_data(sql_db, pg_db, logger)
         
         logger.info("Reference data setup completed successfully!")
         
@@ -67,9 +73,12 @@ async def setup_reference_data():
         logger.info("Database connections closed")
 
 
-async def setup_facilities(pg_db: PostgresDatabase, sql_db: SQLServerDatabase, logger):
-    """Setup facilities in both PostgreSQL and SQL Server"""
-    logger.info("Setting up facilities...")
+async def setup_facilities_sql_server_only(sql_db: SQLServerDatabase, logger):
+    """Setup facilities in SQL Server ONLY - single source of truth"""
+    logger.info("Setting up facilities in SQL Server ONLY...")
+    
+    # First, ensure required prerequisite tables exist in SQL Server
+    await setup_prerequisite_tables(sql_db, logger)
     
     # Define facility data - 50 facilities as referenced in the sample data
     facilities_data = []
@@ -94,25 +103,7 @@ async def setup_facilities(pg_db: PostgresDatabase, sql_db: SQLServerDatabase, l
         )
         facilities_data.append(facility_data)
     
-    # Insert into PostgreSQL
-    pg_query = """
-        INSERT INTO facilities (
-            facility_id, facility_name, facility_description, facility_type,
-            address, installed_date, beds, city, state, zip_code, phone,
-            active, updated_date, updated_by, region_id, fiscal_month
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-        ON CONFLICT (facility_id) DO UPDATE SET
-            facility_name = EXCLUDED.facility_name,
-            facility_description = EXCLUDED.facility_description,
-            updated_date = EXCLUDED.updated_date
-    """
-    
-    for facility in facilities_data:
-        await pg_db.execute(pg_query, *facility)
-    
-    logger.info(f"Inserted {len(facilities_data)} facilities into PostgreSQL")
-    
-    # Insert into SQL Server
+    # Insert into SQL Server ONLY
     sql_query = """
         MERGE facilities AS target
         USING (SELECT ? as facility_id, ? as facility_name, ? as facility_description, 
@@ -137,12 +128,39 @@ async def setup_facilities(pg_db: PostgresDatabase, sql_db: SQLServerDatabase, l
     for facility in facilities_data:
         await sql_db.execute(sql_query, facility)
     
-    logger.info(f"Inserted {len(facilities_data)} facilities into SQL Server")
+    logger.info(f"✅ Inserted {len(facilities_data)} facilities into SQL Server")
+    logger.info("✅ Facilities are now managed ONLY in SQL Server (single source of truth)")
+
+
+async def setup_prerequisite_tables(sql_db: SQLServerDatabase, logger):
+    """Ensure prerequisite tables exist in SQL Server"""
+    logger.info("Setting up prerequisite tables in SQL Server...")
+    
+    # Create facility_region table if it doesn't exist
+    region_query = """
+        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'facility_region')
+        BEGIN
+            CREATE TABLE facility_region (
+                region_id INT PRIMARY KEY,
+                region_name VARCHAR(100)
+            );
+            
+            -- Insert default regions
+            INSERT INTO facility_region (region_id, region_name) VALUES
+            (1, 'West Coast'),
+            (2, 'East Coast'), 
+            (3, 'Midwest'),
+            (4, 'Southwest'),
+            (5, 'Southeast');
+        END
+    """
+    await sql_db.execute(region_query)
+    logger.info("✅ Facility regions table setup completed")
 
 
 async def setup_financial_classes(pg_db: PostgresDatabase, sql_db: SQLServerDatabase, logger):
-    """Setup financial classes"""
-    logger.info("Setting up financial classes...")
+    """Setup financial classes in both databases (PostgreSQL for validation cache)"""
+    logger.info("Setting up financial classes in both databases...")
     
     # Define financial class data
     financial_classes = [
@@ -173,6 +191,8 @@ async def setup_financial_classes(pg_db: PostgresDatabase, sql_db: SQLServerData
         MERGE core_standard_payers AS target
         USING (SELECT ? as payer_id, ? as payer_name, ? as payer_code) AS source
         ON target.payer_id = source.payer_id
+        WHEN MATCHED THEN
+            UPDATE SET payer_name = source.payer_name, payer_code = source.payer_code
         WHEN NOT MATCHED THEN
             INSERT (payer_id, payer_name, payer_code)
             VALUES (source.payer_id, source.payer_name, source.payer_code);
@@ -181,138 +201,127 @@ async def setup_financial_classes(pg_db: PostgresDatabase, sql_db: SQLServerData
     for payer in payers_data:
         await sql_db.execute(payer_query, payer)
     
-    logger.info(f"Inserted {len(payers_data)} payers into SQL Server")
+    logger.info(f"✅ Inserted {len(payers_data)} payers into SQL Server")
     
-    # Now insert financial classes for each facility
-    for facility_id in range(1, 51):
-        facility_id_str = str(facility_id)
-        
-        for fc_code, fc_name, payer_id, reimb_rate in financial_classes:
-            # PostgreSQL - simplified financial classes
-            pg_query = """
-                INSERT INTO financial_classes (
-                    financial_class_code, financial_class_name, active, created_at
-                ) VALUES ($1, $2, $3, $4)
-                ON CONFLICT (financial_class_code) DO NOTHING
-            """
-            await pg_db.execute(pg_query, fc_code, fc_name, True, datetime.now())
-            
-            # SQL Server - facility-specific financial classes
-            sql_query = """
-                MERGE facility_financial_classes AS target
-                USING (SELECT ? as facility_id, ? as financial_class_id, ? as financial_class_name,
-                       ? as payer_id, ? as reimbursement_rate, ? as processing_priority,
-                       ? as auto_posting_enabled, ? as active, ? as effective_date,
-                       ? as created_at, ? as HCC) AS source
-                ON target.facility_id = source.facility_id AND target.financial_class_id = source.financial_class_id
-                WHEN NOT MATCHED THEN
-                    INSERT (facility_id, financial_class_id, financial_class_name, payer_id,
-                           reimbursement_rate, processing_priority, auto_posting_enabled, active,
-                           effective_date, created_at, HCC)
-                    VALUES (source.facility_id, source.financial_class_id, source.financial_class_name,
-                           source.payer_id, source.reimbursement_rate, source.processing_priority,
-                           source.auto_posting_enabled, source.active, source.effective_date,
-                           source.created_at, source.HCC);
-            """
-            
-            await sql_db.execute(
-                sql_query,
-                facility_id_str,  # facility_id
-                fc_code,  # financial_class_id
-                fc_name,  # financial_class_name
-                payer_id,  # payer_id
-                reimb_rate,  # reimbursement_rate
-                "normal",  # processing_priority
-                True,  # auto_posting_enabled
-                True,  # active
-                datetime.now().date(),  # effective_date
-                datetime.now(),  # created_at
-                "N/A",  # HCC
-            )
-    
-    logger.info("Inserted financial classes into both databases")
-
-
-async def setup_rvu_data(sql_db: SQLServerDatabase, logger):
-    """Setup RVU data in SQL Server"""
-    logger.info("Setting up RVU data...")
-    
-    # Common procedure codes with their RVU values
-    rvu_data = [
-        # Office visits
-        ("99213", Decimal("1.30"), "Office visit, established patient, low complexity"),
-        ("99214", Decimal("2.00"), "Office visit, established patient, moderate complexity"),
-        ("99215", Decimal("2.80"), "Office visit, established patient, high complexity"),
-        ("99203", Decimal("1.60"), "Office visit, new patient, low complexity"),
-        ("99204", Decimal("2.60"), "Office visit, new patient, moderate complexity"),
-        ("99205", Decimal("3.50"), "Office visit, new patient, high complexity"),
-        
-        # Emergency visits
-        ("99282", Decimal("1.00"), "Emergency department visit, low complexity"),
-        ("99283", Decimal("1.80"), "Emergency department visit, moderate complexity"),
-        ("99284", Decimal("3.20"), "Emergency department visit, high complexity"),
-        ("99285", Decimal("5.00"), "Emergency department visit, very high complexity"),
-        
-        # Lab procedures
-        ("36415", Decimal("0.25"), "Venipuncture"),
-        ("85025", Decimal("0.30"), "Complete blood count"),
-        ("80053", Decimal("0.50"), "Comprehensive metabolic panel"),
-        ("80061", Decimal("0.40"), "Lipid panel"),
-        
-        # Radiology
-        ("71020", Decimal("0.70"), "Chest X-ray, 2 views"),
-        ("71030", Decimal("0.90"), "Chest X-ray, complete"),
-        ("73060", Decimal("0.60"), "Knee X-ray, 2 views"),
-        ("73070", Decimal("0.80"), "Ankle X-ray, 2 views"),
-        
-        # Surgery
-        ("29881", Decimal("8.50"), "Arthroscopy, knee, surgical"),
-        ("29882", Decimal("10.20"), "Arthroscopy, knee, with meniscectomy"),
-        ("64483", Decimal("4.50"), "Injection, lumbar facet joint"),
-        ("64484", Decimal("5.20"), "Injection, lumbar facet joint, additional"),
-        
-        # Mental health
-        ("90834", Decimal("1.80"), "Psychotherapy, 45 minutes"),
-        ("90837", Decimal("2.40"), "Psychotherapy, 60 minutes"),
-        ("90853", Decimal("1.20"), "Group psychotherapy"),
-        ("96116", Decimal("2.50"), "Neuropsychological testing"),
-        
-        # Preventive care
-        ("G0438", Decimal("2.30"), "Annual wellness visit, initial"),
-        ("G0439", Decimal("2.00"), "Annual wellness visit, subsequent"),
-        ("99490", Decimal("1.50"), "Chronic care management, 20 minutes"),
-        ("99491", Decimal("2.00"), "Chronic care management, 30 minutes"),
-    ]
-    
-    # Insert RVU data
-    rvu_query = """
-        MERGE rvu_data AS target
-        USING (SELECT ? as procedure_code, ? as work_rvu, ? as description,
-               ? as effective_date, ? as active) AS source
-        ON target.procedure_code = source.procedure_code
+    # Insert financial classes into SQL Server
+    sql_financial_class_query = """
+        MERGE facility_financial_classes AS target
+        USING (SELECT ? as facility_id, ? as financial_class_id, ? as financial_class_name,
+               ? as payer_id, ? as reimbursement_rate, 'HIGH' as processing_priority,
+               1 as auto_posting_enabled, 1 as active, GETDATE() as effective_date,
+               NULL as end_date, GETDATE() as created_at, 'ACT' as HCC) AS source
+        ON target.financial_class_id = source.financial_class_id
         WHEN MATCHED THEN
-            UPDATE SET work_rvu = source.work_rvu,
-                      description = source.description,
-                      effective_date = source.effective_date
+            UPDATE SET financial_class_name = source.financial_class_name,
+                      reimbursement_rate = source.reimbursement_rate
         WHEN NOT MATCHED THEN
-            INSERT (procedure_code, work_rvu, description, effective_date, active)
-            VALUES (source.procedure_code, source.work_rvu, source.description,
-                   source.effective_date, source.active);
+            INSERT (facility_id, financial_class_id, financial_class_name, payer_id,
+                   reimbursement_rate, processing_priority, auto_posting_enabled, active,
+                   effective_date, end_date, created_at, HCC)
+            VALUES ('1', source.financial_class_id, source.financial_class_name, source.payer_id,
+                   source.reimbursement_rate, source.processing_priority, source.auto_posting_enabled,
+                   source.active, source.effective_date, source.end_date, source.created_at, source.HCC);
     """
     
-    for proc_code, rvu_value, description in rvu_data:
-        await sql_db.execute(
-            rvu_query,
-            proc_code,
-            rvu_value,
-            description,
-            datetime.now().date(),
-            True
-        )
+    for fc in financial_classes:
+        await sql_db.execute(sql_financial_class_query, fc)
     
-    logger.info(f"Inserted {len(rvu_data)} RVU records into SQL Server")
+    # Insert simplified financial classes into PostgreSQL for validation cache
+    pg_financial_class_query = """
+        INSERT INTO financial_classes (financial_class_id, financial_class_name, active)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (financial_class_id) DO UPDATE SET
+            financial_class_name = EXCLUDED.financial_class_name,
+            updated_at = CURRENT_TIMESTAMP
+    """
+    
+    for fc in financial_classes:
+        await pg_db.execute(pg_financial_class_query, fc[0], fc[1], True)
+    
+    logger.info(f"✅ Inserted {len(financial_classes)} financial classes into SQL Server")
+    logger.info(f"✅ Cached {len(financial_classes)} financial classes in PostgreSQL for fast validation")
+
+
+async def setup_rvu_data(sql_db: SQLServerDatabase, pg_db: PostgresDatabase, logger):
+    """Setup RVU data in SQL Server and cache in PostgreSQL"""
+    logger.info("Setting up RVU data in SQL Server and caching in PostgreSQL...")
+    
+    # Define common RVU data for testing
+    rvu_data = [
+        ("99213", "Office/outpatient visit est", "E&M", "Office", Decimal("0.97"), Decimal("0.67"), Decimal("0.05"), Decimal("1.69"), Decimal("36.04")),
+        ("99214", "Office/outpatient visit est", "E&M", "Office", Decimal("1.50"), Decimal("1.11"), Decimal("0.08"), Decimal("2.69"), Decimal("36.04")),
+        ("99215", "Office/outpatient visit est", "E&M", "Office", Decimal("2.11"), Decimal("1.52"), Decimal("0.11"), Decimal("3.74"), Decimal("36.04")),
+        ("99202", "Office/outpatient visit new", "E&M", "Office", Decimal("0.93"), Decimal("0.65"), Decimal("0.05"), Decimal("1.63"), Decimal("36.04")),
+        ("99203", "Office/outpatient visit new", "E&M", "Office", Decimal("1.42"), Decimal("1.07"), Decimal("0.08"), Decimal("2.57"), Decimal("36.04")),
+        ("99204", "Office/outpatient visit new", "E&M", "Office", Decimal("2.43"), Decimal("1.73"), Decimal("0.13"), Decimal("4.29"), Decimal("36.04")),
+        ("99205", "Office/outpatient visit new", "E&M", "Office", Decimal("3.17"), Decimal("2.25"), Decimal("0.17"), Decimal("5.59"), Decimal("36.04")),
+        ("80053", "Comprehensive metabolic panel", "Lab", "Laboratory", Decimal("0.00"), Decimal("1.25"), Decimal("0.06"), Decimal("1.31"), Decimal("36.04")),
+        ("85025", "Blood count; complete", "Lab", "Laboratory", Decimal("0.00"), Decimal("0.17"), Decimal("0.01"), Decimal("0.18"), Decimal("36.04")),
+        ("73030", "Radiologic exam, shoulder", "Radiology", "Imaging", Decimal("0.22"), Decimal("0.89"), Decimal("0.05"), Decimal("1.16"), Decimal("36.04")),
+    ]
+    
+    # Insert into SQL Server (primary)
+    sql_rvu_query = """
+        MERGE rvu_data AS target
+        USING (SELECT ? as procedure_code, ? as description, ? as category, ? as subcategory,
+               ? as work_rvu, ? as practice_expense_rvu, ? as malpractice_rvu, ? as total_rvu, ? as conversion_factor,
+               ? as non_facility_pe_rvu, ? as facility_pe_rvu, GETDATE() as effective_date,
+               NULL as end_date, 'ACTIVE' as status, '000' as global_period,
+               0 as professional_component, 0 as technical_component, 0 as bilateral_surgery,
+               GETDATE() as created_at, GETDATE() as updated_at) AS source
+        ON target.procedure_code = source.procedure_code
+        WHEN MATCHED THEN
+            UPDATE SET description = source.description, total_rvu = source.total_rvu,
+                      conversion_factor = source.conversion_factor, updated_at = source.updated_at
+        WHEN NOT MATCHED THEN
+            INSERT (procedure_code, description, category, subcategory, work_rvu,
+                   practice_expense_rvu, malpractice_rvu, total_rvu, conversion_factor,
+                   non_facility_pe_rvu, facility_pe_rvu, effective_date, end_date, status,
+                   global_period, professional_component, technical_component, bilateral_surgery,
+                   created_at, updated_at)
+            VALUES (source.procedure_code, source.description, source.category, source.subcategory,
+                   source.work_rvu, source.practice_expense_rvu, source.malpractice_rvu, source.total_rvu,
+                   source.conversion_factor, source.non_facility_pe_rvu, source.facility_pe_rvu,
+                   source.effective_date, source.end_date, source.status, source.global_period,
+                   source.professional_component, source.technical_component, source.bilateral_surgery,
+                   source.created_at, source.updated_at);
+    """
+    
+    for rvu in rvu_data:
+        # Expand data for SQL Server insert
+        expanded_rvu = rvu + (rvu[4], rvu[4])  # Use work_rvu for both non_facility and facility PE
+        await sql_db.execute(sql_rvu_query, expanded_rvu)
+    
+    # Cache in PostgreSQL for fast access during processing
+    pg_rvu_query = """
+        INSERT INTO rvu_data (procedure_code, description, category, subcategory, work_rvu,
+                             practice_expense_rvu, malpractice_rvu, total_rvu, conversion_factor,
+                             non_facility_pe_rvu, facility_pe_rvu, effective_date, status,
+                             global_period, professional_component, technical_component, bilateral_surgery,
+                             created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+        ON CONFLICT (procedure_code) DO UPDATE SET
+            description = EXCLUDED.description,
+            total_rvu = EXCLUDED.total_rvu,
+            conversion_factor = EXCLUDED.conversion_factor,
+            updated_at = CURRENT_TIMESTAMP
+    """
+    
+    for rvu in rvu_data:
+        # Prepare data for PostgreSQL insert
+        pg_rvu_record = rvu + (
+            rvu[4], rvu[4],  # non_facility_pe_rvu, facility_pe_rvu
+            datetime.now().date(),  # effective_date
+            'ACTIVE',  # status
+            '000',  # global_period
+            False, False, False,  # professional_component, technical_component, bilateral_surgery
+            datetime.now(), datetime.now()  # created_at, updated_at
+        )
+        await pg_db.execute(pg_rvu_query, *pg_rvu_record)
+    
+    logger.info(f"✅ Inserted {len(rvu_data)} RVU records into SQL Server")
+    logger.info(f"✅ Cached {len(rvu_data)} RVU records in PostgreSQL for fast reimbursement calculations")
 
 
 if __name__ == "__main__":
-    """Allow the script to be run standalone"""
     asyncio.run(setup_reference_data())
