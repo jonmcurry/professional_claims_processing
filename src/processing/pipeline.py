@@ -29,6 +29,7 @@ from ..utils.tracing import start_span, start_trace, correlation_id_var
 from ..validation.validator import ClaimValidator
 from ..web.status import batch_status, processing_status
 from .repair import ClaimRepairSuggester
+from ..analysis.error_pattern_detector import ErrorPatternDetector
 
 
 class SystemResourceMonitor:
@@ -350,6 +351,9 @@ class ClaimsPipeline:
         
         # Processing utilities
         self.repair_suggester = ClaimRepairSuggester()
+        self.error_detector = ErrorPatternDetector(
+            self.sql, cfg.monitoring.failure_pattern_threshold
+        )
         
         # Use service
         self.service = ClaimService(
@@ -1135,7 +1139,9 @@ class ClaimsPipeline:
                         "trace_id": trace_id,
                     },
                 )
-                
+
+                await self.error_detector.maybe_check()
+
                 return {
                     "processed": len(valid_claims),
                     "failed": len(failed_claims_data),
@@ -1782,6 +1788,8 @@ class ClaimsPipeline:
             metrics.inc("revenue_impact", revenue)
             total_time = time.perf_counter() - batch_start
             sla_monitor.record_batch(total_time, len(enriched_claims))
+
+            await self.error_detector.maybe_check()
 
             return {"processed": len(valid_claims), "failed": len(failed_claims_data)}
             

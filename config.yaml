@@ -93,6 +93,7 @@ monitoring:
   resource_check_interval: 5  # seconds
   resource_log_interval: 60  # seconds
   performance_history_size: 200
+  failure_pattern_threshold: 20
   
   # Alerting thresholds
   alerts:

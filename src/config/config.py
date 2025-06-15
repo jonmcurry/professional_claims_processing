@@ -93,6 +93,7 @@ class MonitoringConfig:
     resource_check_interval: int = 5
     resource_log_interval: int = 60
     performance_history_size: int = 200
+    failure_pattern_threshold: int = 20
     alerts: AlertConfig = field(default_factory=AlertConfig)
 
 
@@ -306,7 +307,8 @@ def _create_monitoring_config(data: Dict[str, Any]) -> MonitoringConfig:
         resource_check_interval=monitoring_data.get("resource_check_interval", 5),
         resource_log_interval=monitoring_data.get("resource_log_interval", 60),
         performance_history_size=monitoring_data.get("performance_history_size", 200),
-        alerts=alerts
+        failure_pattern_threshold=monitoring_data.get("failure_pattern_threshold", 20),
+        alerts=alerts,
     )
 
 
