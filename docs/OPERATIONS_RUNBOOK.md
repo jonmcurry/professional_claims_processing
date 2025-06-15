@@ -27,3 +27,22 @@ This runbook describes routine tasks for keeping the claims processing system he
 ## Incident Response
 - Declare an incident in the monitoring system and page on-call staff.
 - Document the resolution steps in the incident tracker.
+
+## Automatic Recovery
+The processing pipeline runs a **recovery manager** in the background. It watches
+for degraded or backup mode and will:
+
+- Reconnect to databases and Redis
+- Warm the RVU cache
+- Flush any claims stored on disk while in backup mode
+
+If recovery fails three times in a row an email notification is sent to the
+recipients configured under `monitoring.alerts.email_recipients`.
+
+### Manual Override
+You can trigger a recovery attempt or flush the queued claims manually:
+
+```bash
+python src/maintenance/recovery_manager.py         # attempt recovery once
+python src/maintenance/recovery_manager.py flush   # just flush the local queue
+```
