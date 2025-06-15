@@ -21,7 +21,7 @@ from ..utils.cache import InMemoryCache
 from ..utils.circuit_breaker import CircuitBreaker
 from ..utils.errors import (CircuitBreakerOpenError, DatabaseConnectionError,
                             QueryError)
-from ..utils.memory_pool import sql_memory_pool
+from ..utils.memory_pool import memory_pool
 from ..utils.tracing import get_traceparent
 from .base import BaseDatabase
 from .connection_utils import connect_with_retry, report_pool_metrics

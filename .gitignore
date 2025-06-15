@@ -1,3 +1,4 @@
 dr.ps1
 venv/
 __pycache__/
+logs/

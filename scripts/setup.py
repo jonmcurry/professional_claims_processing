@@ -3,14 +3,16 @@
 Database Setup and Data Generation Master Script
 
 This script orchestrates the complete database setup process:
-1. Loads database schema files for PostgreSQL and SQL Server
-2. Runs setup_reference_data.py to create and populate reference tables
-3. Runs generate_sample_data.py to create 100,000 sample claims
+1. Creates databases if they don't exist
+2. Loads database schema files for PostgreSQL and SQL Server
+3. Runs setup_reference_data.py to create and populate reference tables
+4. Runs generate_sample_data.py to create 100,000 sample claims
 
 Usage:
     python scripts/setup_database_and_data.py [options]
 
 Options:
+    --skip-database     Skip database creation (assumes databases exist)
     --skip-schema       Skip schema creation (assumes tables exist)
     --skip-reference    Skip reference data setup
     --skip-sample-data  Skip sample data generation
@@ -31,10 +33,13 @@ from pathlib import Path
 
 # Add src to Python path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
+# Change working directory to project root to find config.yaml
+project_root = Path(__file__).parent.parent
+os.chdir(project_root)
 
 from src.config.config import load_config
 from src.db.postgres import PostgresDatabase
-from src.db.sqlserver import SQLServerDatabase
+from src.db.sql_server import SQLServerDatabase
 
 
 class DatabaseSetupOrchestrator:
@@ -43,6 +48,106 @@ class DatabaseSetupOrchestrator:
     def __init__(self, config):
         self.config = config
         self.logger = logging.getLogger(__name__)
+
+    async def _ensure_databases_exist(self):
+        """Ensure both PostgreSQL and SQL Server databases exist"""
+        self.logger.info("Checking and creating databases if needed...")
+        
+        # Check/Create PostgreSQL database
+        await self._ensure_postgres_database()
+        
+        # Check/Create SQL Server database  
+        await self._ensure_sqlserver_database()
+
+    async def _ensure_postgres_database(self):
+        """Ensure PostgreSQL database exists, create if it doesn't"""
+        self.logger.info("Checking PostgreSQL database...")
+        
+        # Create a temporary config to connect to the 'postgres' database
+        temp_config = self.config.postgres.__class__(
+            host=self.config.postgres.host,
+            port=self.config.postgres.port,
+            user=self.config.postgres.user,
+            password=self.config.postgres.password,
+            database="postgres",  # Connect to default database
+            replica_host=self.config.postgres.replica_host,
+            replica_port=self.config.postgres.replica_port,
+            min_pool_size=self.config.postgres.min_pool_size,
+            max_pool_size=self.config.postgres.max_pool_size,
+            threshold_ms=self.config.postgres.threshold_ms,
+            retries=self.config.postgres.retries,
+            retry_delay=self.config.postgres.retry_delay,
+            retry_max_delay=self.config.postgres.retry_max_delay,
+            retry_jitter=self.config.postgres.retry_jitter,
+        )
+        
+        pg_db = PostgresDatabase(temp_config)
+        try:
+            await pg_db.connect()
+            
+            # Check if target database exists
+            result = await pg_db.fetch(
+                "SELECT 1 FROM pg_database WHERE datname = $1",
+                self.config.postgres.database
+            )
+            
+            if not result:
+                self.logger.info(f"Creating PostgreSQL database: {self.config.postgres.database}")
+                # Note: CREATE DATABASE cannot be run in a transaction
+                await pg_db.execute(f"CREATE DATABASE {self.config.postgres.database}")
+                self.logger.info("PostgreSQL database created successfully")
+            else:
+                self.logger.info("PostgreSQL database already exists")
+                
+        except Exception as e:
+            self.logger.error(f"Error ensuring PostgreSQL database exists: {e}")
+            raise
+        finally:
+            await pg_db.close()
+
+    async def _ensure_sqlserver_database(self):
+        """Ensure SQL Server database exists, create if it doesn't"""
+        self.logger.info("Checking SQL Server database...")
+        
+        # Create a temporary config to connect to the 'master' database
+        temp_config = self.config.sqlserver.__class__(
+            host=self.config.sqlserver.host,
+            port=self.config.sqlserver.port,
+            user=self.config.sqlserver.user,
+            password=self.config.sqlserver.password,
+            database="master",  # Connect to master database
+            pool_size=self.config.sqlserver.pool_size,
+            min_pool_size=self.config.sqlserver.min_pool_size,
+            max_pool_size=self.config.sqlserver.max_pool_size,
+            threshold_ms=self.config.sqlserver.threshold_ms,
+            retries=self.config.sqlserver.retries,
+            retry_delay=self.config.sqlserver.retry_delay,
+            retry_max_delay=self.config.sqlserver.retry_max_delay,
+            retry_jitter=self.config.sqlserver.retry_jitter,
+        )
+        
+        sql_db = SQLServerDatabase(temp_config)
+        try:
+            await sql_db.connect()
+            
+            # Check if target database exists
+            result = await sql_db.fetch(
+                "SELECT 1 FROM sys.databases WHERE name = ?",
+                self.config.sqlserver.database
+            )
+            
+            if not result:
+                self.logger.info(f"Creating SQL Server database: {self.config.sqlserver.database}")
+                await sql_db.execute(f"CREATE DATABASE [{self.config.sqlserver.database}]")
+                self.logger.info("SQL Server database created successfully")
+            else:
+                self.logger.info("SQL Server database already exists")
+                
+        except Exception as e:
+            self.logger.error(f"Error ensuring SQL Server database exists: {e}")
+            raise
+        finally:
+            await sql_db.close()
 
     async def run_schema_setup(self, pg_schema_path: str, sql_schema_path: str):
         """Load and execute database schema files"""
@@ -213,6 +318,7 @@ class DatabaseSetupOrchestrator:
         self,
         pg_schema_path: str,
         sql_schema_path: str,
+        skip_database: bool = False,
         skip_schema: bool = False,
         skip_reference: bool = False,
         skip_sample_data: bool = False,
@@ -227,6 +333,15 @@ class DatabaseSetupOrchestrator:
         self.logger.info("=" * 80)
 
         try:
+            # Step 0: Ensure databases exist
+            if not skip_database:
+                self.logger.info("\n" + "=" * 50)
+                self.logger.info("STEP 0: ENSURING DATABASES EXIST")
+                self.logger.info("=" * 50)
+                await self._ensure_databases_exist()
+            else:
+                self.logger.info("Skipping database creation (--skip-database specified)")
+
             # Step 1: Schema Setup
             if not skip_schema:
                 self.logger.info("\n" + "=" * 50)
@@ -289,7 +404,10 @@ async def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    # Schema options
+    # Database and schema options
+    parser.add_argument(
+        "--skip-database", action="store_true", help="Skip database creation (assumes databases exist)"
+    )
     parser.add_argument(
         "--skip-schema", action="store_true", help="Skip database schema creation"
     )
@@ -331,16 +449,20 @@ async def main():
 
     args = parser.parse_args()
 
-    # Configure logging
+    # Create logs directory if it doesn't exist
+    logs_dir = Path("logs")
+    logs_dir.mkdir(exist_ok=True)
+
+    # Configure logging with logs directory
     log_level = logging.DEBUG if args.debug else logging.INFO
+    setup_log_filename = logs_dir / f'setup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
+    
     logging.basicConfig(
         level=log_level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler(
-                f'setup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
-            ),
+            logging.FileHandler(setup_log_filename),
         ],
     )
 
@@ -351,7 +473,7 @@ async def main():
         logger.info("Loading configuration...")
         config = load_config()
 
-        # Validate schema file paths
+        # Validate schema file paths (only if we're not skipping schema setup)
         if not args.skip_schema:
             if not os.path.exists(args.pg_schema):
                 logger.error(f"PostgreSQL schema file not found: {args.pg_schema}")
@@ -365,6 +487,7 @@ async def main():
         await orchestrator.run_full_setup(
             pg_schema_path=args.pg_schema,
             sql_schema_path=args.sql_schema,
+            skip_database=args.skip_database,
             skip_schema=args.skip_schema,
             skip_reference=args.skip_reference,
             skip_sample_data=args.skip_sample_data,

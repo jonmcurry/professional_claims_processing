@@ -105,11 +105,11 @@ monitoring:
       - ops@example.com
 
 security:
-  api_key: "${CLAIMS_API_KEY}"
-  encryption_key: "${ENCRYPTION_KEY}"
+  api_key: "dev-api-key"
+  encryption_key: "dev-encryption-key"
 
 cache:
-  redis_url: "${REDIS_URL}"
+  redis_url: "null"
   warm_rvu_codes: ["99213", "99214", "99215", "99203", "99204", "99205"]
   predictive_ahead: 3
 
@@ -127,7 +127,7 @@ logging:
     "system": "INFO"
   rotate_mb: 50
   backup_count: 10
-  sentry_dsn: "${SENTRY_DSN}"
+  sentry_dsn: "null"
 
 features:
   enable_cache: true

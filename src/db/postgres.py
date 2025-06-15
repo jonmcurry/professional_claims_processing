@@ -221,10 +221,10 @@ class PostgresDatabase(BaseDatabase):
                     "tcp_keepalives_idle": "600",
                     "tcp_keepalives_interval": "30",
                     "tcp_keepalives_count": "3",
-                    # Memory settings
-                    "shared_buffers": "256MB",
-                    "effective_cache_size": "2GB",
-                    "work_mem": "256MB",
+                    # Memory settings - have to change at the server level
+                    # "shared_buffers": "256MB",
+                    # "effective_cache_size": "2GB",
+                    # "work_mem": "256MB",
                 },
             )
 

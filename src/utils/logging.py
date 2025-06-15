@@ -66,6 +66,9 @@ class MetricsHandler(logging.Handler):
 
 def setup_logging(cfg: Optional[LoggingConfig] = None) -> logging.Logger:
     logger = logging.getLogger("claims_processor")
+    logs_dir = Path("logs")
+    logs_dir.mkdir(exist_ok=True)
+    
     if logger.handlers:
         return logger
 
@@ -83,7 +86,7 @@ def setup_logging(cfg: Optional[LoggingConfig] = None) -> logging.Logger:
     logger.addHandler(MetricsHandler(stream_handler))
 
     file_handler = logging.handlers.RotatingFileHandler(
-        "audit.log",
+        logs_dir / "audit.log",
         maxBytes=(cfg.rotate_mb * 1024 * 1024 if cfg else 10 * 1024 * 1024),
         backupCount=(cfg.backup_count if cfg else 5),
     )
@@ -91,7 +94,7 @@ def setup_logging(cfg: Optional[LoggingConfig] = None) -> logging.Logger:
     logger.addHandler(MetricsHandler(file_handler))
 
     analytics_handler = logging.handlers.RotatingFileHandler(
-        "analytics.log",
+        logs_dir / "analytics.log",
         maxBytes=(cfg.rotate_mb * 1024 * 1024 if cfg else 10 * 1024 * 1024),
         backupCount=(cfg.backup_count if cfg else 5),
     )
