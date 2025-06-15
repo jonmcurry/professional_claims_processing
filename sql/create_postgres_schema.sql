@@ -1,6 +1,6 @@
 -- Updated PostgreSQL Schema for create_postgres_schema.sql
--- Removes facilities table (now managed only in SQL Server)
--- Adds missing financial_classes table for PostgreSQL validation caching
+-- CLEAN ARCHITECTURE: Only staging and processing tables
+-- NO reference data duplication (facilities, financial_classes, rvu_data all in SQL Server only)
 
 CREATE DATABASE staging_process;
 \c staging_process;
@@ -88,15 +88,6 @@ CREATE TABLE claims_diagnosis_codes (
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
--- Financial classes for validation caching (lighter than facilities)
-CREATE TABLE financial_classes (
-    financial_class_id VARCHAR(10) PRIMARY KEY,
-    financial_class_name VARCHAR(100),
-    active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-);
-
 CREATE TABLE batch_metadata (
     batch_id VARCHAR(50) NOT NULL,
     submitted_by VARCHAR(100),
@@ -145,30 +136,6 @@ CREATE TABLE processing_checkpoints (
     stage VARCHAR(50) NOT NULL,
     checkpoint_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (claim_id, stage)
-);
-
--- RVU data cache (synced from SQL Server for performance)
-CREATE TABLE rvu_data (
-    procedure_code VARCHAR(10) PRIMARY KEY,
-    description VARCHAR(500),
-    category VARCHAR(50),
-    subcategory VARCHAR(50),
-    work_rvu NUMERIC(8,4),
-    practice_expense_rvu NUMERIC(8,4),
-    malpractice_rvu NUMERIC(8,4),
-    total_rvu NUMERIC(8,4),
-    conversion_factor NUMERIC(8,2),
-    non_facility_pe_rvu NUMERIC(8,4),
-    facility_pe_rvu NUMERIC(8,4),
-    effective_date DATE,
-    end_date DATE,
-    status VARCHAR(20),
-    global_period VARCHAR(10),
-    professional_component BOOLEAN,
-    technical_component BOOLEAN,
-    bilateral_surgery BOOLEAN,
-    created_at TIMESTAMPTZ,
-    updated_at TIMESTAMPTZ
 );
 
 CREATE TABLE ml_models (
@@ -227,6 +194,6 @@ CREATE INDEX idx_processing_metrics_batch ON processing_metrics(batch_id);
 CREATE INDEX idx_processing_metrics_timestamp ON processing_metrics(metric_timestamp);
 
 -- Comments for documentation
-COMMENT ON TABLE financial_classes IS 'Cached financial class data for fast validation - synced from SQL Server';
-COMMENT ON TABLE rvu_data IS 'Cached RVU data for reimbursement calculations - synced from SQL Server';
+COMMENT ON DATABASE staging_process IS 'PostgreSQL staging database - CLEAN ARCHITECTURE: only processing tables, no reference data duplication';
+COMMENT ON TABLE claims IS 'Claims being processed - references facilities/financial_classes in SQL Server via validation services';
 COMMENT ON TABLE failed_claims IS 'Claims that failed validation or processing with detailed error information';

@@ -135,3 +135,35 @@ features:
   enable_dynamic_concurrency: true
   enable_performance_analytics: true
   enable_predictive_scaling: true
+
+# RVU Data Synchronization Configuration
+rvu_sync:
+  # Sync interval in minutes (default: 60 minutes)
+  sync_interval_minutes: 60  
+  # Auto-start sync scheduler with the application
+  auto_start: true  
+  # Enable monitoring and metrics collection
+  enable_monitoring: true  
+  # Integrity check interval in hours (default: 24 hours)
+  integrity_check_interval: 24  
+  # Maximum consecutive sync failures before alerting (default: 5)
+  max_sync_failures: 5  
+  # Enable emergency auto-resync on integrity failures
+  emergency_resync_enabled: true  
+  # Sync timeout in seconds (default: 300 = 5 minutes)
+  sync_timeout_seconds: 300  
+  # Batch size for bulk operations (default: 1000)
+  bulk_batch_size: 1000  
+  # Enable detailed sync logging
+  detailed_logging: true
+
+# from scripts.rvu_integration import integrate_with_main_app
+
+# async def main():
+#     # Start RVU integration
+#     rvu_service = await integrate_with_main_app()
+    
+#     # Your claims processing code...
+    
+#     # Cleanup on shutdown
+#     await rvu_service.stop()
