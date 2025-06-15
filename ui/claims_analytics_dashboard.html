@@ -1,0 +1,1263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Claims Processing Analytics Dashboard</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/date-fns/2.29.3/index.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #000000 0%, #2d2d2d 100%);
+            min-height: 100vh;
+            color: #333;
+        }
+
+        .dashboard-container {
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .header {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            background: linear-gradient(45deg, #E88D14, #DB4E18, #AD1B02);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            font-size: 1.1rem;
+            color: #666;
+            margin-bottom: 20px;
+        }
+
+        .filter-section {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .filter-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .filter-group label {
+            font-weight: 600;
+            margin-bottom: 5px;
+            color: #555;
+        }
+
+        .filter-group select,
+        .filter-group input {
+            padding: 12px;
+            border: 2px solid #e1e5e9;
+            border-radius: 10px;
+            font-size: 14px;
+            transition: all 0.3s ease;
+            background: white;
+        }
+
+        .filter-group select:focus,
+        .filter-group input:focus {
+            outline: none;
+            border-color: #E88D14;
+            box-shadow: 0 0 0 3px rgba(232, 141, 20, 0.1);
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 25px;
+            margin-bottom: 30px;
+        }
+
+        .metric-card {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            border-radius: 20px;
+            padding: 25px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .metric-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: linear-gradient(45deg, #E88D14, #DB4E18, #AD1B02);
+        }
+
+        .metric-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 30px 60px rgba(0, 0, 0, 0.15);
+        }
+
+        .metric-card h3 {
+            font-size: 1.1rem;
+            color: #666;
+            margin-bottom: 15px;
+            font-weight: 600;
+        }
+
+        .metric-value {
+            font-size: 2.5rem;
+            font-weight: 800;
+            color: #333;
+            margin-bottom: 10px;
+        }
+
+        .metric-change {
+            font-size: 0.9rem;
+            font-weight: 600;
+        }
+
+        .metric-change.positive {
+            color: #E88D14;
+        }
+
+        .metric-change.negative {
+            color: #AD1B02;
+        }
+
+        .metric-change.neutral {
+            color: #6b7280;
+        }
+
+        .charts-section {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin-bottom: 30px;
+        }
+
+        .chart-container {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            border-radius: 20px;
+            padding: 25px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .chart-container h3 {
+            font-size: 1.3rem;
+            margin-bottom: 20px;
+            color: #333;
+            font-weight: 700;
+        }
+
+        .chart-wrapper {
+            position: relative;
+            height: 400px;
+        }
+
+        .table-section {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            border-radius: 20px;
+            padding: 25px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            margin-bottom: 30px;
+        }
+
+        .table-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .table-header h3 {
+            font-size: 1.3rem;
+            color: #333;
+            font-weight: 700;
+        }
+
+        .pagination {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .pagination button {
+            padding: 8px 16px;
+            border: 2px solid #e1e5e9;
+            background: white;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 600;
+        }
+
+        .pagination button:hover {
+            border-color: #E88D14;
+            background: #E88D14;
+            color: white;
+        }
+
+        .pagination button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .pagination button:disabled:hover {
+            border-color: #e1e5e9;
+            background: white;
+            color: #333;
+        }
+
+        .claims-table {
+            width: 100%;
+            border-collapse: collapse;
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .claims-table th {
+            background: linear-gradient(45deg, #000000, #2d2d2d);
+            color: white;
+            padding: 15px 12px;
+            font-weight: 600;
+            text-align: left;
+            font-size: 0.9rem;
+        }
+
+        .claims-table td {
+            padding: 15px 12px;
+            border-bottom: 1px solid #f1f5f9;
+            transition: background-color 0.2s ease;
+        }
+
+        .claims-table tr:hover {
+            background-color: #f8fafc;
+        }
+
+        .status-badge {
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-completed {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .status-processing {
+            background: #fff7ed;
+            color: #DB4E18;
+        }
+
+        .status-failed {
+            background: #fef2f2;
+            color: #AD1B02;
+        }
+
+        .status-pending {
+            background: #fef3c7;
+            color: #F3BE26;
+        }
+
+        .age-badge {
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .age-new {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .age-recent {
+            background: #fff7ed;
+            color: #DB4E18;
+        }
+
+        .age-old {
+            background: #fef2f2;
+            color: #AD1B02;
+        }
+
+        .loading {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 40px;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #f3f4f6;
+            border-top: 4px solid #E88D14;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .refresh-button {
+            padding: 10px 20px;
+            background: linear-gradient(45deg, #E88D14, #DB4E18);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        .refresh-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(232, 141, 20, 0.3);
+        }
+
+        .export-buttons {
+            display: flex;
+            gap: 10px;
+        }
+
+        .export-btn {
+            padding: 8px 16px;
+            border: 2px solid #E88D14;
+            background: white;
+            color: #E88D14;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        .export-btn:hover {
+            background: #E88D14;
+            color: white;
+        }
+
+        @media (max-width: 768px) {
+            .charts-section {
+                grid-template-columns: 1fr;
+            }
+            
+            .header h1 {
+                font-size: 2rem;
+            }
+            
+            .metrics-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .filter-section {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- Header Section -->
+        <div class="header">
+            <h1>Claims Processing Analytics Dashboard</h1>
+            <p>Real-time insights into claims processing performance, financial metrics, and operational efficiency</p>
+            
+            <div class="filter-section">
+                <div class="filter-group">
+                    <label for="facilityFilter">Facility</label>
+                    <select id="facilityFilter">
+                        <option value="">All Facilities</option>
+                        <option value="FAC001">General Hospital</option>
+                        <option value="FAC002">Cardiac Center</option>
+                        <option value="FAC003">Orthopedic Clinic</option>
+                        <option value="FAC004">Emergency Department</option>
+                    </select>
+                </div>
+                
+                <div class="filter-group">
+                    <label for="financialClassFilter">Financial Class</label>
+                    <select id="financialClassFilter">
+                        <option value="">All Classes</option>
+                        <option value="COMM">Commercial Insurance</option>
+                        <option value="MEDI">Medicare</option>
+                        <option value="MAID">Medicaid</option>
+                        <option value="SELF">Self Pay</option>
+                        <option value="WC">Workers Comp</option>
+                    </select>
+                </div>
+                
+                <div class="filter-group">
+                    <label for="startDate">Start Date</label>
+                    <input type="date" id="startDate">
+                </div>
+                
+                <div class="filter-group">
+                    <label for="endDate">End Date</label>
+                    <input type="date" id="endDate">
+                </div>
+                
+                <div class="filter-group">
+                    <label for="ageFilter">Claim Age</label>
+                    <select id="ageFilter">
+                        <option value="">All Ages</option>
+                        <option value="0-7">0-7 Days</option>
+                        <option value="8-30">8-30 Days</option>
+                        <option value="31-90">31-90 Days</option>
+                        <option value="90+">90+ Days</option>
+                    </select>
+                </div>
+                
+                <div class="filter-group">
+                    <label for="statusFilter">Processing Status</label>
+                    <select id="statusFilter">
+                        <option value="">All Statuses</option>
+                        <option value="completed">Completed</option>
+                        <option value="processing">Processing</option>
+                        <option value="failed">Failed</option>
+                        <option value="pending">Pending</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <!-- Key Metrics Section -->
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <h3>Total Claims Processed</h3>
+                <div class="metric-value" id="totalClaims">0</div>
+                <div class="metric-change positive" id="totalClaimsChange">+0%</div>
+            </div>
+            
+            <div class="metric-card">
+                <h3>Success Rate</h3>
+                <div class="metric-value" id="successRate">0%</div>
+                <div class="metric-change positive" id="successRateChange">+0%</div>
+            </div>
+            
+            <div class="metric-card">
+                <h3>Total Revenue</h3>
+                <div class="metric-value" id="totalRevenue">$0</div>
+                <div class="metric-change positive" id="totalRevenueChange">+0%</div>
+            </div>
+            
+            <div class="metric-card">
+                <h3>RVU Efficiency Ratio</h3>
+                <div class="metric-value" id="rvuEfficiencyRatio">0%</div>
+                <div class="metric-change positive" id="rvuEfficiencyRatioChange">+0%</div>
+            </div>
+            
+            <div class="metric-card">
+                <h3>Failed Claims</h3>
+                <div class="metric-value" id="failedClaims">0</div>
+                <div class="metric-change negative" id="failedClaimsChange">+0%</div>
+            </div>
+            
+            <div class="metric-card">
+                <h3>Average Claim Value</h3>
+                <div class="metric-value" id="avgClaimValue">$0</div>
+                <div class="metric-change neutral" id="avgClaimValueChange">+0%</div>
+            </div>
+        </div>
+
+        <!-- Charts Section -->
+        <div class="charts-section">
+            <div class="chart-container">
+                <h3>Claims Volume by Financial Class</h3>
+                <div class="chart-wrapper">
+                    <canvas id="financialClassChart"></canvas>
+                </div>
+            </div>
+            
+            <div class="chart-container">
+                <h3>Processing Trends Over Time</h3>
+                <div class="chart-wrapper">
+                    <canvas id="trendChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div class="charts-section">
+            <div class="chart-container">
+                <h3>RVU Performance Analytics</h3>
+                <div class="chart-wrapper">
+                    <canvas id="rvuAnalyticsChart"></canvas>
+                </div>
+            </div>
+            
+            <div class="chart-container">
+                <h3>Claim Age Analysis</h3>
+                <div class="chart-wrapper">
+                    <canvas id="ageAnalysisChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Claims Table Section -->
+        <div class="table-section">
+            <div class="table-header">
+                <h3>Recent Claims</h3>
+                <div style="display: flex; gap: 15px; align-items: center;">
+                    <div class="export-buttons">
+                        <button class="export-btn" onclick="exportToCSV()">Export CSV</button>
+                        <button class="export-btn" onclick="exportToPDF()">Export PDF</button>
+                    </div>
+                    <button class="refresh-button" onclick="refreshData()">
+                        <span>🔄</span> Refresh
+                    </button>
+                    <div class="pagination">
+                        <button onclick="previousPage()" id="prevBtn">Previous</button>
+                        <span id="pageInfo">Page 1 of 1</span>
+                        <button onclick="nextPage()" id="nextBtn">Next</button>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="tableContainer">
+                <div class="loading">
+                    <div class="spinner"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Global variables
+        let currentPage = 1;
+        let totalPages = 1;
+        let allClaims = [];
+        let filteredClaims = [];
+        let charts = {};
+
+        // Initialize dashboard
+        document.addEventListener('DOMContentLoaded', function() {
+            // Wait for DOM to be fully loaded
+            setTimeout(() => {
+                initializeDateFilters();
+                generateSampleData();
+                setupEventListeners();
+                
+                // Ensure all chart elements exist before updating
+                const chartElements = ['financialClassChart', 'trendChart', 'rvuAnalyticsChart', 'ageAnalysisChart'];
+                const allChartsReady = chartElements.every(id => document.getElementById(id) !== null);
+                
+                if (allChartsReady) {
+                    applyFilters();
+                } else {
+                    console.warn('Some chart elements not found, retrying...');
+                    setTimeout(() => applyFilters(), 500);
+                }
+            }, 100);
+        });
+
+        function initializeDateFilters() {
+            const today = new Date();
+            const thirtyDaysAgo = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
+            
+            document.getElementById('endDate').value = today.toISOString().split('T')[0];
+            document.getElementById('startDate').value = thirtyDaysAgo.toISOString().split('T')[0];
+        }
+
+        function setupEventListeners() {
+            // Add event listeners for all filters
+            const filters = ['facilityFilter', 'financialClassFilter', 'startDate', 'endDate', 'ageFilter', 'statusFilter'];
+            filters.forEach(filterId => {
+                document.getElementById(filterId).addEventListener('change', applyFilters);
+            });
+        }
+
+        function generateSampleData() {
+            // Generate realistic sample claims data
+            const facilities = ['FAC001', 'FAC002', 'FAC003', 'FAC004'];
+            const financialClasses = ['COMM', 'MEDI', 'MAID', 'SELF', 'WC'];
+            const statuses = ['completed', 'processing', 'failed', 'pending'];
+            const procedureCodes = ['99213', '99214', '99215', '45378', '29881', '27447', '64483', '93306'];
+            
+            // RVU values for procedure codes (realistic values)
+            const rvuValues = {
+                '99213': 1.31, '99214': 2.11, '99215': 3.17, '45378': 4.85,
+                '29881': 8.34, '27447': 22.75, '64483': 2.08, '93306': 0.93
+            };
+            
+            allClaims = [];
+            for (let i = 0; i < 2500; i++) {
+                const serviceDate = new Date(Date.now() - Math.random() * 90 * 24 * 60 * 60 * 1000);
+                const age = Math.floor((Date.now() - serviceDate.getTime()) / (24 * 60 * 60 * 1000));
+                const procedureCode = procedureCodes[Math.floor(Math.random() * procedureCodes.length)];
+                const units = Math.floor(Math.random() * 3) + 1;
+                const rvuValue = rvuValues[procedureCode] || 1.0;
+                const reimbursementAmount = rvuValue * units * 36.04; // RVU * Units * Conversion Factor
+                const chargeAmount = Math.round((Math.random() * 5000 + 100) * 100) / 100;
+                
+                allClaims.push({
+                    claim_id: `CLM${String(i + 1).padStart(6, '0')}`,
+                    patient_account_number: `PAT${String(Math.floor(Math.random() * 50000)).padStart(5, '0')}`,
+                    facility_id: facilities[Math.floor(Math.random() * facilities.length)],
+                    financial_class_id: financialClasses[Math.floor(Math.random() * financialClasses.length)],
+                    service_from_date: serviceDate.toISOString().split('T')[0],
+                    service_to_date: serviceDate.toISOString().split('T')[0],
+                    total_charge_amount: chargeAmount,
+                    processing_status: statuses[Math.floor(Math.random() * statuses.length)],
+                    patient_name: `Patient ${i + 1}`,
+                    age: age,
+                    procedure_code: procedureCode,
+                    rvu_value: rvuValue,
+                    units: units,
+                    reimbursement_amount: Math.round(reimbursementAmount * 100) / 100,
+                    processing_time: Math.round(Math.random() * 300 + 10),
+                    service_line_count: Math.floor(Math.random() * 5) + 1
+                });
+            }
+        }
+
+        function applyFilters() {
+            const facility = document.getElementById('facilityFilter').value;
+            const financialClass = document.getElementById('financialClassFilter').value;
+            const startDate = document.getElementById('startDate').value;
+            const endDate = document.getElementById('endDate').value;
+            const ageFilter = document.getElementById('ageFilter').value;
+            const status = document.getElementById('statusFilter').value;
+
+            filteredClaims = allClaims.filter(claim => {
+                // Facility filter
+                if (facility && claim.facility_id !== facility) return false;
+                
+                // Financial class filter
+                if (financialClass && claim.financial_class_id !== financialClass) return false;
+                
+                // Date range filter
+                if (startDate && claim.service_from_date < startDate) return false;
+                if (endDate && claim.service_to_date > endDate) return false;
+                
+                // Age filter
+                if (ageFilter) {
+                    const age = claim.age;
+                    switch (ageFilter) {
+                        case '0-7': if (age > 7) return false; break;
+                        case '8-30': if (age < 8 || age > 30) return false; break;
+                        case '31-90': if (age < 31 || age > 90) return false; break;
+                        case '90+': if (age < 90) return false; break;
+                    }
+                }
+                
+                // Status filter
+                if (status && claim.processing_status !== status) return false;
+                
+                return true;
+            });
+
+            currentPage = 1;
+            updateMetrics();
+            updateCharts();
+            displayClaims();
+        }
+
+        function updateMetrics() {
+            const totalClaims = filteredClaims.length;
+            const completedClaims = filteredClaims.filter(c => c.processing_status === 'completed').length;
+            const failedClaims = filteredClaims.filter(c => c.processing_status === 'failed').length;
+            const totalRevenue = filteredClaims.reduce((sum, c) => sum + c.total_charge_amount, 0);
+            const totalReimbursement = filteredClaims.reduce((sum, c) => sum + c.reimbursement_amount, 0);
+            const avgClaimValue = totalRevenue / totalClaims || 0;
+            const successRate = totalClaims > 0 ? (completedClaims / totalClaims * 100) : 0;
+            
+            // Calculate RVU Efficiency Ratio: (Total Reimbursement / Total Charges) * 100
+            const rvuEfficiencyRatio = totalRevenue > 0 ? (totalReimbursement / totalRevenue * 100) : 0;
+
+            // Update metric displays with animations
+            animateValue('totalClaims', totalClaims.toLocaleString());
+            animateValue('successRate', `${successRate.toFixed(1)}%`);
+            animateValue('totalRevenue', `${totalRevenue.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`);
+            animateValue('rvuEfficiencyRatio', `${rvuEfficiencyRatio.toFixed(1)}%`);
+            animateValue('failedClaims', failedClaims.toLocaleString());
+            animateValue('avgClaimValue', `${avgClaimValue.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`);
+
+            // Update change indicators (simulate percentage changes)
+            updateChangeIndicator('totalClaimsChange', Math.random() * 20 - 10);
+            updateChangeIndicator('successRateChange', Math.random() * 10 - 5);
+            updateChangeIndicator('totalRevenueChange', Math.random() * 15 - 7.5);
+            updateChangeIndicator('rvuEfficiencyRatioChange', Math.random() * 8 - 4);
+            updateChangeIndicator('failedClaimsChange', Math.random() * 12 - 6);
+            updateChangeIndicator('avgClaimValueChange', Math.random() * 6 - 3);
+        }
+
+        function animateValue(elementId, newValue) {
+            const element = document.getElementById(elementId);
+            if (!element) return;
+            
+            element.style.transform = 'scale(1.1)';
+            element.textContent = newValue;
+            setTimeout(() => {
+                element.style.transform = 'scale(1)';
+            }, 200);
+        }
+
+        function updateChangeIndicator(elementId, change) {
+            const element = document.getElementById(elementId);
+            if (!element) return;
+            
+            const sign = change >= 0 ? '+' : '';
+            element.textContent = `${sign}${change.toFixed(1)}%`;
+            element.className = `metric-change ${change >= 0 ? 'positive' : 'negative'}`;
+        }
+
+        function updateCharts() {
+            updateFinancialClassChart();
+            updateTrendChart();
+            updateRVUAnalyticsChart();
+            updateAgeAnalysisChart();
+        }
+
+        function updateFinancialClassChart() {
+            const chartElement = document.getElementById('financialClassChart');
+            if (!chartElement) return;
+            const ctx = chartElement.getContext('2d');
+            
+            // Destroy existing chart if it exists
+            if (charts.financialClass) {
+                charts.financialClass.destroy();
+            }
+
+            const financialClassData = {};
+            filteredClaims.forEach(claim => {
+                const fc = claim.financial_class_id;
+                if (!financialClassData[fc]) {
+                    financialClassData[fc] = { count: 0, revenue: 0 };
+                }
+                financialClassData[fc].count++;
+                financialClassData[fc].revenue += claim.total_charge_amount;
+            });
+
+            const labels = Object.keys(financialClassData);
+            const counts = labels.map(label => financialClassData[label].count);
+            const revenues = labels.map(label => financialClassData[label].revenue);
+
+            charts.financialClass = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: labels.map(l => {
+                        const nameMap = {
+                            'COMM': 'Commercial',
+                            'MEDI': 'Medicare',
+                            'MAID': 'Medicaid',
+                            'SELF': 'Self Pay',
+                            'WC': 'Workers Comp'
+                        };
+                        return nameMap[l] || l;
+                    }),
+                    datasets: [{
+                        data: counts,
+                        backgroundColor: [
+                            '#E88D14',  // PwC Light Orange
+                            '#DB4E18',  // PwC Dark Orange
+                            '#AD1B02',  // PwC Red
+                            '#F3BE26',  // PwC Yellow
+                            '#E669A2'   // PwC Pink
+                        ],
+                        borderWidth: 0,
+                        hoverOffset: 10
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: {
+                                padding: 20,
+                                usePointStyle: true
+                            }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    const label = context.label;
+                                    const count = context.parsed;
+                                    const revenue = revenues[context.dataIndex];
+                                    return `${label}: ${count.toLocaleString()} claims ($${revenue.toLocaleString()})`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateTrendChart() {
+            const chartElement = document.getElementById('trendChart');
+            if (!chartElement) return;
+            const ctx = chartElement.getContext('2d');
+            
+            if (charts.trend) {
+                charts.trend.destroy();
+            }
+
+            // Group claims by date
+            const dateGroups = {};
+            filteredClaims.forEach(claim => {
+                const date = claim.service_from_date;
+                if (!dateGroups[date]) {
+                    dateGroups[date] = { count: 0, revenue: 0 };
+                }
+                dateGroups[date].count++;
+                dateGroups[date].revenue += claim.total_charge_amount;
+            });
+
+            // Sort dates and create arrays
+            const sortedDates = Object.keys(dateGroups).sort();
+            const counts = sortedDates.map(date => dateGroups[date].count);
+            const revenues = sortedDates.map(date => dateGroups[date].revenue);
+
+            charts.trend = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: sortedDates.map(date => new Date(date).toLocaleDateString()),
+                    datasets: [{
+                        label: 'Claims Count',
+                        data: counts,
+                        borderColor: '#E88D14',
+                        backgroundColor: 'rgba(232, 141, 20, 0.1)',
+                        tension: 0.4,
+                        fill: true,
+                        yAxisID: 'y'
+                    }, {
+                        label: 'Revenue',
+                        data: revenues,
+                        borderColor: '#DB4E18',
+                        backgroundColor: 'rgba(219, 78, 24, 0.1)',
+                        tension: 0.4,
+                        fill: true,
+                        yAxisID: 'y1'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    scales: {
+                        x: {
+                            display: true,
+                            title: {
+                                display: true,
+                                text: 'Service Date'
+                            }
+                        },
+                        y: {
+                            type: 'linear',
+                            display: true,
+                            position: 'left',
+                            title: {
+                                display: true,
+                                text: 'Claims Count'
+                            }
+                        },
+                        y1: {
+                            type: 'linear',
+                            display: true,
+                            position: 'right',
+                            title: {
+                                display: true,
+                                text: 'Revenue ($)'
+                            },
+                            grid: {
+                                drawOnChartArea: false,
+                            },
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    const label = context.dataset.label;
+                                    const value = context.parsed.y;
+                                    if (label === 'Revenue') {
+                                        return `${label}: $${value.toLocaleString()}`;
+                                    }
+                                    return `${label}: ${value.toLocaleString()}`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateRVUAnalyticsChart() {
+            const ctx = document.getElementById('rvuAnalyticsChart').getContext('2d');
+            
+            if (charts.rvuAnalytics) {
+                charts.rvuAnalytics.destroy();
+            }
+
+            // Group by procedure code and calculate RVU metrics
+            const procedureRVUData = {};
+            filteredClaims.forEach(claim => {
+                const proc = claim.procedure_code;
+                if (!procedureRVUData[proc]) {
+                    procedureRVUData[proc] = {
+                        count: 0,
+                        totalCharges: 0,
+                        totalReimbursement: 0,
+                        totalRVUs: 0,
+                        avgRVU: 0,
+                        efficiencyRatio: 0
+                    };
+                }
+                
+                const data = procedureRVUData[proc];
+                data.count++;
+                data.totalCharges += claim.total_charge_amount;
+                data.totalReimbursement += claim.reimbursement_amount;
+                data.totalRVUs += claim.rvu_value * claim.units;
+            });
+
+            // Calculate averages and efficiency ratios
+            Object.keys(procedureRVUData).forEach(proc => {
+                const data = procedureRVUData[proc];
+                data.avgRVU = data.totalRVUs / data.count;
+                data.efficiencyRatio = data.totalCharges > 0 ? (data.totalReimbursement / data.totalCharges * 100) : 0;
+            });
+
+            // Get top 8 procedures by RVU volume
+            const sortedProcedures = Object.entries(procedureRVUData)
+                .sort((a, b) => b[1].totalRVUs - a[1].totalRVUs)
+                .slice(0, 8);
+
+            const labels = sortedProcedures.map(([proc, data]) => proc);
+            const totalRVUs = sortedProcedures.map(([proc, data]) => data.totalRVUs);
+            const efficiencyRatios = sortedProcedures.map(([proc, data]) => data.efficiencyRatio);
+
+            charts.rvuAnalytics = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Total RVUs',
+                        data: totalRVUs,
+                        backgroundColor: 'rgba(232, 141, 20, 0.8)',
+                        borderColor: '#E88D14',
+                        borderWidth: 2,
+                        borderRadius: 6,
+                        yAxisID: 'y'
+                    }, {
+                        label: 'Efficiency Ratio (%)',
+                        data: efficiencyRatios,
+                        backgroundColor: 'rgba(219, 78, 24, 0.8)',
+                        borderColor: '#DB4E18',
+                        borderWidth: 2,
+                        borderRadius: 6,
+                        yAxisID: 'y1'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    scales: {
+                        x: {
+                            title: {
+                                display: true,
+                                text: 'Procedure Code'
+                            }
+                        },
+                        y: {
+                            type: 'linear',
+                            display: true,
+                            position: 'left',
+                            title: {
+                                display: true,
+                                text: 'Total RVUs'
+                            },
+                            beginAtZero: true
+                        },
+                        y1: {
+                            type: 'linear',
+                            display: true,
+                            position: 'right',
+                            title: {
+                                display: true,
+                                text: 'Efficiency Ratio (%)'
+                            },
+                            beginAtZero: true,
+                            max: 120,
+                            grid: {
+                                drawOnChartArea: false,
+                            },
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    const proc = context.label;
+                                    const procData = procedureRVUData[proc];
+                                    const label = context.dataset.label;
+                                    const value = context.parsed.y;
+                                    
+                                    if (label === 'Total RVUs') {
+                                        return [
+                                            `${label}: ${value.toFixed(2)}`,
+                                            `Claims: ${procData.count}`,
+                                            `Avg RVU: ${procData.avgRVU.toFixed(2)}`
+                                        ];
+                                    } else {
+                                        return [
+                                            `${label}: ${value.toFixed(1)}%`,
+                                            `Total Charges: ${procData.totalCharges.toLocaleString()}`,
+                                            `Total Reimbursement: ${procData.totalReimbursement.toLocaleString()}`
+                                        ];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateAgeAnalysisChart() {
+            const chartElement = document.getElementById('ageAnalysisChart');
+            if (!chartElement) return;
+            const ctx = chartElement.getContext('2d');
+            
+            if (charts.ageAnalysis) {
+                charts.ageAnalysis.destroy();
+            }
+
+            // Group by age ranges
+            const ageGroups = {
+                '0-7 days': 0,
+                '8-30 days': 0,
+                '31-90 days': 0,
+                '90+ days': 0
+            };
+
+            filteredClaims.forEach(claim => {
+                const age = claim.age;
+                if (age <= 7) ageGroups['0-7 days']++;
+                else if (age <= 30) ageGroups['8-30 days']++;
+                else if (age <= 90) ageGroups['31-90 days']++;
+                else ageGroups['90+ days']++;
+            });
+
+            charts.ageAnalysis = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: Object.keys(ageGroups),
+                    datasets: [{
+                        label: 'Claims Count',
+                        data: Object.values(ageGroups),
+                        backgroundColor: [
+                            'rgba(232, 141, 20, 0.8)',   // PwC Orange for new claims
+                            'rgba(243, 190, 38, 0.8)',   // PwC Yellow for recent
+                            'rgba(219, 78, 24, 0.8)',    // PwC Dark Orange for old
+                            'rgba(173, 27, 2, 0.8)'      // PwC Red for very old
+                        ],
+                        borderWidth: 0,
+                        borderRadius: 6
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            title: {
+                                display: true,
+                                text: 'Number of Claims'
+                            }
+                        },
+                        x: {
+                            title: {
+                                display: true,
+                                text: 'Claim Age'
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function displayClaims() {
+            const itemsPerPage = 25;
+            const startIndex = (currentPage - 1) * itemsPerPage;
+            const endIndex = startIndex + itemsPerPage;
+            const claimsToShow = filteredClaims.slice(startIndex, endIndex);
+            
+            totalPages = Math.ceil(filteredClaims.length / itemsPerPage);
+
+            let tableHTML = `
+                <table class="claims-table">
+                    <thead>
+                        <tr>
+                            <th>Claim ID</th>
+                            <th>Patient Account</th>
+                            <th>Patient Name</th>
+                            <th>Facility</th>
+                            <th>Financial Class</th>
+                            <th>Service Date</th>
+                            <th>Charge Amount</th>
+                            <th>Reimbursement</th>
+                            <th>RVU Value</th>
+                            <th>Status</th>
+                            <th>Age</th>
+                            <th>Procedure</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+
+            claimsToShow.forEach(claim => {
+                const statusClass = `status-${claim.processing_status}`;
+                const ageClass = claim.age <= 7 ? 'age-new' : claim.age <= 30 ? 'age-recent' : 'age-old';
+                
+                tableHTML += `
+                    <tr>
+                        <td>${claim.claim_id}</td>
+                        <td>${claim.patient_account_number}</td>
+                        <td>${claim.patient_name}</td>
+                        <td>${claim.facility_id}</td>
+                        <td>${claim.financial_class_id}</td>
+                        <td>${claim.service_from_date}</td>
+                        <td>${claim.total_charge_amount.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                        <td>${claim.reimbursement_amount.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                        <td>${claim.rvu_value.toFixed(2)}</td>
+                        <td><span class="status-badge ${statusClass}">${claim.processing_status}</span></td>
+                        <td><span class="age-badge ${ageClass}">${claim.age}d</span></td>
+                        <td>${claim.procedure_code}</td>
+                    </tr>
+                `;
+            });
+
+            tableHTML += '</tbody></table>';
+            
+            document.getElementById('tableContainer').innerHTML = tableHTML;
+            
+            // Update pagination
+            document.getElementById('pageInfo').textContent = `Page ${currentPage} of ${totalPages}`;
+            document.getElementById('prevBtn').disabled = currentPage === 1;
+            document.getElementById('nextBtn').disabled = currentPage === totalPages;
+        }
+
+        function previousPage() {
+            if (currentPage > 1) {
+                currentPage--;
+                displayClaims();
+            }
+        }
+
+        function nextPage() {
+            if (currentPage < totalPages) {
+                currentPage++;
+                displayClaims();
+            }
+        }
+
+        function refreshData() {
+            // Simulate data refresh
+            const refreshButton = document.querySelector('.refresh-button');
+            if (refreshButton) {
+                refreshButton.style.transform = 'rotate(360deg)';
+                
+                setTimeout(() => {
+                    refreshButton.style.transform = 'rotate(0deg)';
+                    applyFilters();
+                }, 1000);
+            } else {
+                applyFilters();
+            }
+        }
+
+        function exportToCSV() {
+            const headers = ['Claim ID', 'Patient Account', 'Patient Name', 'Facility', 'Financial Class', 'Service Date', 'Charge Amount', 'Reimbursement Amount', 'RVU Value', 'Status', 'Age', 'Procedure'];
+            
+            let csvContent = headers.join(',') + '\n';
+            
+            filteredClaims.forEach(claim => {
+                const row = [
+                    claim.claim_id,
+                    claim.patient_account_number,
+                    `"${claim.patient_name}"`,
+                    claim.facility_id,
+                    claim.financial_class_id,
+                    claim.service_from_date,
+                    claim.total_charge_amount,
+                    claim.reimbursement_amount,
+                    claim.rvu_value,
+                    claim.processing_status,
+                    claim.age,
+                    claim.procedure_code
+                ];
+                csvContent += row.join(',') + '\n';
+            });
+
+            const blob = new Blob([csvContent], { type: 'text/csv' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `claims_export_${new Date().toISOString().split('T')[0]}.csv`;
+            a.click();
+            window.URL.revokeObjectURL(url);
+        }
+
+        function exportToPDF() {
+            alert('PDF export functionality would be implemented with a library like jsPDF');
+        }
+
+        // Initialize filters to show all data
+        setTimeout(() => {
+            applyFilters();
+        }, 100);
+    </script>
+</body>
+</html>
