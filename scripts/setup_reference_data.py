@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config.config import load_config
 from src.db.postgres import PostgresDatabase
-from src.db.sqlserver import SQLServerDatabase
+from src.db.sql_server import SQLServerDatabase
 
 # Reference data definitions - UPDATED: Use integer facility IDs
 FACILITIES_DATA = [
