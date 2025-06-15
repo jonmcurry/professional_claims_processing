@@ -481,7 +481,9 @@ CREATE INDEX ix_active_claims
 GO
 CREATE INDEX ix_unresolved_failed_claims
     ON failed_claims (claim_id)
-    WHERE (resolution_status IS NULL OR resolution_status <> 'resolved');
+    -- SQL Server 2008 filtered indexes do not allow OR conditions.
+    -- Use ISNULL to treat NULL values as unresolved while avoiding OR.
+    WHERE ISNULL(resolution_status, '') <> 'resolved';
 GO
 ALTER TABLE archived_failed_claims REBUILD PARTITION = ALL
     WITH (DATA_COMPRESSION = PAGE);
