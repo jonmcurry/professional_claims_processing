@@ -169,7 +169,7 @@ GO
 
 CREATE TABLE facility_coders (
     facility_id INT,
-    coder_id VARCHAR(50),
+    coder_id VARCHAR(50) PRIMARY KEY,
     coder_last_name VARCHAR(50),
     coder_first_name VARCHAR(50)
 );
