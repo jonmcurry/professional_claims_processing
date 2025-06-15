@@ -79,7 +79,7 @@ CREATE TABLE facility_region (
 GO
 
 CREATE TABLE facilities (
-    facility_id VHARCHAR(50) PRIMARY KEY,
+    facility_id VARCHAR(20) PRIMARY KEY,
     facility_name VARCHAR(100),
     facility_type VARCHAR(50),
     address VARCHAR(200),
