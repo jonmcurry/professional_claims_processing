@@ -471,24 +471,26 @@ CREATE UNIQUE CLUSTERED INDEX cix_v_facility_totals
 GO
 
 
--- Materialized views for analytics
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS mv_daily_claim_totals AS
+-- Analytical views. If materialization is required, create a job to persist the
+-- results or use indexed views.
+
+CREATE VIEW dbo.v_daily_claim_totals AS
 SELECT
     service_to_date AS service_date,
     COUNT(*) AS claim_count,
     SUM(total_charge_amount) AS total_charge
-FROM claims
-GROUP BY service_to_date
-WITH DATA;
+FROM dbo.claims
+GROUP BY service_to_date;
+GO
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS mv_failed_claims_summary AS
+CREATE VIEW dbo.v_failed_claims_summary AS
 SELECT
-    DATE_TRUNC('day', failed_at) AS fail_day,
+    CAST(failed_at AS DATE) AS fail_day,
     COUNT(*) AS failed_count
-FROM failed_claims
-GROUP BY DATE_TRUNC('day', failed_at)
-WITH DATA;
+FROM dbo.failed_claims
+GROUP BY CAST(failed_at AS DATE);
+GO
 
 -- SQL Server configuration for high throughput
 ALTER DATABASE smart_pro_claims SET RECOVERY SIMPLE;  -- During bulk operations
