@@ -21,6 +21,9 @@ CREATE TABLE audit_log (
     approved_at DATETIME2(7) NULL
 );
 GO
+CREATE INDEX idx_audit_log_record ON audit_log(record_id, operation_timestamp);
+-- Consider including table_name in a composite index if queries often
+-- filter by table
 
 CREATE TABLE daily_processing_summary (
     summary_date DATE NOT NULL,
