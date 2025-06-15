@@ -597,19 +597,75 @@ class DatabaseSetupOrchestrator:
             await sql_db.close()
 
     def _split_sql_statements(self, sql_content: str, sql_server: bool = False) -> list:
-        """Split SQL content into individual statements"""
+        """Split SQL content into individual statements.
+
+        For PostgreSQL this method is aware of dollar quoted blocks so that
+        functions or procedures containing semicolons are not split into
+        multiple statements.  The previous implementation simply split on
+        semicolons which resulted in statements like the ``archive_old_claims``
+        procedure being truncated and causing errors such as ``unterminated
+        dollar-quoted string`` when executed.
+        """
+
         if sql_server:
             # SQL Server uses GO as batch separator
-            statements = sql_content.split("GO")
+            raw_statements = sql_content.split("GO")
         else:
-            # PostgreSQL uses semicolons
-            statements = sql_content.split(";")
+            raw_statements = []
+            current = []
+            in_dollar = False
+            dollar_tag = ""
+            in_single = False
 
-        # Clean up statements
+            for line in sql_content.splitlines():
+                i = 0
+                while i < len(line):
+                    ch = line[i]
+
+                    # Handle line comments when not within a quoted block
+                    if not in_dollar and not in_single and line[i:].startswith("--"):
+                        break
+
+                    if ch == "'" and not in_dollar:
+                        in_single = not in_single
+                        current.append(ch)
+                        i += 1
+                        continue
+
+                    if ch == "$" and not in_single:
+                        match = re.match(r"\$[^$]*\$", line[i:])
+                        if match:
+                            tag = match.group()
+                            current.append(tag)
+                            i += len(tag)
+                            if in_dollar and tag == dollar_tag:
+                                in_dollar = False
+                                dollar_tag = ""
+                            else:
+                                in_dollar = True
+                                dollar_tag = tag
+                            continue
+
+                    if ch == ";" and not in_single and not in_dollar:
+                        current.append(ch)
+                        raw_statements.append("".join(current).strip())
+                        current = []
+                        i += 1
+                        continue
+
+                    current.append(ch)
+                    i += 1
+
+                current.append("\n")
+
+            if "".join(current).strip():
+                raw_statements.append("".join(current).strip())
+
+        # Clean up statements and remove empty/comment-only ones
         cleaned_statements = []
-        for stmt in statements:
+        for stmt in raw_statements:
             cleaned = stmt.strip()
-            if cleaned and not cleaned.startswith("--"):  # Skip comments
+            if cleaned and not cleaned.startswith("--"):
                 cleaned_statements.append(cleaned)
 
         return cleaned_statements
