@@ -1,6 +1,5 @@
--- Updated PostgreSQL Schema for create_postgres_schema.sql
--- CLEAN ARCHITECTURE: Only staging and processing tables
--- NO reference data duplication (facilities, financial_classes, rvu_data all in SQL Server only)
+-- Fixed PostgreSQL Schema for create_postgres_schema.sql
+-- Includes rvu_data table and proper structure
 
 CREATE DATABASE staging_process;
 \c staging_process;
@@ -138,6 +137,42 @@ CREATE TABLE processing_checkpoints (
     PRIMARY KEY (claim_id, stage)
 );
 
+-- RVU data table for high-performance claims processing
+CREATE TABLE rvu_data (
+    procedure_code VARCHAR(10) PRIMARY KEY,
+    description VARCHAR(500),
+    category VARCHAR(50),
+    subcategory VARCHAR(50),
+    work_rvu NUMERIC(8,4),
+    practice_expense_rvu NUMERIC(8,4),
+    malpractice_rvu NUMERIC(8,4),
+    total_rvu NUMERIC(8,4),
+    conversion_factor NUMERIC(8,2),
+    non_facility_pe_rvu NUMERIC(8,4),
+    facility_pe_rvu NUMERIC(8,4),
+    effective_date DATE,
+    end_date DATE,
+    status VARCHAR(20),
+    global_period VARCHAR(10),
+    professional_component BOOLEAN,
+    technical_component BOOLEAN,
+    bilateral_surgery BOOLEAN,
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ
+);
+
+-- RVU Sync Log Table (for tracking synchronization history)
+CREATE TABLE rvu_sync_log (
+    sync_id SERIAL PRIMARY KEY,
+    sync_type VARCHAR(50) NOT NULL,
+    sync_started_at TIMESTAMPTZ NOT NULL,
+    sync_completed_at TIMESTAMPTZ,
+    records_processed INTEGER DEFAULT 0,
+    sync_status VARCHAR(20) NOT NULL,
+    error_message TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE ml_models (
     model_name VARCHAR(100) NOT NULL,
     model_version VARCHAR(50) NOT NULL,
@@ -193,7 +228,40 @@ CREATE INDEX idx_failed_claims_status ON failed_claims(resolution_status);
 CREATE INDEX idx_processing_metrics_batch ON processing_metrics(batch_id);
 CREATE INDEX idx_processing_metrics_timestamp ON processing_metrics(metric_timestamp);
 
+-- RVU table indexes for better sync performance
+CREATE INDEX idx_rvu_data_status ON rvu_data (status) WHERE status = 'active';
+CREATE INDEX idx_rvu_data_updated_at ON rvu_data (updated_at DESC) WHERE updated_at IS NOT NULL;
+CREATE INDEX idx_rvu_data_category ON rvu_data (category, subcategory);
+
+-- RVU sync log indexes
+CREATE INDEX idx_rvu_sync_log_completed ON rvu_sync_log (sync_completed_at DESC);
+CREATE INDEX idx_rvu_sync_log_status ON rvu_sync_log (sync_status, sync_completed_at DESC);
+
+-- Foreign key constraints
+ALTER TABLE claims_line_items
+    ADD CONSTRAINT fk_claim_line_claim FOREIGN KEY (claim_id, service_to_date) REFERENCES claims (claim_id, service_to_date);
+
+ALTER TABLE claims_diagnosis_codes
+    ADD CONSTRAINT fk_diagnosis_claim FOREIGN KEY (claim_id, service_to_date) REFERENCES claims (claim_id, service_to_date);
+
+-- Archive procedure for old claims
+CREATE TABLE IF NOT EXISTS archived_claims (LIKE claims INCLUDING ALL);
+
+CREATE OR REPLACE PROCEDURE archive_old_claims(cutoff_date DATE)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO archived_claims SELECT * FROM claims WHERE service_to_date < cutoff_date;
+    DELETE FROM claims WHERE service_to_date < cutoff_date;
+END;
+$$;
+
 -- Comments for documentation
-COMMENT ON DATABASE staging_process IS 'PostgreSQL staging database - CLEAN ARCHITECTURE: only processing tables, no reference data duplication';
+COMMENT ON DATABASE staging_process IS 'PostgreSQL staging database for high-performance claims processing';
 COMMENT ON TABLE claims IS 'Claims being processed - references facilities/financial_classes in SQL Server via validation services';
 COMMENT ON TABLE failed_claims IS 'Claims that failed validation or processing with detailed error information';
+COMMENT ON TABLE rvu_data IS 'RVU (Relative Value Unit) data cached from SQL Server for high-performance claims processing';
+COMMENT ON COLUMN rvu_data.status IS 'Record status: active, inactive, deprecated (lowercase for PostgreSQL)';
+COMMENT ON TABLE rvu_sync_log IS 'Tracks RVU data synchronization between SQL Server and PostgreSQL';
+COMMENT ON COLUMN rvu_sync_log.sync_type IS 'Type of sync: initial_sync, incremental_sync, emergency_resync';
+COMMENT ON COLUMN rvu_sync_log.sync_status IS 'Status: completed, failed, in_progress';
