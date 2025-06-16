@@ -388,54 +388,56 @@ class PostgresDatabase(BaseDatabase):
         for attempt in range(max_retries):
             try:
                 # Use timeout and proper connection state management
-                async with asyncio.wait_for(pool.acquire(), timeout=15.0) as conn:  # Increased timeout
-                    try:
-                        # Ensure connection is ready
-                        await conn.execute("SELECT 1")
+                conn = await asyncio.wait_for(pool.acquire(), timeout=15.0)  # Increased timeout
+                try:
+                    # Ensure connection is ready
+                    await conn.execute("SELECT 1")
                         
-                        # Execute the actual query with timeout
-                        query_with_trace = self._with_traceparent(query, traceparent)
-                        rows = await asyncio.wait_for(
-                            conn.fetch(query_with_trace, *params), 
-                            timeout=60.0  # Increased timeout for complex queries
+                    # Execute the actual query with timeout
+                    query_with_trace = self._with_traceparent(query, traceparent)
+                    rows = await asyncio.wait_for(
+                        conn.fetch(query_with_trace, *params),
+                        timeout=60.0  # Increased timeout for complex queries
+                    )
+
+                    # Convert to dict format
+                    result = [dict(row) for row in rows]
+
+                    # Record success metrics
+                    duration = (time.perf_counter() - start) * 1000
+                    metrics.inc("postgres_query_ms", duration)
+                    metrics.inc("postgres_query_count")
+
+                    if duration > self.cfg.threshold_ms:
+                        logger.warning(
+                            "slow_query",
+                            extra={"query": query[:100], "duration_ms": duration},
                         )
-                        
-                        # Convert to dict format
-                        result = [dict(row) for row in rows]
-                        
-                        # Record success metrics
-                        duration = (time.perf_counter() - start) * 1000
-                        metrics.inc("postgres_query_ms", duration)
-                        metrics.inc("postgres_query_count")
-                        
-                        if duration > self.cfg.threshold_ms:
-                            logger.warning(
-                                "slow_query",
-                                extra={"query": query[:100], "duration_ms": duration},
-                            )
-                        
-                        await self.circuit_breaker.record_success()
-                        
-                        # Log successful recovery if circuit breaker was previously open
-                        if hasattr(self, '_circuit_was_open') and self._circuit_was_open:
-                            logger.info("PostgreSQL circuit breaker recovered successfully")
-                            self._circuit_was_open = False
-                        
-                        return result
-                        
-                    except asyncio.TimeoutError:
-                        last_exception = Exception("Query execution timeout")
-                        logger.warning(f"Query timeout on attempt {attempt + 1}: {query[:100]}...")
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(0.5 * (attempt + 1))  # Progressive backoff
-                        continue
-                        
-                    except Exception as e:
-                        last_exception = e
-                        logger.warning(f"Query execution error on attempt {attempt + 1}: {e}")
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(0.5 * (attempt + 1))  # Progressive backoff
-                        continue
+
+                    await self.circuit_breaker.record_success()
+
+                    # Log successful recovery if circuit breaker was previously open
+                    if hasattr(self, '_circuit_was_open') and self._circuit_was_open:
+                        logger.info("PostgreSQL circuit breaker recovered successfully")
+                        self._circuit_was_open = False
+
+                    return result
+
+                except asyncio.TimeoutError:
+                    last_exception = Exception("Query execution timeout")
+                    logger.warning(f"Query timeout on attempt {attempt + 1}: {query[:100]}...")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(0.5 * (attempt + 1))  # Progressive backoff
+                    continue
+
+                except Exception as e:
+                    last_exception = e
+                    logger.warning(f"Query execution error on attempt {attempt + 1}: {e}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(0.5 * (attempt + 1))  # Progressive backoff
+                    continue
+                finally:
+                    await pool.release(conn)
                         
             except asyncio.TimeoutError:
                 last_exception = Exception("Connection acquisition timeout")
@@ -1184,16 +1186,16 @@ class PostgresDatabase(BaseDatabase):
         for attempt in range(max_retries):
             try:
                 # Use timeout to prevent hanging
-                async with asyncio.wait_for(pool.acquire(), timeout=5.0) as conn:
+                conn = await asyncio.wait_for(pool.acquire(), timeout=5.0)
+                try:
                     # Ensure connection is in a clean state
-                    try:
-                        await conn.execute("SELECT 1")
-                        return conn
-                    except Exception as e:
-                        # Connection might be in a bad state, continue to retry
-                        print(f"Connection validation failed on attempt {attempt + 1}: {e}")
-                        continue
-                        
+                    await conn.execute("SELECT 1")
+                    return conn
+                except Exception as e:
+                    # Connection might be in a bad state, continue to retry
+                    print(f"Connection validation failed on attempt {attempt + 1}: {e}")
+                    continue
+                
             except asyncio.TimeoutError:
                 print(f"Connection acquisition timeout on attempt {attempt + 1}")
                 if attempt < max_retries - 1:

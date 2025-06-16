@@ -473,6 +473,10 @@ class ClaimService:
 
         return facilities, classes
 
+    async def load_validation_sets(self) -> tuple[set[str], set[str]]:
+        """Backward-compatible wrapper for optimized validation set loading."""
+        return await self.load_validation_sets_optimized()
+
     async def get_rvu_data_bulk(
         self, procedure_codes: List[str]
     ) -> Dict[str, Dict[str, Any]]:
