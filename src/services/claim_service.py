@@ -532,6 +532,10 @@ class ClaimService:
             self.logger.error(f"Failed to insert claims: {e}")
             raise
 
+    async def insert_claims(self, claims: List[Dict[str, Any]]) -> int:
+        """Backward-compatible wrapper for optimized claims insertion."""
+        return await self.insert_claims_ultra_optimized(claims)
+
     async def bulk_insert_sqlserver_tvp(self, claims: List[Dict[str, Any]]) -> int:
         """Bulk insert claims using SQL Server Table-Valued Parameters."""
         if not claims:
@@ -797,6 +801,10 @@ class ClaimService:
         return await self._execute_with_circuit_breaker_handling(
             _top_rvu_codes_operation, "top_rvu_codes"
         )
+
+    async def top_rvu_codes(self, limit: int = 1000) -> list[str]:
+        """Backward-compatible wrapper for optimized top RVU codes retrieval."""
+        return await self.top_rvu_codes_optimized(limit)
 
     async def get_database_health_status(self) -> Dict[str, Any]:
         """Get comprehensive database health status including circuit breaker info."""
