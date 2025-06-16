@@ -1739,10 +1739,31 @@ class ClaimsPipeline:
 
         return 0
 
+    def _truncate_failed_claims_data(self, failed_claims_data: List[tuple]) -> List[tuple]:
+        """Truncate failed claims data to fit database column constraints."""
+        truncated_data = []
+        for row in failed_claims_data:
+            # Truncate each field to match SQL Server schema limits
+            truncated_row = (
+                row[0][:50] if row[0] else None,     # claim_id - VARCHAR(50)
+                row[1][:20] if row[1] else None,     # facility_id - VARCHAR(20)
+                row[2][:50] if row[2] else None,     # patient_account_number - VARCHAR(50)
+                row[3][:1000] if row[3] else None,   # failure_reason - NVARCHAR(1000)
+                row[4][:50] if row[4] else None,     # failure_category - VARCHAR(50)
+                row[5][:50] if row[5] else None,     # processing_stage - VARCHAR(50)
+                row[6],                              # original_data - NVARCHAR(MAX) (no limit)
+                row[7],                              # repair_suggestions - NVARCHAR(MAX) (no limit)
+            )
+            truncated_data.append(truncated_row)
+        return truncated_data
+
     async def _record_failed_claims_bulk(self, failed_claims_data: List[tuple]) -> None:
         """Record failed claims in bulk with memory management."""
         if not failed_claims_data:
             return
+
+        # Truncate data to fit database constraints
+        truncated_data = self._truncate_failed_claims_data(failed_claims_data)
 
         try:
             if "concurrency" in inspect.signature(self.sql.execute_many).parameters:
@@ -1752,7 +1773,7 @@ class ClaimsPipeline:
                         failure_reason, failure_category, processing_stage,
                         failed_at, original_data, repair_suggestions
                     ) VALUES (?, ?, ?, ?, ?, ?, GETDATE(), ?, ?)""",
-                    failed_claims_data,
+                    truncated_data,
                     concurrency=4,
                 )
             else:
@@ -1762,7 +1783,7 @@ class ClaimsPipeline:
                         failure_reason, failure_category, processing_stage,
                         failed_at, original_data, repair_suggestions
                     ) VALUES (?, ?, ?, ?, ?, ?, GETDATE(), ?, ?)""",
-                    failed_claims_data,
+                    truncated_data,
                 )
             metrics.inc("bulk_failed_claims_recorded", len(failed_claims_data))
         except Exception as e:
