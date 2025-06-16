@@ -260,7 +260,8 @@ class ClaimService:
                                li.service_to_date AS li_service_to_date 
                         FROM claims c LEFT JOIN claims_line_items li ON c.claim_id = li.claim_id 
                         WHERE c.priority > $3 AND c.processing_status IN ('pending', 'received', 'processing')
-                        ORDER BY c.priority DESC LIMIT $1 OFFSET $2
+                        ORDER BY c.priority DESC, c.created_at, c.claim_id
+                        LIMIT $1 OFFSET $2
                     """
                     rows = await self.pg.fetch(query, batch_size, offset, '1', use_replica=True)
                 else:
@@ -271,7 +272,8 @@ class ClaimService:
                                li.service_to_date AS li_service_to_date 
                         FROM claims c LEFT JOIN claims_line_items li ON c.claim_id = li.claim_id 
                         WHERE c.processing_status IN ('pending', 'received', 'processing')
-                        ORDER BY c.priority DESC LIMIT $1 OFFSET $2
+                        ORDER BY c.priority DESC, c.created_at, c.claim_id
+                        LIMIT $1 OFFSET $2
                     """
                     rows = await self.pg.fetch(query, batch_size, offset, use_replica=True)
             
