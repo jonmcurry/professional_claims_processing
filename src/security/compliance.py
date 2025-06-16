@@ -40,7 +40,25 @@ except Exception as exc:  # pragma: no cover - enforce dependency
 
 
 def _get_cipher(key: str) -> Fernet:
-    return Fernet(key.encode())
+    """Get Fernet cipher from key string.
+    
+    Args:
+        key: Either a base64-encoded Fernet key or a raw string to be converted
+        
+    Returns:
+        Fernet cipher instance
+    """
+    # If key is not a valid base64 Fernet key, generate one from the string
+    try:
+        # Try to use the key as-is (assumes it's already base64-encoded)
+        return Fernet(key.encode())
+    except ValueError:
+        # Key is not valid base64, generate a proper Fernet key from it
+        # Use the string as a seed to create a deterministic 32-byte key
+        import hashlib
+        hash_key = hashlib.sha256(key.encode()).digest()
+        fernet_key = base64.urlsafe_b64encode(hash_key)
+        return Fernet(fernet_key)
 
 
 def encrypt_text(text: str, key: str) -> str:
