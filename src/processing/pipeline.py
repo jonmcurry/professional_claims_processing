@@ -402,6 +402,8 @@ class ClaimsPipeline:
         # Dynamic concurrency management
         self.semaphore_manager = DynamicSemaphoreManager(cfg)
         self._concurrency_monitor_task: Optional[asyncio.Task] = None
+        # Background monitoring tasks
+        self._memory_monitor_task: Optional[asyncio.Task] = None
 
         # Service health monitoring
         self.mode = "normal"
@@ -649,7 +651,9 @@ class ClaimsPipeline:
         pool_monitor.start(self.pg, self.sql, interval=2.0)
 
         # Start memory monitoring
-        asyncio.create_task(self._memory_monitor_loop())
+        self._memory_monitor_task = asyncio.create_task(
+            self._memory_monitor_loop()
+        )
 
         # Start dynamic concurrency monitoring
         self._concurrency_monitor_task = asyncio.create_task(
@@ -2146,6 +2150,14 @@ class ClaimsPipeline:
             self._concurrency_monitor_task.cancel()
             try:
                 await self._concurrency_monitor_task
+            except asyncio.CancelledError:
+                pass
+
+        # Stop the memory monitor
+        if self._memory_monitor_task:
+            self._memory_monitor_task.cancel()
+            try:
+                await self._memory_monitor_task
             except asyncio.CancelledError:
                 pass
 
