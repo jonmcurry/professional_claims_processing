@@ -948,6 +948,8 @@ class ClaimsPipeline:
             batch_objects = None
             try:
                 batch_objects = self._acquire_batch_objects(optimized_batch_size)
+                failed_claims_data = []  # Initialize early to track all failures
+                valid_claims = []  # Initialize early
 
                 # Phase 3: Optimized Claims Fetching with database semaphore
                 fetch_start = time.perf_counter()
@@ -1106,9 +1108,6 @@ class ClaimsPipeline:
                 # Phase 7: Results Processing and Segregation
                 segregation_start = time.perf_counter()
 
-                valid_claims = []
-                failed_claims_data = []
-
                 for i, (claim, prediction) in enumerate(
                     zip(enriched_claims, predictions)
                 ):
@@ -1180,7 +1179,35 @@ class ClaimsPipeline:
 
                     # Execute bulk operations
                     if bulk_tasks:
-                        await asyncio.gather(*bulk_tasks, return_exceptions=True)
+                        bulk_results = await asyncio.gather(*bulk_tasks, return_exceptions=True)
+                        
+                        # Check for exceptions and handle failed operations
+                        record_failed_claims_failed = False
+                        for i, result in enumerate(bulk_results):
+                            if isinstance(result, Exception):
+                                task_name = "insert_claims" if i == 0 else "record_failed_claims"
+                                self.logger.error(
+                                    f"Bulk {task_name} operation failed: {result}",
+                                    extra={
+                                        "processing_stage": "database_bulk",
+                                        "correlation_id": trace_id_var.get(""),
+                                        "error_type": type(result).__name__
+                                    }
+                                )
+                                
+                                # Track if recording failed claims failed
+                                if i == 1:  # record_failed_claims task
+                                    record_failed_claims_failed = True
+                        
+                        # If recording failed claims failed, try to update their status anyway
+                        if record_failed_claims_failed and failed_claims_data:
+                            try:
+                                failed_claim_ids = [f[0] for f in failed_claims_data if f[0]]
+                                if failed_claim_ids:
+                                    self.logger.info(f"Fallback: updating status for {len(failed_claim_ids)} failed claims")
+                                    await self._update_claims_status_bulk(failed_claim_ids, "failed", "failed")
+                            except Exception as fallback_error:
+                                self.logger.error(f"Fallback status update failed: {fallback_error}")
 
                 db_time = time.perf_counter() - db_start
                 self.semaphore_manager.resource_monitor.update()
@@ -1232,7 +1259,19 @@ class ClaimsPipeline:
                     )
 
                 if checkpoint_tasks:
-                    await asyncio.gather(*checkpoint_tasks, return_exceptions=True)
+                    checkpoint_results = await asyncio.gather(*checkpoint_tasks, return_exceptions=True)
+                    
+                    # Check for exceptions in checkpoint operations
+                    for i, result in enumerate(checkpoint_results):
+                        if isinstance(result, Exception):
+                            self.logger.warning(
+                                f"Checkpoint operation {i} failed: {result}",
+                                extra={
+                                    "processing_stage": "checkpoint",
+                                    "correlation_id": trace_id_var.get(""),
+                                    "error_type": type(result).__name__
+                                }
+                            )
 
                 # Ensure start checkpoint task completes
                 await checkpoint_task
@@ -1397,6 +1436,38 @@ class ClaimsPipeline:
                         "database_limit": self.semaphore_manager.database_limit,
                         "adjustments_made": self.semaphore_manager.adjustment_count,
                     },
+                }
+
+            except Exception as process_error:
+                # Handle catastrophic processing failures
+                self.logger.error(
+                    f"Critical processing error in batch: {process_error}",
+                    extra={
+                        "processing_stage": "batch_processing",
+                        "correlation_id": trace_id_var.get(""),
+                        "error_type": type(process_error).__name__,
+                        "batch_size": optimized_batch_size
+                    }
+                )
+                
+                # If we have claims that were fetched but failed processing, mark them as failed
+                try:
+                    if 'claims' in locals() and claims and len(claims) > 0:
+                        # All claims in this batch failed due to processing error
+                        failed_claim_ids = [c.get("claim_id", "") for c in claims if c.get("claim_id")]
+                        if failed_claim_ids:
+                            self.logger.info(f"Marking {len(failed_claim_ids)} claims as failed due to processing error")
+                            await self._update_claims_status_bulk(failed_claim_ids, "failed", "processing_error")
+                except Exception as status_update_error:
+                    self.logger.error(f"Failed to update status for failed claims: {status_update_error}")
+                
+                # Return failure metrics
+                return {
+                    "processed": 0,
+                    "failed": len(claims) if 'claims' in locals() and claims else 0,
+                    "duration": time.perf_counter() - total_start,
+                    "throughput": 0,
+                    "error": str(process_error)
                 }
 
             finally:
@@ -1998,6 +2069,8 @@ class ClaimsPipeline:
         batch_objects = None
         try:
             batch_objects = self._acquire_batch_objects(len(claims))
+            failed_claims_data = []  # Initialize early to track all failures
+            valid_claims = []  # Initialize early
 
             # Bulk RVU enrichment
             enrich_start = time.perf_counter()
@@ -2115,8 +2188,6 @@ class ClaimsPipeline:
                 await self._update_claims_status_bulk(claim_ids, "processing", "ml")
 
             # Process results
-            valid_claims = []
-            failed_claims_data = []
 
             for claim, prediction in zip(enriched_claims, predictions):
                 claim_id = claim.get("claim_id", "")
@@ -2173,7 +2244,35 @@ class ClaimsPipeline:
                     )
 
                 if bulk_tasks:
-                    await asyncio.gather(*bulk_tasks, return_exceptions=True)
+                    bulk_results = await asyncio.gather(*bulk_tasks, return_exceptions=True)
+                    
+                    # Check for exceptions in bulk operations
+                    record_failed_claims_failed = False
+                    for i, result in enumerate(bulk_results):
+                        if isinstance(result, Exception):
+                            task_name = "insert_claims" if i == 0 else "record_failed_claims"
+                            self.logger.error(
+                                f"Stream bulk {task_name} operation failed: {result}",
+                                extra={
+                                    "processing_stage": "stream_database_bulk",
+                                    "correlation_id": trace_id_var.get(""),
+                                    "error_type": type(result).__name__
+                                }
+                            )
+                            
+                            # Track if recording failed claims failed
+                            if i == 1:  # record_failed_claims task
+                                record_failed_claims_failed = True
+                    
+                    # If recording failed claims failed, try to update their status anyway  
+                    if record_failed_claims_failed and failed_claims_data:
+                        try:
+                            failed_claim_ids = [f[0] for f in failed_claims_data if f[0]]
+                            if failed_claim_ids:
+                                self.logger.info(f"Stream fallback: updating status for {len(failed_claim_ids)} failed claims")
+                                await self._update_claims_status_bulk(failed_claim_ids, "failed", "failed")
+                        except Exception as fallback_error:
+                            self.logger.error(f"Stream fallback status update failed: {fallback_error}")
             db_time = time.perf_counter() - db_start
             self.semaphore_manager.resource_monitor.update()
             self.logger.info(
@@ -2216,6 +2315,35 @@ class ClaimsPipeline:
             await self._run_error_detection_check()
 
             return {"processed": len(valid_claims), "failed": len(failed_claims_data)}
+
+        except Exception as process_error:
+            # Handle catastrophic processing failures in stream processing
+            self.logger.error(
+                f"Critical processing error in stream batch: {process_error}",
+                extra={
+                    "processing_stage": "stream_batch_processing",
+                    "correlation_id": trace_id_var.get(""),
+                    "error_type": type(process_error).__name__,
+                    "batch_size": len(claims)
+                }
+            )
+            
+            # If we have claims that were fetched but failed processing, mark them as failed
+            try:
+                if claims and len(claims) > 0:
+                    # All claims in this batch failed due to processing error
+                    failed_claim_ids = [c.get("claim_id", "") for c in claims if c.get("claim_id")]
+                    if failed_claim_ids:
+                        self.logger.info(f"Marking {len(failed_claim_ids)} stream claims as failed due to processing error")
+                        await self._update_claims_status_bulk(failed_claim_ids, "failed", "processing_error")
+            except Exception as status_update_error:
+                self.logger.error(f"Failed to update status for failed stream claims: {status_update_error}")
+            
+            # Return failure metrics
+            return {
+                "processed": 0,
+                "failed": len(claims) if claims else 0
+            }
 
         finally:
             # Always release batch objects
