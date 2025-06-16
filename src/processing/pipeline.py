@@ -1739,6 +1739,34 @@ class ClaimsPipeline:
 
         return 0
 
+    async def _update_claims_status_bulk(self, claim_ids: List[str], processing_status: str, processing_stage: str) -> None:
+        """Update processing status and stage for multiple claims."""
+        if not claim_ids:
+            return
+
+        try:
+            # Update PostgreSQL
+            if claim_ids:
+                pg_query = """
+                    UPDATE claims 
+                    SET processing_status = $1, processing_stage = $2, updated_at = CURRENT_TIMESTAMP 
+                    WHERE claim_id = ANY($3)
+                """
+                await self.pg.execute(pg_query, processing_status, processing_stage, claim_ids)
+
+            # Update SQL Server
+            if claim_ids and hasattr(self.sql, 'execute_many'):
+                sql_query = """
+                    UPDATE claims 
+                    SET processing_status = ?, processing_stage = ?, updated_at = GETDATE() 
+                    WHERE claim_id = ?
+                """
+                sql_data = [(processing_status, processing_stage, claim_id) for claim_id in claim_ids]
+                await self.sql.execute_many(sql_query, sql_data)
+
+        except Exception as e:
+            self.logger.warning(f"Failed to update claims status: {e}")
+
     def _truncate_failed_claims_data(self, failed_claims_data: List[tuple]) -> List[tuple]:
         """Truncate failed claims data to fit database column constraints."""
         truncated_data = []
@@ -1951,6 +1979,11 @@ class ClaimsPipeline:
                 },
             )
 
+            # Update claims status to validation stage
+            if enriched_claims:
+                claim_ids = [claim.get("claim_id") for claim in enriched_claims if claim.get("claim_id")]
+                await self._update_claims_status_bulk(claim_ids, "processing", "validation")
+
             # Rules evaluation
             rules_results = {}
             if self.rules_engine:
@@ -1966,6 +1999,11 @@ class ClaimsPipeline:
                             "correlation_id": trace_id_var.get(""),
                         },
                     )
+
+            # Update claims status to rules stage
+            if enriched_claims:
+                claim_ids = [claim.get("claim_id") for claim in enriched_claims if claim.get("claim_id")]
+                await self._update_claims_status_bulk(claim_ids, "processing", "rules")
 
             # ML inference with dynamic concurrency
             ml_start = time.perf_counter()
@@ -1995,6 +2033,11 @@ class ClaimsPipeline:
                     },
                 },
             )
+
+            # Update claims status to ML stage
+            if enriched_claims:
+                claim_ids = [claim.get("claim_id") for claim in enriched_claims if claim.get("claim_id")]
+                await self._update_claims_status_bulk(claim_ids, "processing", "ml")
 
             # Process results
             valid_claims = []
@@ -2069,6 +2112,15 @@ class ClaimsPipeline:
                     },
                 },
             )
+
+            # Update final status for successful and failed claims
+            if valid_claims:
+                valid_claim_ids = [claim.get("claim_id") for claim in valid_claims if claim.get("claim_id")]
+                await self._update_claims_status_bulk(valid_claim_ids, "completed", "completed")
+            
+            if failed_claims_data:
+                failed_claim_ids = [row[0] for row in failed_claims_data if row[0]]  # claim_id is first element
+                await self._update_claims_status_bulk(failed_claim_ids, "failed", "failed")
 
             # Update status
             processing_status["processed"] += len(valid_claims)
