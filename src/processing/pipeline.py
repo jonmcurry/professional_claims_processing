@@ -2065,7 +2065,7 @@ class ClaimsPipeline:
             total_time = time.perf_counter() - batch_start
             sla_monitor.record_batch(total_time, len(enriched_claims))
 
-            await self._run_error_detection_check()()
+            await self._run_error_detection_check()
 
             return {"processed": len(valid_claims), "failed": len(failed_claims_data)}
 

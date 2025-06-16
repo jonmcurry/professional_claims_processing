@@ -380,7 +380,7 @@ class SQLServerDatabase(BaseDatabase):
 
         total_processed = 0
 
-        query = self._with_traceparent(query, traceparent)
+        query = self._with_traceparent(query, None)
 
         # Process with memory monitoring
         for i in range(0, len(params_list), safe_batch_size):
@@ -431,7 +431,7 @@ class SQLServerDatabase(BaseDatabase):
         self, query: str, chunk: List
     ) -> int:
         """Process chunk with comprehensive memory monitoring."""
-        query = self._with_traceparent(query, traceparent)
+        query = self._with_traceparent(query, None)
         conn = await self._acquire()
         initial_memory = self._get_process_memory()
         start = time.perf_counter()
@@ -649,7 +649,7 @@ class SQLServerDatabase(BaseDatabase):
         if not await self.circuit_breaker.allow():
             raise CircuitBreakerOpenError("SQLServer circuit open")
 
-        query = self._with_traceparent(query, traceparent)
+        query = self._with_traceparent(query, None)
 
         # Check cache first with memory management
         cache_key = f"query:{query}:{str(params)}"
@@ -1285,7 +1285,7 @@ class SQLServerDatabase(BaseDatabase):
         if statement_name in predefined_queries:
             query = predefined_queries[statement_name]
             # Prepare it for future use
-            await self.prepare_statement(statement_name, query)
+            await self.prepare_named(statement_name, query)
             return await self.fetch_optimized_with_memory_management(
                 query, *params, is_prepared=True, traceparent=traceparent
             )
