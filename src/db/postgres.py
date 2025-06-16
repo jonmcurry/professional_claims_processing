@@ -1008,7 +1008,8 @@ class PostgresDatabase(BaseDatabase):
                        li.service_to_date AS li_service_to_date 
                 FROM claims c LEFT JOIN claims_line_items li ON c.claim_id = li.claim_id 
                 WHERE c.processing_status IN ('pending', 'received', 'processing')
-                ORDER BY c.priority DESC LIMIT $1 OFFSET $2
+                ORDER BY c.priority DESC, c.created_at, c.claim_id
+                LIMIT $1 OFFSET $2
             """,
             "fetch_claims_priority": """
                 SELECT c.*, li.line_number, li.procedure_code AS li_procedure_code, 
@@ -1017,7 +1018,8 @@ class PostgresDatabase(BaseDatabase):
                        li.service_to_date AS li_service_to_date 
                 FROM claims c LEFT JOIN claims_line_items li ON c.claim_id = li.claim_id 
                 WHERE c.priority > $3 AND c.processing_status IN ('pending', 'received', 'processing')
-                ORDER BY c.priority DESC LIMIT $1 OFFSET $2
+                ORDER BY c.priority DESC, c.created_at, c.claim_id
+                LIMIT $1 OFFSET $2
             """,
             # RVU queries - optimized for bulk operations
             "get_rvu_single": """
@@ -1129,7 +1131,8 @@ class PostgresDatabase(BaseDatabase):
                     li.service_from_date AS li_service_from_date, 
                     li.service_to_date AS li_service_to_date 
                 FROM claims c LEFT JOIN claims_line_items li ON c.claim_id = li.claim_id 
-                ORDER BY c.priority DESC LIMIT $1 OFFSET $2
+                ORDER BY c.priority DESC, c.created_at, c.claim_id
+                LIMIT $1 OFFSET $2
             """,
             "fetch_claims_priority": """
                 SELECT c.*, li.line_number, li.procedure_code AS li_procedure_code, 
@@ -1138,7 +1141,8 @@ class PostgresDatabase(BaseDatabase):
                     li.service_to_date AS li_service_to_date 
                 FROM claims c LEFT JOIN claims_line_items li ON c.claim_id = li.claim_id 
                 WHERE c.priority > $3
-                ORDER BY c.priority DESC LIMIT $1 OFFSET $2
+                ORDER BY c.priority DESC, c.created_at, c.claim_id
+                LIMIT $1 OFFSET $2
             """,
             "get_rvu_single": """
                 SELECT procedure_code, description, total_rvu, work_rvu, 

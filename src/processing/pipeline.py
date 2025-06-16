@@ -1531,9 +1531,10 @@ class ClaimsPipeline:
         async with self.semaphore_manager.batch_semaphore:
             try:
                 # Process stream in batches
-                offset = 0
                 active_tasks = []
                 max_concurrent_batches = self.semaphore_manager.batch_limit
+                processed_count = 0
+                consecutive_empty = 0
 
                 while True:
                     current_time = time.time()
@@ -1547,7 +1548,7 @@ class ClaimsPipeline:
                     fetch_start = time.perf_counter()
                     async with self.semaphore_manager.database_semaphore:
                         batch = await self.service.fetch_claims(
-                            batch_size, offset=offset, priority=True
+                            batch_size, offset=0, priority=True
                         )
                     fetch_time = time.perf_counter() - fetch_start
                     self.semaphore_manager.resource_monitor.update()
@@ -1566,7 +1567,13 @@ class ClaimsPipeline:
                     )
 
                     if not batch:
-                        break
+                        consecutive_empty += 1
+                        if consecutive_empty >= 2:
+                            break
+                        await asyncio.sleep(0.05)
+                        continue
+
+                    consecutive_empty = 0
 
                     # Create processing task
                     task = asyncio.create_task(
@@ -1582,14 +1589,14 @@ class ClaimsPipeline:
                         total_processed += result.get("processed", 0)
                         total_failed += result.get("failed", 0)
 
-                    offset += batch_size
+                    processed_count += len(batch)
 
                     # Progress logging for large streams
-                    if offset % 50000 == 0:
+                    if processed_count % 50000 == 0 and processed_count:
                         elapsed = time.perf_counter() - stream_start
-                        rate = offset / elapsed if elapsed > 0 else 0
+                        rate = processed_count / elapsed if elapsed > 0 else 0
                         self.logger.info(
-                            f"Stream processing progress: {offset} claims fetched, "
+                            f"Stream processing progress: {processed_count} claims fetched, "
                             f"rate: {rate:.2f} claims/sec, "
                             f"concurrency limits: V:{self.semaphore_manager.validation_limit} "
                             f"ML:{self.semaphore_manager.ml_limit} "
