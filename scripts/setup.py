@@ -77,6 +77,7 @@ class DatabaseSetupOrchestrator:
             retry_delay=self.config.postgres.retry_delay,
             retry_max_delay=self.config.postgres.retry_max_delay,
             retry_jitter=self.config.postgres.retry_jitter,
+            circuit_breaker=self.config.postgres.circuit_breaker  # Add circuit_breaker
         )
         
         pg_db = PostgresDatabase(temp_config)

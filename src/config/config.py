@@ -115,6 +115,16 @@ class MonitoringConfig:
 
 
 @dataclass
+class CircuitBreakerConfig:
+    """Circuit breaker configuration."""
+    
+    failure_threshold: int = 10
+    recovery_time: float = 10.0
+    enable_auto_recovery: bool = True
+    health_check_interval: float = 30.0
+
+
+@dataclass
 class PostgresConfig:
     """PostgreSQL configuration with enhanced connection pooling."""
 
@@ -132,6 +142,7 @@ class PostgresConfig:
     retry_delay: float = 0.5
     retry_max_delay: float | None = None
     retry_jitter: float = 0.0
+    circuit_breaker: CircuitBreakerConfig = field(default_factory=CircuitBreakerConfig)
 
 
 @dataclass
@@ -285,7 +296,7 @@ def _create_concurrency_config(data: Dict[str, Any]) -> ConcurrencyConfig:
         critical=memory_thresholds_data.get("critical", 92),
     )
 
-    # Parse emergency throttle config
+    # Parse emergency throttle
     emergency_data = concurrency_data.get("emergency_throttle", {})
     emergency_throttle = EmergencyThrottleConfig(
         enable=emergency_data.get("enable", True),
@@ -321,9 +332,8 @@ def _create_concurrency_config(data: Dict[str, Any]) -> ConcurrencyConfig:
 def _create_monitoring_config(data: Dict[str, Any]) -> MonitoringConfig:
     """Create monitoring configuration from dictionary."""
     monitoring_data = data.get("monitoring", {})
-
-    # Parse alerts config
     alerts_data = monitoring_data.get("alerts", {})
+
     alerts = AlertConfig(
         high_cpu_threshold=alerts_data.get("high_cpu_threshold", 85),
         high_memory_threshold=alerts_data.get("high_memory_threshold", 85),
@@ -343,7 +353,7 @@ def _create_monitoring_config(data: Dict[str, Any]) -> MonitoringConfig:
 
 
 def validate_config(cfg: AppConfig) -> None:
-    """Validate configuration settings."""
+    """Validate configuration consistency and required fields."""
     if not cfg.postgres.host:
         raise ValueError("PostgreSQL host is required")
     if not cfg.sqlserver.host:
@@ -404,8 +414,18 @@ def load_config(path: str = "config.yaml") -> AppConfig:
     # Handle environment variable substitution
     data = _substitute_env_vars(data)
 
-    # Create configuration objects
-    pg = PostgresConfig(**data.get("postgresql", {}))
+    # Handle PostgreSQL configuration with nested circuit_breaker
+    pg_data = data.get("postgresql", {}).copy()
+    circuit_breaker_data = pg_data.pop("circuit_breaker", {})
+    circuit_breaker_config = CircuitBreakerConfig(
+        failure_threshold=circuit_breaker_data.get("failure_threshold", 10),
+        recovery_time=circuit_breaker_data.get("recovery_time", 10.0),
+        enable_auto_recovery=circuit_breaker_data.get("enable_auto_recovery", True),
+        health_check_interval=circuit_breaker_data.get("health_check_interval", 30.0),
+    )
+    pg = PostgresConfig(circuit_breaker=circuit_breaker_config, **pg_data)
+    
+    # Create other configuration objects
     sql = SQLServerConfig(**data.get("sqlserver", {}))
     proc = ProcessingConfig(**data.get("processing", {}))
     sec = SecurityConfig(**data.get("security", {}))
@@ -568,6 +588,12 @@ def save_config(cfg: AppConfig, path: str = "config.yaml") -> None:
             "retry_delay": cfg.postgres.retry_delay,
             "retry_max_delay": cfg.postgres.retry_max_delay,
             "retry_jitter": cfg.postgres.retry_jitter,
+            "circuit_breaker": {
+                "failure_threshold": cfg.postgres.circuit_breaker.failure_threshold,
+                "recovery_time": cfg.postgres.circuit_breaker.recovery_time,
+                "enable_auto_recovery": cfg.postgres.circuit_breaker.enable_auto_recovery,
+                "health_check_interval": cfg.postgres.circuit_breaker.health_check_interval,
+            },
         },
         "sqlserver": {
             "host": cfg.sqlserver.host,
@@ -641,6 +667,7 @@ def save_config(cfg: AppConfig, path: str = "config.yaml") -> None:
             "resource_check_interval": cfg.monitoring.resource_check_interval,
             "resource_log_interval": cfg.monitoring.resource_log_interval,
             "performance_history_size": cfg.monitoring.performance_history_size,
+            "failure_pattern_threshold": cfg.monitoring.failure_pattern_threshold,
             "alerts": {
                 "high_cpu_threshold": cfg.monitoring.alerts.high_cpu_threshold,
                 "high_memory_threshold": cfg.monitoring.alerts.high_memory_threshold,
