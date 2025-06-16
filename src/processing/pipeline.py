@@ -1020,7 +1020,7 @@ class ClaimsPipeline:
                 # Rules engine typically doesn't need heavy concurrency control
                 rules_task = None
                 if self.rules_engine:
-                    rules_task = self.rules_engine.evaluate_batch(enriched_claims)
+                    rules_task = self.rules_engine.evaluate_batch_async(enriched_claims)
 
                 # Wait for validation and rules
                 validation_results = {}
@@ -1934,7 +1934,7 @@ class ClaimsPipeline:
             rules_results = {}
             if self.rules_engine:
                 try:
-                    rules_results = await self.rules_engine.evaluate_batch(
+                    rules_results = await self.rules_engine.evaluate_batch_async(
                         enriched_claims
                     )
                 except Exception as e:
