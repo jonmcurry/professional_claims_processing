@@ -15,10 +15,50 @@ from ..security.compliance import (decrypt_text, encrypt_claim_fields,
 from ..utils.audit import record_audit_event
 from ..utils.memory_pool import memory_pool
 from ..utils.priority_queue import PriorityClaimQueue
+from ..utils.errors import CircuitBreakerOpenError
+
+# Circuit Breaker Recovery Helper Function for ClaimService
+async def handle_circuit_breaker_error(
+    postgres_db: PostgresDatabase, 
+    logger,
+    max_wait_time: float = 15.0
+) -> bool:
+    """
+    Handle circuit breaker open error by waiting for recovery or manual reset.
+    
+    Returns:
+        bool: True if circuit breaker recovered, False if timeout
+    """
+    start_time = time.time()
+    
+    logger.warning("PostgreSQL circuit breaker is open, attempting recovery...")
+    
+    while time.time() - start_time < max_wait_time:
+        # Check if circuit breaker allows operations now
+        if await postgres_db.circuit_breaker.allow():
+            logger.info("Circuit breaker recovered naturally")
+            return True
+        
+        # Try manual health check to potentially reset circuit breaker
+        if await postgres_db.health_check():
+            logger.info("Circuit breaker recovered via health check")
+            return True
+        
+        # Wait before next attempt
+        await asyncio.sleep(1.0)
+    
+    # Last resort: manual reset (use with caution in production)
+    logger.warning("Circuit breaker did not recover, performing manual reset")
+    if hasattr(postgres_db, 'reset_circuit_breaker'):
+        await postgres_db.reset_circuit_breaker()
+    else:
+        await postgres_db.circuit_breaker.record_success()
+    
+    return await postgres_db.circuit_breaker.allow()
 
 
 class ClaimService:
-    """Enhanced service layer with memory management optimizations."""
+    """Enhanced service layer with memory management optimizations and circuit breaker handling."""
 
     def __init__(
         self,
@@ -69,6 +109,699 @@ class ClaimService:
         self._active_containers: List[Any] = []
         self._container_cleanup_threshold = 1000
 
+        # Circuit breaker tracking
+        self._circuit_breaker_recovery_attempts = 0
+        self._max_recovery_attempts = 3
+        self._last_circuit_breaker_reset = 0.0
+        self._circuit_breaker_reset_interval = 60.0  # Don't reset more than once per minute
+
+        # Simple logger for circuit breaker operations
+        self.logger = self._create_simple_logger()
+
+    def _create_simple_logger(self):
+        """Create a simple logger for circuit breaker operations."""
+        import logging
+        logger = logging.getLogger(f"claims_processor.service.{id(self)}")
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+            logger.setLevel(logging.INFO)
+        return logger
+
+    async def _handle_postgres_circuit_breaker_error(self, operation_name: str) -> bool:
+        """
+        Handle PostgreSQL circuit breaker errors with intelligent recovery.
+        
+        Returns:
+            bool: True if recovery successful, False otherwise
+        """
+        self.logger.warning(f"Circuit breaker open during {operation_name}")
+        
+        # Increment recovery attempts
+        self._circuit_breaker_recovery_attempts += 1
+        
+        # Check if we should attempt recovery
+        if self._circuit_breaker_recovery_attempts > self._max_recovery_attempts:
+            current_time = time.time()
+            if current_time - self._last_circuit_breaker_reset < self._circuit_breaker_reset_interval:
+                self.logger.error(f"Too many recovery attempts for {operation_name}, giving up")
+                return False
+        
+        # Try to recover from circuit breaker error
+        recovery_success = await handle_circuit_breaker_error(
+            self.pg, self.logger, max_wait_time=15.0
+        )
+        
+        if recovery_success:
+            self.logger.info(f"Circuit breaker recovered for {operation_name}")
+            self._circuit_breaker_recovery_attempts = 0  # Reset counter on success
+            return True
+        else:
+            self.logger.error(f"Circuit breaker recovery failed for {operation_name}")
+            self._last_circuit_breaker_reset = time.time()
+            return False
+
+    async def _execute_with_circuit_breaker_handling(self, operation_func, operation_name: str, *args, **kwargs):
+        """
+        Execute a database operation with circuit breaker error handling.
+        
+        Args:
+            operation_func: The async function to execute
+            operation_name: Name of the operation for logging
+            *args, **kwargs: Arguments to pass to the operation function
+            
+        Returns:
+            The result of the operation function
+            
+        Raises:
+            The original exception if circuit breaker recovery fails
+        """
+        max_attempts = 3
+        
+        for attempt in range(max_attempts):
+            try:
+                return await operation_func(*args, **kwargs)
+                
+            except CircuitBreakerOpenError:
+                self.logger.warning(f"Circuit breaker open on attempt {attempt + 1} for {operation_name}")
+                
+                # Try recovery
+                if await self._handle_postgres_circuit_breaker_error(operation_name):
+                    if attempt < max_attempts - 1:
+                        await asyncio.sleep(0.5)  # Brief pause before retry
+                        continue
+                
+                # If this is the last attempt or recovery failed, raise the error
+                if attempt == max_attempts - 1:
+                    self.logger.error(f"All attempts failed for {operation_name}")
+                    raise
+                
+                # Wait before next attempt
+                await asyncio.sleep(2.0 * (attempt + 1))
+                
+            except Exception as e:
+                # For non-circuit breaker errors, log and potentially retry once
+                if attempt == 0 and "connection" in str(e).lower():
+                    self.logger.warning(f"Connection error in {operation_name}, retrying: {e}")
+                    await asyncio.sleep(1.0)
+                    continue
+                else:
+                    raise
+
+    async def fetch_claims_optimized(
+        self, batch_size: int, offset: int = 0, priority: bool = False
+    ) -> List[Dict[str, Any]]:
+        """Ultra-optimized claims fetching with prepared statements, caching, and circuit breaker handling."""
+        # Memory check before large operations
+        await self._manage_buffer_memory()
+
+        async def _fetch_operation():
+            # Use prepared statements for better performance
+            if priority:
+                stmt_name = "fetch_claims_priority"
+                try:
+                    rows = await self.pg.fetch_prepared(
+                        stmt_name,
+                        batch_size,
+                        offset,
+                        5,
+                        use_replica=True,  # Priority threshold
+                    )
+                except Exception:
+                    # Fallback to regular query
+                    try:
+                        rows = await self.pg.fetch(
+                            """SELECT c.*, li.line_number, li.procedure_code AS li_procedure_code,
+                                 li.units AS li_units, li.charge_amount AS li_charge_amount,
+                                 li.service_from_date AS li_service_from_date,
+                                 li.service_to_date AS li_service_to_date
+                           FROM claims c LEFT JOIN claims_line_items li ON c.claim_id = li.claim_id
+                           WHERE c.priority > $3
+                           ORDER BY c.priority DESC LIMIT $1 OFFSET $2""",
+                            batch_size,
+                            offset,
+                            5,
+                            use_replica=True,
+                        )
+                    except TypeError:
+                        rows = await self.pg.fetch(
+                            """SELECT c.*, li.line_number, li.procedure_code AS li_procedure_code,
+                                 li.units AS li_units, li.charge_amount AS li_charge_amount,
+                                 li.service_from_date AS li_service_from_date,
+                                 li.service_to_date AS li_service_to_date
+                           FROM claims c LEFT JOIN claims_line_items li ON c.claim_id = li.claim_id
+                           WHERE c.priority > $3
+                           ORDER BY c.priority DESC LIMIT $1 OFFSET $2""",
+                            batch_size,
+                            offset,
+                            5,
+                        )
+            else:
+                stmt_name = "fetch_claims_batch"
+                try:
+                    rows = await self.pg.fetch_prepared(
+                        stmt_name, batch_size, offset, use_replica=True
+                    )
+                except Exception:
+                    # Fallback to regular query
+                    try:
+                        rows = await self.pg.fetch(
+                            """SELECT c.*, li.line_number, li.procedure_code AS li_procedure_code,
+                                 li.units AS li_units, li.charge_amount AS li_charge_amount,
+                                 li.service_from_date AS li_service_from_date,
+                                 li.service_to_date AS li_service_to_date
+                           FROM claims c LEFT JOIN claims_line_items li ON c.claim_id = li.claim_id
+                           ORDER BY c.priority DESC LIMIT $1 OFFSET $2""",
+                            batch_size,
+                            offset,
+                            use_replica=True,
+                        )
+                    except TypeError:
+                        rows = await self.pg.fetch(
+                            """SELECT c.*, li.line_number, li.procedure_code AS li_procedure_code,
+                                 li.units AS li_units, li.charge_amount AS li_charge_amount,
+                                 li.service_from_date AS li_service_from_date,
+                                 li.service_to_date AS li_service_to_date
+                           FROM claims c LEFT JOIN claims_line_items li ON c.claim_id = li.claim_id
+                           ORDER BY c.priority DESC LIMIT $1 OFFSET $2""",
+                            batch_size,
+                            offset,
+                        )
+            return rows
+
+        # Execute with circuit breaker handling
+        rows = await self._execute_with_circuit_breaker_handling(
+            _fetch_operation, "fetch_claims_optimized"
+        )
+
+        # Optimize claim processing with bulk line item fetching using memory pooling
+        return await self._process_claims_with_bulk_line_items(rows)
+
+    async def load_validation_sets_optimized(self) -> tuple[set[str], set[str]]:
+        """Optimized validation set loading with advanced caching, bulk operations, and circuit breaker handling."""
+        current_time = time.time()
+
+        # Check cache validity
+        if (
+            hasattr(self, "_validation_cache_time")
+            and current_time - self._validation_cache_time < self._validation_cache_ttl
+            and self._facilities_cache
+            and self._classes_cache
+        ):
+            self._cache_hit_count += 1
+            metrics.inc("validation_cache_hits")
+            return self._facilities_cache, self._classes_cache
+
+        self._cache_miss_count += 1
+        metrics.inc("validation_cache_misses")
+
+        async def _load_validation_operation():
+            # Use prepared statements for optimal performance
+            try:
+                # Parallel execution of validation queries with correct table names
+                facilities_task = self.sql.fetch_prepared("get_facilities_batch")
+                classes_task = self.sql.fetch_prepared("get_financial_classes_batch")
+
+                fac_rows, class_rows = await asyncio.gather(facilities_task, classes_task)
+
+            except Exception as e:
+                self.logger.warning(f"Prepared statements failed for validation sets, using fallback queries: {e}")
+                # Fallback to regular queries if prepared statements fail
+                # Updated to use your actual schema table names
+                fac_task = self.sql.fetch(
+                    "SELECT DISTINCT facility_id FROM facilities WHERE facility_id IS NOT NULL AND active = 1"
+                )
+                class_task = self.sql.fetch(
+                    "SELECT DISTINCT financial_class_id FROM facility_financial_classes WHERE financial_class_id IS NOT NULL AND active = 1"
+                )
+                fac_rows, class_rows = await asyncio.gather(fac_task, class_task)
+
+            return fac_rows, class_rows
+
+        # Execute with circuit breaker handling
+        fac_rows, class_rows = await self._execute_with_circuit_breaker_handling(
+            _load_validation_operation, "load_validation_sets"
+        )
+
+        # Optimize set creation using memory pooling for temporary containers
+        facilities_container = self._memory_pool.acquire("temp_sets", set)
+        classes_container = self._memory_pool.acquire("temp_sets", set)
+
+        try:
+            facilities_container.clear()
+            classes_container.clear()
+
+            # Build sets using containers
+            for r in fac_rows:
+                if r.get("facility_id") is not None:
+                    facilities_container.add(str(r.get("facility_id")))
+
+            for r in class_rows:
+                if r.get("financial_class_id") is not None:
+                    classes_container.add(str(r.get("financial_class_id")))
+
+            # Copy to final sets
+            facilities = set(facilities_container)
+            classes = set(classes_container)
+
+        finally:
+            # Return containers to pool
+            self._memory_pool.release("temp_sets", facilities_container)
+            self._memory_pool.release("temp_sets", classes_container)
+
+        # Update cache
+        self._facilities_cache = facilities
+        self._classes_cache = classes
+        self._validation_cache_time = current_time
+
+        # Update cache metrics
+        metrics.set("validation_facilities_count", float(len(facilities)))
+        metrics.set("validation_classes_count", float(len(classes)))
+        metrics.set("validation_cache_age", 0.0)
+
+        return facilities, classes
+
+    async def get_rvu_data_bulk(
+        self, procedure_codes: List[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        """Optimized bulk RVU data retrieval with caching, memory management, and circuit breaker handling."""
+        if not procedure_codes:
+            return {}
+
+        # Memory check for large RVU requests
+        if len(procedure_codes) > 1000:
+            await self._manage_buffer_memory()
+
+        async def _get_rvu_operation():
+            # Use optimized bulk RVU lookup from PostgreSQL
+            try:
+                if hasattr(self.pg, "get_rvu_bulk_optimized"):
+                    return await self.pg.get_rvu_bulk_optimized(procedure_codes)
+                else:
+                    # Fallback implementation with memory pooling
+                    return await self._fetch_rvu_data_with_pooling(procedure_codes)
+            except Exception as e:
+                self.logger.warning(f"Bulk RVU lookup failed: {e}")
+                
+                # Fallback to individual lookups with memory management
+                results = {}
+                batch_size = 100  # Process in smaller batches
+
+                for i in range(0, len(procedure_codes), batch_size):
+                    batch = procedure_codes[i : i + batch_size]
+
+                    for code in batch:
+                        try:
+                            rows = await self.pg.fetch_prepared(
+                                "get_rvu_single", code, use_replica=True
+                            )
+                            if rows:
+                                results[code] = dict(rows[0])
+                        except Exception:
+                            continue
+
+                    # Memory check between batches
+                    if i > 0 and i % (batch_size * 10) == 0:
+                        await self._manage_buffer_memory()
+
+                return results
+
+        # Execute with circuit breaker handling
+        rvu_data = await self._execute_with_circuit_breaker_handling(
+            _get_rvu_operation, "get_rvu_data_bulk"
+        )
+
+        metrics.inc("bulk_rvu_lookups")
+        metrics.set("last_rvu_bulk_size", float(len(procedure_codes)))
+        return rvu_data
+
+    async def record_checkpoints_bulk(self, checkpoints: List[Tuple[str, str]]) -> None:
+        """Optimized bulk checkpoint recording with memory management and circuit breaker handling."""
+        if not checkpoints:
+            return
+
+        async def _record_checkpoints_operation():
+            # Use memory pooling for checkpoint processing
+            checkpoint_container = self._memory_pool.acquire("checkpoint_data", list)
+
+            try:
+                checkpoint_container.clear()
+                checkpoint_container.extend(
+                    [(claim_id, stage) for claim_id, stage in checkpoints]
+                )
+
+                # Use prepared statement for optimal performance
+                await self.pg.execute_many_optimized(
+                    "INSERT INTO processing_checkpoints (claim_id, stage, checkpoint_at) VALUES ($1, $2, NOW()) ON CONFLICT (claim_id, stage) DO UPDATE SET checkpoint_at = NOW()",
+                    checkpoint_container,
+                    concurrency=4,
+                    batch_size=1000,
+                )
+                metrics.inc("bulk_checkpoints_recorded", len(checkpoints))
+
+            except Exception as e:
+                self.logger.warning(f"Bulk checkpoint recording failed: {e}")
+                # Fallback to individual inserts
+                for claim_id, stage in checkpoints:
+                    try:
+                        await self.record_checkpoint(claim_id, stage, buffered=False)
+                    except Exception:
+                        continue
+            finally:
+                self._memory_pool.release("checkpoint_data", checkpoint_container)
+
+        # Execute with circuit breaker handling
+        await self._execute_with_circuit_breaker_handling(
+            _record_checkpoints_operation, "record_checkpoints_bulk"
+        )
+
+    async def record_checkpoint(
+        self, claim_id: str, stage: str, *, buffered: bool = True
+    ) -> None:
+        """Enhanced checkpoint recording with intelligent buffering, memory management, and circuit breaker handling."""
+        if buffered:
+            self._checkpoint_buffer.append((claim_id, stage))
+            if len(self._checkpoint_buffer) >= self._adaptive_checkpoint_buffer_size:
+                await self.flush_checkpoints()
+            return
+
+        async def _record_checkpoint_operation():
+            # Immediate recording using prepared statement
+            try:
+                await self.pg.execute_prepared("insert_checkpoint", claim_id, stage)
+            except Exception:
+                # Fallback to regular execute
+                await self.pg.execute(
+                    "INSERT INTO processing_checkpoints (claim_id, stage, checkpoint_at) VALUES ($1, $2, NOW())",
+                    claim_id,
+                    stage,
+                )
+
+        # Execute with circuit breaker handling
+        await self._execute_with_circuit_breaker_handling(
+            _record_checkpoint_operation, "record_checkpoint"
+        )
+
+    async def flush_checkpoints(self) -> None:
+        """Enhanced checkpoint flushing with error recovery, memory management, and circuit breaker handling."""
+        if not self._checkpoint_buffer:
+            return
+
+        checkpoints_to_flush = self._checkpoint_buffer.copy()
+        self._checkpoint_buffer.clear()
+
+        try:
+            await self.record_checkpoints_bulk(checkpoints_to_flush)
+        except Exception as e:
+            self.logger.warning(f"Bulk checkpoint flush failed: {e}")
+            # Re-add failed checkpoints to buffer for retry
+            self._checkpoint_buffer.extend(checkpoints_to_flush)
+
+    async def enqueue_dead_letter_optimized(
+        self, claim: Dict[str, Any], reason: str
+    ) -> None:
+        """Optimized dead letter queue insertion with memory management and circuit breaker handling."""
+        async def _enqueue_dead_letter_operation():
+            # Use memory pooling for data preparation
+            data_container = self._memory_pool.acquire("dead_letter_data", dict)
+
+            try:
+                data_container.clear()
+                data_container.update(claim)
+
+                data = (
+                    encrypt_text(str(data_container), self.encryption_key)
+                    if self.encryption_key
+                    else str(data_container)
+                )
+
+                try:
+                    await self.pg.execute_prepared(
+                        "insert_dead_letter", claim.get("claim_id"), reason, data
+                    )
+                except Exception:
+                    # Fallback to regular insert
+                    await self.pg.execute(
+                        "INSERT INTO dead_letter_queue (claim_id, reason, data, inserted_at) VALUES ($1, $2, $3, NOW())",
+                        claim.get("claim_id"),
+                        reason,
+                        data,
+                    )
+
+            finally:
+                self._memory_pool.release("dead_letter_data", data_container)
+
+        # Execute with circuit breaker handling
+        await self._execute_with_circuit_breaker_handling(
+            _enqueue_dead_letter_operation, "enqueue_dead_letter"
+        )
+
+    async def reprocess_dead_letter_optimized(self, batch_size: int = 1000) -> int:
+        """Ultra-optimized dead letter queue reprocessing with memory management and circuit breaker handling."""
+        # Memory check for large operations
+        await self._manage_buffer_memory()
+
+        async def _reprocess_dead_letter_operation():
+            try:
+                # Use prepared statement for fetching
+                rows = await self.pg.fetch_prepared("fetch_dead_letter_batch", batch_size)
+            except Exception:
+                # Fallback to regular query
+                rows = await self.pg.fetch(
+                    "SELECT dlq_id, claim_id, data, reason FROM dead_letter_queue ORDER BY inserted_at ASC LIMIT $1",
+                    batch_size,
+                )
+
+            if not rows:
+                return 0
+
+            # Process claims in parallel batches using memory pooling
+            successfully_processed = []
+            failed_to_process = []
+            dlq_ids_to_delete = []
+
+            # Use memory pooling for processing containers
+            processing_containers = []
+
+            try:
+                for row in rows:
+                    dlq_id = row.get("dlq_id")
+                    claim_str = row.get("data", "")
+                    claim_id = row.get("claim_id")
+
+                    # Acquire container for this claim
+                    claim_container = self._memory_pool.acquire("dead_letter_claims", dict)
+                    processing_containers.append(claim_container)
+
+                    try:
+                        claim_container.clear()
+
+                        # Decrypt if needed
+                        if self.encryption_key:
+                            claim_str = decrypt_text(claim_str, self.encryption_key)
+
+                        # Parse claim
+                        parsed_claim = json.loads(claim_str)
+                        claim_container.update(parsed_claim)
+
+                        # Attempt automatic repair
+                        from ..processing.repair import ClaimRepairSuggester
+
+                        suggester = ClaimRepairSuggester()
+                        repaired_claim = suggester.auto_repair(dict(claim_container), [])
+
+                        successfully_processed.append(repaired_claim)
+                        dlq_ids_to_delete.append(dlq_id)
+
+                    except Exception:
+                        failed_to_process.append(claim_id)
+                        dlq_ids_to_delete.append(dlq_id)  # Remove even if processing failed
+
+                # Bulk delete processed items
+                if dlq_ids_to_delete:
+                    try:
+                        await self.pg.execute_prepared(
+                            "delete_dead_letter", dlq_ids_to_delete
+                        )
+                    except Exception:
+                        # Fallback deletion
+                        placeholders = ",".join(
+                            "$" + str(i + 1) for i in range(len(dlq_ids_to_delete))
+                        )
+                        await self.pg.execute(
+                            f"DELETE FROM dead_letter_queue WHERE dlq_id IN ({placeholders})",
+                            *dlq_ids_to_delete,
+                        )
+
+                # Bulk insert successfully processed claims
+                if successfully_processed:
+                    try:
+                        await self.insert_claims_ultra_optimized(successfully_processed)
+                        metrics.inc("failed_claims_resolved", len(successfully_processed))
+                    except Exception as e:
+                        self.logger.warning(f"Failed to insert reprocessed claims: {e}")
+                        # Re-add to retry queue
+                        for claim in successfully_processed:
+                            pr = int(claim.get("priority", 0) or 0)
+                            self.retry_queue.push(claim, pr)
+
+            finally:
+                # Return all containers to pool
+                for container in processing_containers:
+                    self._memory_pool.release("dead_letter_claims", container)
+
+            # Update metrics
+            metrics.inc("dead_letter_processed", len(rows))
+            metrics.inc("dead_letter_resolved", len(successfully_processed))
+            metrics.inc("dead_letter_failed", len(failed_to_process))
+
+            return len(successfully_processed)
+
+        # Execute with circuit breaker handling
+        return await self._execute_with_circuit_breaker_handling(
+            _reprocess_dead_letter_operation, "reprocess_dead_letter"
+        )
+
+    async def top_rvu_codes_optimized(self, limit: int = 1000) -> list[str]:
+        """Optimized top RVU codes retrieval with caching, memory management, and circuit breaker handling."""
+        async def _top_rvu_codes_operation():
+            # Use memory pooling for results
+            results_container = self._memory_pool.acquire("rvu_codes_list", list)
+
+            try:
+                results_container.clear()
+
+                try:
+                    rows = await self.pg.fetch_prepared(
+                        "get_top_rvu_codes", limit, use_replica=True
+                    )
+                except Exception:
+                    # Fallback query
+                    rows = await self.pg.fetch(
+                        "SELECT procedure_code FROM rvu_data WHERE status = 'active' ORDER BY total_rvu DESC NULLS LAST LIMIT $1",
+                        limit,
+                    )
+
+                for r in rows:
+                    if r.get("procedure_code"):
+                        results_container.append(str(r.get("procedure_code")))
+
+                codes = list(results_container)
+                metrics.set("top_rvu_codes_fetched", float(len(codes)))
+                return codes
+
+            finally:
+                self._memory_pool.release("rvu_codes_list", results_container)
+
+        # Execute with circuit breaker handling
+        return await self._execute_with_circuit_breaker_handling(
+            _top_rvu_codes_operation, "top_rvu_codes"
+        )
+
+    async def get_database_health_status(self) -> Dict[str, Any]:
+        """Get comprehensive database health status including circuit breaker info."""
+        try:
+            pg_health = await self.pg.health_check()
+            sql_health = await self.sql.health_check() if hasattr(self.sql, 'health_check') else True
+            
+            pg_cb_status = {}
+            if hasattr(self.pg, 'get_circuit_breaker_status'):
+                pg_cb_status = await self.pg.get_circuit_breaker_status()
+            
+            return {
+                "postgresql": {
+                    "healthy": pg_health,
+                    "circuit_breaker": pg_cb_status
+                },
+                "sql_server": {
+                    "healthy": sql_health
+                },
+                "overall_healthy": pg_health and sql_health and not pg_cb_status.get("is_open", False),
+                "circuit_breaker_recovery_attempts": self._circuit_breaker_recovery_attempts,
+                "last_circuit_breaker_reset": self._last_circuit_breaker_reset
+            }
+        except Exception as e:
+            self.logger.error(f"Error getting database health status: {e}")
+            return {
+                "postgresql": {"healthy": False, "error": str(e)},
+                "sql_server": {"healthy": False},
+                "overall_healthy": False,
+                "error": str(e)
+            }
+
+    async def reset_circuit_breakers(self) -> Dict[str, bool]:
+        """Manually reset circuit breakers - use for emergency recovery."""
+        results = {}
+        
+        try:
+            if hasattr(self.pg, 'reset_circuit_breaker'):
+                await self.pg.reset_circuit_breaker()
+            else:
+                await self.pg.circuit_breaker.record_success()
+            results["postgresql"] = True
+            self.logger.info("PostgreSQL circuit breaker reset successfully")
+            self._circuit_breaker_recovery_attempts = 0
+            self._last_circuit_breaker_reset = time.time()
+        except Exception as e:
+            results["postgresql"] = False
+            self.logger.error(f"Failed to reset PostgreSQL circuit breaker: {e}")
+        
+        # Reset SQL Server circuit breaker if it exists
+        try:
+            if hasattr(self.sql, 'reset_circuit_breaker'):
+                await self.sql.reset_circuit_breaker()
+                results["sql_server"] = True
+                self.logger.info("SQL Server circuit breaker reset successfully")
+            else:
+                results["sql_server"] = False
+                self.logger.info("SQL Server circuit breaker not available")
+        except Exception as e:
+            results["sql_server"] = False
+            self.logger.error(f"Failed to reset SQL Server circuit breaker: {e}")
+        
+        return results
+
+    # New method for main entry point with circuit breaker handling
+    async def fetch_claims(
+        self, batch_size: int, offset: int = 0, priority: str = None
+    ) -> List[Dict[str, Any]]:
+        """Main entry point for fetching claims with comprehensive circuit breaker error handling."""
+        try:
+            # Check circuit breaker status before attempting fetch
+            if hasattr(self.pg, 'get_circuit_breaker_status'):
+                cb_status = await self.pg.get_circuit_breaker_status()
+                if cb_status.get("is_open", False):
+                    self.logger.warning(
+                        f"Circuit breaker is open before fetch attempt. Status: {cb_status}"
+                    )
+                    
+                    # Try immediate recovery
+                    if await self._handle_postgres_circuit_breaker_error("fetch_claims_preflight"):
+                        self.logger.info("Circuit breaker recovered before fetch")
+                    else:
+                        self.logger.warning("Circuit breaker recovery failed, proceeding with caution")
+            
+            # Determine priority boolean from string
+            priority_bool = priority == "high" if isinstance(priority, str) else bool(priority)
+            
+            # Attempt optimized fetch
+            return await self.fetch_claims_optimized(batch_size, offset, priority_bool)
+            
+        except CircuitBreakerOpenError:
+            self.logger.error("Circuit breaker error not handled properly in fetch pipeline")
+            # Try one more recovery attempt
+            if await self._handle_postgres_circuit_breaker_error("fetch_claims_final_attempt"):
+                return await self.fetch_claims_optimized(batch_size, offset, priority_bool)
+            else:
+                raise
+            
+        except Exception as e:
+            self.logger.error(f"Unexpected error in fetch_claims: {e}")
+            raise
+
+    # Keep all the existing memory management and other methods unchanged
     async def _manage_buffer_memory(self) -> None:
         """Manage buffer memory usage."""
         current_time = time.time()
@@ -147,7 +880,7 @@ class ClaimService:
         metrics.inc("service_emergency_cleanups")
         metrics.set("service_emergency_gc_collected", collected)
 
-        print(
+        self.logger.info(
             f"Service emergency cleanup: pools {cleanup_stats}, GC collected {collected}"
         )
 
@@ -184,7 +917,7 @@ class ClaimService:
                     batch_size=500,
                 )
             except Exception as e:
-                print(f"Warning: Bulk audit log insert failed: {e}")
+                self.logger.warning(f"Bulk audit log insert failed: {e}")
                 for row in container:
                     try:
                         await record_audit_event(
@@ -198,7 +931,7 @@ class ClaimService:
                             reason=row[6] if len(row) > 6 else None,
                         )
                     except Exception as e2:
-                        print(f"Audit entry processing failed: {e2}")
+                        self.logger.warning(f"Audit entry processing failed: {e2}")
 
         finally:
             self._memory_pool.release("audit_entries", container)
@@ -211,88 +944,6 @@ class ClaimService:
         if len(self._active_containers) > self._container_cleanup_threshold:
             # Remove oldest containers
             self._active_containers = self._active_containers[-500:]
-
-    async def fetch_claims_optimized(
-        self, batch_size: int, offset: int = 0, priority: bool = False
-    ) -> List[Dict[str, Any]]:
-        """Ultra-optimized claims fetching with prepared statements and caching."""
-        # Memory check before large operations
-        await self._manage_buffer_memory()
-
-        # Use prepared statements for better performance
-        if priority:
-            stmt_name = "fetch_claims_priority"
-            try:
-                rows = await self.pg.fetch_prepared(
-                    stmt_name,
-                    batch_size,
-                    offset,
-                    5,
-                    use_replica=True,  # Priority threshold
-                )
-            except Exception:
-                # Fallback to regular query
-                try:
-                    rows = await self.pg.fetch(
-                        """SELECT c.*, li.line_number, li.procedure_code AS li_procedure_code,
-                             li.units AS li_units, li.charge_amount AS li_charge_amount,
-                             li.service_from_date AS li_service_from_date,
-                             li.service_to_date AS li_service_to_date
-                       FROM claims c LEFT JOIN claims_line_items li ON c.claim_id = li.claim_id
-                       WHERE c.priority > $3
-                       ORDER BY c.priority DESC LIMIT $1 OFFSET $2""",
-                        batch_size,
-                        offset,
-                        5,
-                        use_replica=True,
-                    )
-                except TypeError:
-                    rows = await self.pg.fetch(
-                        """SELECT c.*, li.line_number, li.procedure_code AS li_procedure_code,
-                             li.units AS li_units, li.charge_amount AS li_charge_amount,
-                             li.service_from_date AS li_service_from_date,
-                             li.service_to_date AS li_service_to_date
-                       FROM claims c LEFT JOIN claims_line_items li ON c.claim_id = li.claim_id
-                       WHERE c.priority > $3
-                       ORDER BY c.priority DESC LIMIT $1 OFFSET $2""",
-                        batch_size,
-                        offset,
-                        5,
-                    )
-        else:
-            stmt_name = "fetch_claims_batch"
-            try:
-                rows = await self.pg.fetch_prepared(
-                    stmt_name, batch_size, offset, use_replica=True
-                )
-            except Exception:
-                # Fallback to regular query
-                try:
-                    rows = await self.pg.fetch(
-                        """SELECT c.*, li.line_number, li.procedure_code AS li_procedure_code,
-                             li.units AS li_units, li.charge_amount AS li_charge_amount,
-                             li.service_from_date AS li_service_from_date,
-                             li.service_to_date AS li_service_to_date
-                       FROM claims c LEFT JOIN claims_line_items li ON c.claim_id = li.claim_id
-                       ORDER BY c.priority DESC LIMIT $1 OFFSET $2""",
-                        batch_size,
-                        offset,
-                        use_replica=True,
-                    )
-                except TypeError:
-                    rows = await self.pg.fetch(
-                        """SELECT c.*, li.line_number, li.procedure_code AS li_procedure_code,
-                             li.units AS li_units, li.charge_amount AS li_charge_amount,
-                             li.service_from_date AS li_service_from_date,
-                             li.service_to_date AS li_service_to_date
-                       FROM claims c LEFT JOIN claims_line_items li ON c.claim_id = li.claim_id
-                       ORDER BY c.priority DESC LIMIT $1 OFFSET $2""",
-                        batch_size,
-                        offset,
-                    )
-
-        # Optimize claim processing with bulk line item fetching using memory pooling
-        return await self._process_claims_with_bulk_line_items(rows)
 
     async def _process_claims_with_bulk_line_items(
         self, rows: Iterable[Dict[str, Any]]
@@ -389,82 +1040,6 @@ class ClaimService:
                 self._memory_pool.release("line_items", container)
             raise
 
-    async def load_validation_sets_optimized(self) -> tuple[set[str], set[str]]:
-        """Optimized validation set loading with advanced caching and bulk operations."""
-        current_time = time.time()
-
-        # Check cache validity
-        if (
-            hasattr(self, "_validation_cache_time")
-            and current_time - self._validation_cache_time < self._validation_cache_ttl
-            and self._facilities_cache
-            and self._classes_cache
-        ):
-            self._cache_hit_count += 1
-            metrics.inc("validation_cache_hits")
-            return self._facilities_cache, self._classes_cache
-
-        self._cache_miss_count += 1
-        metrics.inc("validation_cache_misses")
-
-        # Use prepared statements for optimal performance
-        try:
-            # Parallel execution of validation queries with correct table names
-            facilities_task = self.sql.fetch_prepared("get_facilities_batch")
-            classes_task = self.sql.fetch_prepared("get_financial_classes_batch")
-
-            fac_rows, class_rows = await asyncio.gather(facilities_task, classes_task)
-
-        except Exception as e:
-            print(f"Warning: Prepared statements failed, using fallback queries: {e}")
-            # Fallback to regular queries if prepared statements fail
-            # Updated to use your actual schema table names
-            fac_task = self.sql.fetch(
-                "SELECT DISTINCT facility_id FROM facilities WHERE facility_id IS NOT NULL AND active = 1"
-            )
-            class_task = self.sql.fetch(
-                "SELECT DISTINCT financial_class_id FROM facility_financial_classes WHERE financial_class_id IS NOT NULL AND active = 1"
-            )
-            fac_rows, class_rows = await asyncio.gather(fac_task, class_task)
-
-        # Optimize set creation using memory pooling for temporary containers
-        facilities_container = self._memory_pool.acquire("temp_sets", set)
-        classes_container = self._memory_pool.acquire("temp_sets", set)
-
-        try:
-            facilities_container.clear()
-            classes_container.clear()
-
-            # Build sets using containers
-            for r in fac_rows:
-                if r.get("facility_id") is not None:
-                    facilities_container.add(str(r.get("facility_id")))
-
-            for r in class_rows:
-                if r.get("financial_class_id") is not None:
-                    classes_container.add(str(r.get("financial_class_id")))
-
-            # Copy to final sets
-            facilities = set(facilities_container)
-            classes = set(classes_container)
-
-        finally:
-            # Return containers to pool
-            self._memory_pool.release("temp_sets", facilities_container)
-            self._memory_pool.release("temp_sets", classes_container)
-
-        # Update cache
-        self._facilities_cache = facilities
-        self._classes_cache = classes
-        self._validation_cache_time = current_time
-
-        # Update cache metrics
-        metrics.set("validation_facilities_count", float(len(facilities)))
-        metrics.set("validation_classes_count", float(len(classes)))
-        metrics.set("validation_cache_age", 0.0)
-
-        return facilities, classes
-
     async def bulk_validate_claims(
         self, claims: List[Dict[str, Any]]
     ) -> Dict[str, Dict[str, bool]]:
@@ -542,55 +1117,6 @@ class ClaimService:
         metrics.inc("bulk_validations_performed")
         return claim_validations
 
-    async def get_rvu_data_bulk(
-        self, procedure_codes: List[str]
-    ) -> Dict[str, Dict[str, Any]]:
-        """Optimized bulk RVU data retrieval with caching and memory management."""
-        if not procedure_codes:
-            return {}
-
-        # Memory check for large RVU requests
-        if len(procedure_codes) > 1000:
-            await self._manage_buffer_memory()
-
-        # Use optimized bulk RVU lookup from PostgreSQL
-        try:
-            if hasattr(self.pg, "get_rvu_bulk_optimized"):
-                rvu_data = await self.pg.get_rvu_bulk_optimized(procedure_codes)
-            else:
-                # Fallback implementation with memory pooling
-                rvu_data = await self._fetch_rvu_data_with_pooling(procedure_codes)
-
-            metrics.inc("bulk_rvu_lookups")
-            metrics.set("last_rvu_bulk_size", float(len(procedure_codes)))
-            return rvu_data
-
-        except Exception as e:
-            print(f"Warning: Bulk RVU lookup failed: {e}")
-
-            # Fallback to individual lookups with memory management
-            results = {}
-            batch_size = 100  # Process in smaller batches
-
-            for i in range(0, len(procedure_codes), batch_size):
-                batch = procedure_codes[i : i + batch_size]
-
-                for code in batch:
-                    try:
-                        rows = await self.pg.fetch_prepared(
-                            "get_rvu_single", code, use_replica=True
-                        )
-                        if rows:
-                            results[code] = dict(rows[0])
-                    except Exception:
-                        continue
-
-                # Memory check between batches
-                if i > 0 and i % (batch_size * 10) == 0:
-                    await self._manage_buffer_memory()
-
-            return results
-
     async def _fetch_rvu_data_with_pooling(
         self, procedure_codes: List[str]
     ) -> Dict[str, Dict[str, Any]]:
@@ -628,7 +1154,7 @@ class ClaimService:
                             results[code] = dict(query_container)
 
                 except Exception as e:
-                    print(f"Warning: RVU batch fetch failed: {e}")
+                    self.logger.warning(f"RVU batch fetch failed: {e}")
                     continue
 
                 # Memory check between batches
@@ -786,7 +1312,7 @@ class ClaimService:
                         total_inserted += inserted
 
                     except Exception as e:
-                        print(f"Warning: TVP bulk insert failed: {e}")
+                        self.logger.warning(f"TVP bulk insert failed: {e}")
                         # Fallback to PostgreSQL COPY
                         try:
                             inserted = await self.pg.copy_records(
@@ -800,8 +1326,8 @@ class ClaimService:
                             )
                             total_inserted += inserted
                         except Exception as fallback_e:
-                            print(
-                                f"Error: All bulk insert methods failed: {fallback_e}"
+                            self.logger.error(
+                                f"All bulk insert methods failed: {fallback_e}"
                             )
                             raise
 
@@ -844,76 +1370,6 @@ class ClaimService:
         except Exception:
             return 5000  # Default fallback
 
-    async def record_checkpoints_bulk(self, checkpoints: List[Tuple[str, str]]) -> None:
-        """Optimized bulk checkpoint recording with memory management."""
-        if not checkpoints:
-            return
-
-        # Use memory pooling for checkpoint processing
-        checkpoint_container = self._memory_pool.acquire("checkpoint_data", list)
-
-        try:
-            checkpoint_container.clear()
-            checkpoint_container.extend(
-                [(claim_id, stage) for claim_id, stage in checkpoints]
-            )
-
-            # Use prepared statement for optimal performance
-            await self.pg.execute_many_optimized(
-                "INSERT INTO processing_checkpoints (claim_id, stage, checkpoint_at) VALUES ($1, $2, NOW()) ON CONFLICT (claim_id, stage) DO UPDATE SET checkpoint_at = NOW()",
-                checkpoint_container,
-                concurrency=4,
-                batch_size=1000,
-            )
-            metrics.inc("bulk_checkpoints_recorded", len(checkpoints))
-
-        except Exception as e:
-            print(f"Warning: Bulk checkpoint recording failed: {e}")
-            # Fallback to individual inserts
-            for claim_id, stage in checkpoints:
-                try:
-                    await self.record_checkpoint(claim_id, stage, buffered=False)
-                except Exception:
-                    continue
-        finally:
-            self._memory_pool.release("checkpoint_data", checkpoint_container)
-
-    async def record_checkpoint(
-        self, claim_id: str, stage: str, *, buffered: bool = True
-    ) -> None:
-        """Enhanced checkpoint recording with intelligent buffering and memory management."""
-        if buffered:
-            self._checkpoint_buffer.append((claim_id, stage))
-            if len(self._checkpoint_buffer) >= self._adaptive_checkpoint_buffer_size:
-                await self.flush_checkpoints()
-            return
-
-        # Immediate recording using prepared statement
-        try:
-            await self.pg.execute_prepared("insert_checkpoint", claim_id, stage)
-        except Exception:
-            # Fallback to regular execute
-            await self.pg.execute(
-                "INSERT INTO processing_checkpoints (claim_id, stage, checkpoint_at) VALUES ($1, $2, NOW())",
-                claim_id,
-                stage,
-            )
-
-    async def flush_checkpoints(self) -> None:
-        """Enhanced checkpoint flushing with error recovery and memory management."""
-        if not self._checkpoint_buffer:
-            return
-
-        checkpoints_to_flush = self._checkpoint_buffer.copy()
-        self._checkpoint_buffer.clear()
-
-        try:
-            await self.record_checkpoints_bulk(checkpoints_to_flush)
-        except Exception as e:
-            print(f"Warning: Bulk checkpoint flush failed: {e}")
-            # Re-add failed checkpoints to buffer for retry
-            self._checkpoint_buffer.extend(checkpoints_to_flush)
-
     async def record_failed_claims_bulk(
         self, failed_claims: List[Tuple[str, str, str, str, str, str, str, str]]
     ) -> None:
@@ -942,7 +1398,7 @@ class ClaimService:
             metrics.inc("bulk_failed_claims_recorded", len(failed_claims))
 
         except Exception as e:
-            print(f"Warning: Bulk failed claims recording failed: {e}")
+            self.logger.warning(f"Bulk failed claims recording failed: {e}")
             # Fallback to individual inserts
             for claim_data in failed_claims:
                 try:
@@ -1031,7 +1487,7 @@ class ClaimService:
                 reason=reason,
             )
         except Exception as e:
-            print(f"Warning: Audit recording failed: {e}")
+            self.logger.warning(f"Audit recording failed: {e}")
 
     def audit_event(
         self,
@@ -1051,169 +1507,6 @@ class ClaimService:
                 reason=reason,
             )
         )
-
-    async def enqueue_dead_letter_optimized(
-        self, claim: Dict[str, Any], reason: str
-    ) -> None:
-        """Optimized dead letter queue insertion with memory management."""
-        # Use memory pooling for data preparation
-        data_container = self._memory_pool.acquire("dead_letter_data", dict)
-
-        try:
-            data_container.clear()
-            data_container.update(claim)
-
-            data = (
-                encrypt_text(str(data_container), self.encryption_key)
-                if self.encryption_key
-                else str(data_container)
-            )
-
-            try:
-                await self.pg.execute_prepared(
-                    "insert_dead_letter", claim.get("claim_id"), reason, data
-                )
-            except Exception:
-                # Fallback to regular insert
-                await self.pg.execute(
-                    "INSERT INTO dead_letter_queue (claim_id, reason, data, inserted_at) VALUES ($1, $2, $3, NOW())",
-                    claim.get("claim_id"),
-                    reason,
-                    data,
-                )
-
-        finally:
-            self._memory_pool.release("dead_letter_data", data_container)
-
-    async def reprocess_dead_letter_optimized(self, batch_size: int = 1000) -> int:
-        """Ultra-optimized dead letter queue reprocessing with memory management."""
-        # Memory check for large operations
-        await self._manage_buffer_memory()
-
-        try:
-            # Use prepared statement for fetching
-            rows = await self.pg.fetch_prepared("fetch_dead_letter_batch", batch_size)
-        except Exception:
-            # Fallback to regular query
-            rows = await self.pg.fetch(
-                "SELECT dlq_id, claim_id, data, reason FROM dead_letter_queue ORDER BY inserted_at ASC LIMIT $1",
-                batch_size,
-            )
-
-        if not rows:
-            return 0
-
-        # Process claims in parallel batches using memory pooling
-        successfully_processed = []
-        failed_to_process = []
-        dlq_ids_to_delete = []
-
-        # Use memory pooling for processing containers
-        processing_containers = []
-
-        try:
-            for row in rows:
-                dlq_id = row.get("dlq_id")
-                claim_str = row.get("data", "")
-                claim_id = row.get("claim_id")
-
-                # Acquire container for this claim
-                claim_container = self._memory_pool.acquire("dead_letter_claims", dict)
-                processing_containers.append(claim_container)
-
-                try:
-                    claim_container.clear()
-
-                    # Decrypt if needed
-                    if self.encryption_key:
-                        claim_str = decrypt_text(claim_str, self.encryption_key)
-
-                    # Parse claim
-                    parsed_claim = json.loads(claim_str)
-                    claim_container.update(parsed_claim)
-
-                    # Attempt automatic repair
-                    from ..processing.repair import ClaimRepairSuggester
-
-                    suggester = ClaimRepairSuggester()
-                    repaired_claim = suggester.auto_repair(dict(claim_container), [])
-
-                    successfully_processed.append(repaired_claim)
-                    dlq_ids_to_delete.append(dlq_id)
-
-                except Exception:
-                    failed_to_process.append(claim_id)
-                    dlq_ids_to_delete.append(dlq_id)  # Remove even if processing failed
-
-            # Bulk delete processed items
-            if dlq_ids_to_delete:
-                try:
-                    await self.pg.execute_prepared(
-                        "delete_dead_letter", dlq_ids_to_delete
-                    )
-                except Exception:
-                    # Fallback deletion
-                    placeholders = ",".join(
-                        "$" + str(i + 1) for i in range(len(dlq_ids_to_delete))
-                    )
-                    await self.pg.execute(
-                        f"DELETE FROM dead_letter_queue WHERE dlq_id IN ({placeholders})",
-                        *dlq_ids_to_delete,
-                    )
-
-            # Bulk insert successfully processed claims
-            if successfully_processed:
-                try:
-                    await self.insert_claims_ultra_optimized(successfully_processed)
-                    metrics.inc("failed_claims_resolved", len(successfully_processed))
-                except Exception as e:
-                    print(f"Warning: Failed to insert reprocessed claims: {e}")
-                    # Re-add to retry queue
-                    for claim in successfully_processed:
-                        pr = int(claim.get("priority", 0) or 0)
-                        self.retry_queue.push(claim, pr)
-
-        finally:
-            # Return all containers to pool
-            for container in processing_containers:
-                self._memory_pool.release("dead_letter_claims", container)
-
-        # Update metrics
-        metrics.inc("dead_letter_processed", len(rows))
-        metrics.inc("dead_letter_resolved", len(successfully_processed))
-        metrics.inc("dead_letter_failed", len(failed_to_process))
-
-        return len(successfully_processed)
-
-    async def top_rvu_codes_optimized(self, limit: int = 1000) -> list[str]:
-        """Optimized top RVU codes retrieval with caching and memory management."""
-        # Use memory pooling for results
-        results_container = self._memory_pool.acquire("rvu_codes_list", list)
-
-        try:
-            results_container.clear()
-
-            try:
-                rows = await self.pg.fetch_prepared(
-                    "get_top_rvu_codes", limit, use_replica=True
-                )
-            except Exception:
-                # Fallback query
-                rows = await self.pg.fetch(
-                    "SELECT procedure_code FROM rvu_data WHERE status = 'active' ORDER BY total_rvu DESC NULLS LAST LIMIT $1",
-                    limit,
-                )
-
-            for r in rows:
-                if r.get("procedure_code"):
-                    results_container.append(str(r.get("procedure_code")))
-
-            codes = list(results_container)
-            metrics.set("top_rvu_codes_fetched", float(len(codes)))
-            return codes
-
-        finally:
-            self._memory_pool.release("rvu_codes_list", results_container)
 
     async def get_processing_metrics_bulk(
         self, facility_ids: List[str] | None = None
@@ -1278,7 +1571,7 @@ class ClaimService:
             return dict(metrics_container)
 
         except Exception as e:
-            print(f"Warning: Failed to get processing metrics: {e}")
+            self.logger.warning(f"Failed to get processing metrics: {e}")
             return {"error": str(e)}
         finally:
             self._memory_pool.release("metrics_data", metrics_container)
@@ -1305,7 +1598,7 @@ class ClaimService:
                     await self.sql.execute_optimized(f"UPDATE STATISTICS {table}")
                     stats_updated += 1
                 except Exception as e:
-                    print(f"Warning: Failed to update statistics for {table}: {e}")
+                    self.logger.warning(f"Failed to update statistics for {table}: {e}")
 
             maintenance_container["statistics_updated"] = stats_updated
 
@@ -1350,7 +1643,7 @@ class ClaimService:
             self._memory_pool.release("maintenance_results", maintenance_container)
 
     def get_service_performance_stats(self) -> Dict[str, Any]:
-        """Get comprehensive service performance statistics including memory management."""
+        """Get comprehensive service performance statistics including memory management and circuit breaker info."""
         try:
             process = psutil.Process()
             memory_mb = process.memory_info().rss / 1024 / 1024
@@ -1393,6 +1686,12 @@ class ClaimService:
                 "emergency_cleanups": metrics.get("service_emergency_cleanups"),
                 "buffer_memory_reductions": metrics.get("buffer_memory_reductions"),
             },
+            "circuit_breaker": {
+                "recovery_attempts": self._circuit_breaker_recovery_attempts,
+                "max_recovery_attempts": self._max_recovery_attempts,
+                "last_reset_time": self._last_circuit_breaker_reset,
+                "reset_interval": self._circuit_breaker_reset_interval,
+            },
             "optimization_features": {
                 "prepared_statements": True,
                 "bulk_operations": True,
@@ -1409,6 +1708,8 @@ class ClaimService:
                 "adaptive_buffer_sizing": True,
                 "container_lifecycle_management": True,
                 "emergency_memory_cleanup": True,
+                "circuit_breaker_handling": True,
+                "automatic_error_recovery": True,
             },
         }
 
@@ -1418,6 +1719,7 @@ class ClaimService:
         self._bulk_operations_count = 0
         self._cache_hit_count = 0
         self._cache_miss_count = 0
+        self._circuit_breaker_recovery_attempts = 0
 
         # Clear large caches but keep recent data
         if len(self._facilities_cache) > 1000:
@@ -1444,13 +1746,7 @@ class ClaimService:
 
         metrics.inc("service_stats_resets")
 
-    # Keep original methods for backward compatibility
-    async def fetch_claims(
-        self, batch_size: int, offset: int = 0, priority: bool = False
-    ) -> List[Dict[str, Any]]:
-        """Backward compatibility wrapper."""
-        return await self.fetch_claims_optimized(batch_size, offset, priority)
-
+    # Backward compatibility methods
     async def load_validation_sets(self) -> tuple[set[str], set[str]]:
         """Backward compatibility wrapper."""
         return await self.load_validation_sets_optimized()
@@ -1605,15 +1901,24 @@ class ClaimService:
                 },
                 "last_memory_check": self._last_memory_check,
                 "memory_check_interval": self._memory_check_interval,
+                "circuit_breaker_status": {
+                    "recovery_attempts": self._circuit_breaker_recovery_attempts,
+                    "last_reset": self._last_circuit_breaker_reset,
+                },
             }
         except Exception as e:
             return {"error": str(e)}
 
     async def cleanup_service_memory(self) -> Dict[str, Any]:
         """Manual memory cleanup for the service."""
+        await self._emergency_memory_cleanup()
+        await self._manage_buffer_memory()
+        self.reset_stats()
+        
         return {
-            "emergency_cleanup": await self._emergency_memory_cleanup(),
-            "buffer_management": await self._manage_buffer_memory(),
-            "stats_reset": self.reset_stats(),
+            "emergency_cleanup": "completed",
+            "buffer_management": "completed", 
+            "stats_reset": "completed",
             "memory_status": self.get_memory_status(),
+            "circuit_breaker_reset": await self.reset_circuit_breakers(),
         }

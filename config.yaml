@@ -11,6 +11,12 @@ postgresql:
   min_pool_size: 25
   max_pool_size: 150
   threshold_ms: 1000
+  # Circuit breaker configuration
+  circuit_breaker:
+    failure_threshold: 10
+    recovery_time: 10.0
+    enable_auto_recovery: true
+    health_check_interval: 30.0
 
 sqlserver:
   host: "localhost"

@@ -130,14 +130,57 @@ class MemoryMonitor:
 memory_monitor = MemoryMonitor()
 
 
+# Circuit Breaker Recovery Helper Function
+async def handle_circuit_breaker_error(
+    postgres_db: "PostgresDatabase", 
+    logger,
+    max_wait_time: float = 15.0
+) -> bool:
+    """
+    Handle circuit breaker open error by waiting for recovery or manual reset.
+    
+    Returns:
+        bool: True if circuit breaker recovered, False if timeout
+    """
+    start_time = time.time()
+    
+    logger.warning("PostgreSQL circuit breaker is open, attempting recovery...")
+    
+    while time.time() - start_time < max_wait_time:
+        # Check if circuit breaker allows operations now
+        if await postgres_db.circuit_breaker.allow():
+            logger.info("Circuit breaker recovered naturally")
+            return True
+        
+        # Try manual health check to potentially reset circuit breaker
+        if await postgres_db.health_check():
+            logger.info("Circuit breaker recovered via health check")
+            return True
+        
+        # Wait before next attempt
+        await asyncio.sleep(1.0)
+    
+    # Last resort: manual reset (use with caution in production)
+    logger.warning("Circuit breaker did not recover, performing manual reset")
+    await postgres_db.reset_circuit_breaker()
+    
+    return await postgres_db.circuit_breaker.allow()
+
+
 class PostgresDatabase(BaseDatabase):
-    """Enhanced PostgreSQL database with comprehensive memory management."""
+    """Enhanced PostgreSQL database with comprehensive memory management and circuit breaker fixes."""
 
     def __init__(self, cfg: PostgresConfig):
         self.cfg = cfg
         self.pool: asyncpg.pool.Pool | None = None
         self.replica_pool: asyncpg.pool.Pool | None = None
-        self.circuit_breaker = CircuitBreaker()
+        
+        # CRITICAL FIX: Configure circuit breaker with more lenient settings
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=10,  # Increased from default 3 to 10
+            recovery_time=10.0,    # Reduced from default 30.0 to 10 seconds
+            name="postgres"        # Named for monitoring
+        )
 
         # Enhanced query result cache with TTL and memory limits
         self.query_cache = InMemoryCache(ttl=60)
@@ -166,12 +209,44 @@ class PostgresDatabase(BaseDatabase):
         # Memory cleanup references
         self._cleanup_refs: List[weakref.ref] = []
 
+        # Circuit breaker monitoring
+        self._circuit_was_open = False
+
     def _with_traceparent(self, query: str, traceparent: str | None) -> str:
         """Prepend a traceparent comment to the query when provided."""
         tp = traceparent or get_traceparent()
         if tp:
             return f"/* traceparent={tp} */ {query}"
         return query
+
+    async def reset_circuit_breaker(self) -> None:
+        """Reset the circuit breaker manually - useful for recovery."""
+        await self.circuit_breaker.record_success()
+        logger.info("PostgreSQL circuit breaker manually reset")
+
+    async def get_circuit_breaker_status(self) -> dict:
+        """Get current circuit breaker status for debugging."""
+        return {
+            "is_open": self.circuit_breaker.is_open,
+            "failure_count": self.circuit_breaker.failure_count,
+            "failure_threshold": self.circuit_breaker.failure_threshold,
+            "recovery_time": self.circuit_breaker.recovery_time,
+            "open_until": self.circuit_breaker.open_until,
+        }
+
+    async def _try_circuit_breaker_recovery(self) -> bool:
+        """Attempt to recover from circuit breaker open state."""
+        try:
+            # Try a simple health check
+            if self.pool:
+                async with self.pool.acquire(timeout=2.0) as conn:
+                    result = await conn.fetchval("SELECT 1")
+                    if result == 1:
+                        await self.circuit_breaker.record_success()
+                        return True
+            return False
+        except Exception:
+            return False
 
     async def _init_connection(self, conn: "asyncpg.Connection") -> None:
         """Initialize a new connection with prepared statements and optimizations."""
@@ -268,7 +343,6 @@ class PostgresDatabase(BaseDatabase):
             jitter=self.cfg.retry_jitter,
         )
 
-    # Update the fetch_optimized_with_memory_management method to use safer connection handling
     async def fetch_optimized_with_memory_management(
         self,
         query: str,
@@ -276,15 +350,27 @@ class PostgresDatabase(BaseDatabase):
         use_replica: bool = True,
         traceparent: str | None = None,
     ) -> Iterable[dict]:
-        """Optimized fetch with comprehensive memory management and improved connection handling."""
+        """Optimized fetch with enhanced circuit breaker handling and memory management."""
         self._operation_count += 1
 
         # Periodic memory check
         if self._operation_count % self._memory_check_frequency == 0:
             await self._check_database_memory()
 
+        # Enhanced circuit breaker check with logging
         if not await self.circuit_breaker.allow():
-            raise CircuitBreakerOpenError("PostgreSQL circuit breaker open")
+            # Mark that circuit breaker was open for recovery logging
+            self._circuit_was_open = True
+            
+            # Try a health check to potentially reset the circuit breaker
+            if await self._try_circuit_breaker_recovery():
+                logger.info("Circuit breaker recovery successful, retrying operation")
+            else:
+                cb_status = await self.get_circuit_breaker_status()
+                logger.warning(
+                    f"PostgreSQL circuit breaker open - Status: {cb_status}"
+                )
+                raise CircuitBreakerOpenError("PostgreSQL circuit breaker open")
 
         # Choose pool based on use_replica flag and availability
         pool = self.replica_pool if use_replica and self.replica_pool else self.pool
@@ -296,13 +382,13 @@ class PostgresDatabase(BaseDatabase):
         start = time.perf_counter()
         
         # Enhanced connection acquisition with retry logic
-        max_retries = 2
+        max_retries = 3  # Increased from 2 to 3
         last_exception = None
         
         for attempt in range(max_retries):
             try:
                 # Use timeout and proper connection state management
-                async with asyncio.wait_for(pool.acquire(), timeout=10.0) as conn:
+                async with asyncio.wait_for(pool.acquire(), timeout=15.0) as conn:  # Increased timeout
                     try:
                         # Ensure connection is ready
                         await conn.execute("SELECT 1")
@@ -311,7 +397,7 @@ class PostgresDatabase(BaseDatabase):
                         query_with_trace = self._with_traceparent(query, traceparent)
                         rows = await asyncio.wait_for(
                             conn.fetch(query_with_trace, *params), 
-                            timeout=30.0
+                            timeout=60.0  # Increased timeout for complex queries
                         )
                         
                         # Convert to dict format
@@ -329,52 +415,125 @@ class PostgresDatabase(BaseDatabase):
                             )
                         
                         await self.circuit_breaker.record_success()
+                        
+                        # Log successful recovery if circuit breaker was previously open
+                        if hasattr(self, '_circuit_was_open') and self._circuit_was_open:
+                            logger.info("PostgreSQL circuit breaker recovered successfully")
+                            self._circuit_was_open = False
+                        
                         return result
                         
-                    except asyncio.TimeoutError as e:
-                        last_exception = e
-                        print(f"Query timeout on attempt {attempt + 1}: {e}")
+                    except asyncio.TimeoutError:
+                        last_exception = Exception("Query execution timeout")
+                        logger.warning(f"Query timeout on attempt {attempt + 1}: {query[:100]}...")
                         if attempt < max_retries - 1:
-                            await asyncio.sleep(0.5)
-                            continue
-                        raise
+                            await asyncio.sleep(0.5 * (attempt + 1))  # Progressive backoff
+                        continue
                         
                     except Exception as e:
                         last_exception = e
-                        # Check if it's a connection-level error worth retrying
-                        if "operation is in progress" in str(e).lower() or "connection" in str(e).lower():
-                            print(f"Connection error on attempt {attempt + 1}, retrying: {e}")
-                            if attempt < max_retries - 1:
-                                await asyncio.sleep(0.5)
-                                continue
-                        raise
+                        logger.warning(f"Query execution error on attempt {attempt + 1}: {e}")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(0.5 * (attempt + 1))  # Progressive backoff
+                        continue
                         
-            except asyncio.TimeoutError as e:
-                last_exception = e
-                print(f"Connection acquisition timeout on attempt {attempt + 1}")
+            except asyncio.TimeoutError:
+                last_exception = Exception("Connection acquisition timeout")
+                logger.warning(f"Connection timeout on attempt {attempt + 1}")
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(1.0)
-                    continue
+                    await asyncio.sleep(1.0 * (attempt + 1))  # Progressive backoff
+                continue
                 
             except Exception as e:
                 last_exception = e
-                print(f"Connection error on attempt {attempt + 1}: {e}")
+                logger.warning(f"Connection error on attempt {attempt + 1}: {e}")
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(0.5)
-                    continue
-                break
-        
-        # If we get here, all retries failed
-        await self.circuit_breaker.record_failure()
-        
-        if last_exception:
-            if "operation is in progress" in str(last_exception).lower():
-                raise ConnectionError(f"Database connection conflict after {max_retries} retries: {last_exception}")
-            else:
-                raise QueryError(f"Query failed after {max_retries} retries: {last_exception}")
-        else:
-            raise ConnectionError(f"Connection acquisition failed after {max_retries} retries")
+                    await asyncio.sleep(1.0 * (attempt + 1))  # Progressive backoff
+                continue
 
+        # All retries failed
+        await self.circuit_breaker.record_failure()
+        error_msg = f"All connection attempts failed. Last error: {last_exception}"
+        logger.error(error_msg)
+        
+        # Include circuit breaker status in error for debugging
+        cb_status = await self.get_circuit_breaker_status()
+        raise QueryError(f"{error_msg}. Circuit breaker status: {cb_status}")
+
+    async def health_check(self) -> bool:
+        """Enhanced health check with circuit breaker reset on success."""
+        try:
+            # Check if pool exists and is healthy
+            if not self.pool:
+                await self.connect()
+            
+            # Test multiple connections from the pool
+            healthy_connections = 0
+            total_connections = min(3, self.pool._queue.qsize() if self.pool else 0)
+            
+            if total_connections == 0:
+                # If no connections in queue, test by getting a new one
+                try:
+                    async with self.pool.acquire(timeout=5.0) as conn:  # Increased timeout
+                        result = await conn.fetchval("SELECT 1")
+                        if result == 1:
+                            healthy_connections = 1
+                            total_connections = 1
+                except Exception:
+                    pass
+            else:
+                # Test existing connections
+                for i in range(min(3, total_connections)):
+                    try:
+                        async with self.pool.acquire(timeout=2.0) as conn:
+                            result = await conn.fetchval("SELECT 1")
+                            if result == 1:
+                                healthy_connections += 1
+                    except Exception:
+                        pass
+            
+            # Health check passes if majority of tested connections work
+            is_healthy = (
+                healthy_connections >= (total_connections // 2 + 1)
+                if total_connections > 0
+                else False
+            )
+            
+            if is_healthy:
+                await self.circuit_breaker.record_success()
+                # Log successful recovery if circuit breaker was previously open
+                if hasattr(self, '_circuit_was_open') and self._circuit_was_open:
+                    logger.info("PostgreSQL circuit breaker recovered successfully")
+                    self._circuit_was_open = False
+            else:
+                await self.circuit_breaker.record_failure()
+            
+            # Update health metrics if metrics are available
+            try:
+                from ..monitoring.metrics import metrics
+                metrics.set("postgres_healthy_connections", float(healthy_connections))
+                metrics.set(
+                    "postgres_health_check_ratio",
+                    float(healthy_connections) / float(total_connections)
+                    if total_connections > 0
+                    else 0.0,
+                )
+                metrics.set("postgres_circuit_breaker_open", 1.0 if self.circuit_breaker.is_open else 0.0)
+            except (ImportError, AttributeError):
+                pass  # Metrics not available or not configured
+            
+            return is_healthy
+            
+        except Exception as e:
+            await self.circuit_breaker.record_failure()
+            # Use logger if available, otherwise print
+            if hasattr(self, 'logger'):
+                self.logger.error(f"PostgreSQL health check failed: {e}")
+            else:
+                print(f"PostgreSQL health check failed: {e}")
+            return False
+
+    # Keep all the existing memory management methods
     async def _get_from_cache_with_memory_check(self, cache_key: str) -> Optional[Any]:
         """Get from cache with memory management check."""
         # Check if cache memory usage is too high
@@ -531,6 +690,10 @@ class PostgresDatabase(BaseDatabase):
         for stmt_name in temp_statements:
             del self._prepared[stmt_name]
             self._prepared_statements.pop(stmt_name, None)
+
+    async def _check_database_memory(self) -> None:
+        """Check database memory usage and perform maintenance."""
+        await self._periodic_memory_check()
 
     async def execute_many_with_memory_management(
         self,
@@ -920,77 +1083,6 @@ class PostgresDatabase(BaseDatabase):
                 await self.circuit_breaker.record_failure()
         except Exception:
             await self.circuit_breaker.record_failure()
-    
-    async def health_check(self) -> bool:
-        """Enhanced health check with detailed diagnostics for PostgreSQL."""
-        if not await self.circuit_breaker.allow():
-            return False
-
-        try:
-            # Check if pool exists and is healthy
-            if not self.pool:
-                await self.connect()
-            
-            # Test multiple connections from the pool
-            healthy_connections = 0
-            total_connections = min(3, self.pool._queue.qsize() if self.pool else 0)
-            
-            if total_connections == 0:
-                # If no connections in queue, test by getting a new one
-                try:
-                    async with self.pool.acquire(timeout=2.0) as conn:
-                        result = await conn.fetchval("SELECT 1")
-                        if result == 1:
-                            healthy_connections = 1
-                            total_connections = 1
-                except Exception:
-                    pass
-            else:
-                # Test existing connections
-                for i in range(min(3, total_connections)):
-                    try:
-                        async with self.pool.acquire(timeout=1.0) as conn:
-                            result = await conn.fetchval("SELECT 1")
-                            if result == 1:
-                                healthy_connections += 1
-                    except Exception:
-                        pass
-            
-            # Health check passes if majority of tested connections work
-            is_healthy = (
-                healthy_connections >= (total_connections // 2 + 1)
-                if total_connections > 0
-                else False
-            )
-            
-            if is_healthy:
-                await self.circuit_breaker.record_success()
-            else:
-                await self.circuit_breaker.record_failure()
-            
-            # Update health metrics if metrics are available
-            try:
-                from ..monitoring.metrics import metrics
-                metrics.set("postgres_healthy_connections", float(healthy_connections))
-                metrics.set(
-                    "postgres_health_check_ratio",
-                    float(healthy_connections) / float(total_connections)
-                    if total_connections > 0
-                    else 0.0,
-                )
-            except (ImportError, AttributeError):
-                pass  # Metrics not available or not configured
-            
-            return is_healthy
-            
-        except Exception as e:
-            await self.circuit_breaker.record_failure()
-            # Use logger if available, otherwise print
-            if hasattr(self, 'logger'):
-                self.logger.error(f"PostgreSQL health check failed: {e}")
-            else:
-                print(f"PostgreSQL health check failed: {e}")
-            return False
 
     def report_pool_status(self) -> None:
         """Report connection pool metrics."""
@@ -1077,7 +1169,6 @@ class PostgresDatabase(BaseDatabase):
         
         # If no predefined query found, raise an error instead of failing silently
         raise ValueError(f"Prepared statement '{statement_name}' not found and no predefined query available")
-
 
     # Also add this connection management improvement to prevent "operation in progress" errors
     async def _acquire_connection_safely(self, use_replica: bool = False) -> "asyncpg.Connection":
