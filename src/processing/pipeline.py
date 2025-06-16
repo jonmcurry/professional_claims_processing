@@ -1740,32 +1740,64 @@ class ClaimsPipeline:
         return 0
 
     async def _update_claims_status_bulk(self, claim_ids: List[str], processing_status: str, processing_stage: str) -> None:
-        """Update processing status and stage for multiple claims."""
+        """Update processing status and stage for multiple claims with deadlock retry logic."""
         if not claim_ids:
             return
 
-        try:
-            # Update PostgreSQL
-            if claim_ids:
-                pg_query = """
-                    UPDATE claims 
-                    SET processing_status = $1, processing_stage = $2, updated_at = CURRENT_TIMESTAMP 
-                    WHERE claim_id = ANY($3)
-                """
-                await self.pg.execute(pg_query, processing_status, processing_stage, claim_ids)
+        # Sort claim_ids to ensure consistent lock ordering and reduce deadlock probability
+        sorted_claim_ids = sorted(claim_ids)
+        
+        max_retries = 3
+        base_delay = 0.1  # 100ms base delay
+        
+        for attempt in range(max_retries + 1):
+            try:
+                # Update PostgreSQL
+                if sorted_claim_ids:
+                    pg_query = """
+                        UPDATE claims 
+                        SET processing_status = $1, processing_stage = $2, updated_at = CURRENT_TIMESTAMP 
+                        WHERE claim_id = ANY($3)
+                    """
+                    await self.pg.execute(pg_query, processing_status, processing_stage, sorted_claim_ids)
 
-            # Update SQL Server
-            if claim_ids and hasattr(self.sql, 'execute_many'):
-                sql_query = """
-                    UPDATE claims 
-                    SET processing_status = ?, processing_stage = ?, updated_at = GETDATE() 
-                    WHERE claim_id = ?
-                """
-                sql_data = [(processing_status, processing_stage, claim_id) for claim_id in claim_ids]
-                await self.sql.execute_many(sql_query, sql_data)
+                # Update SQL Server
+                if sorted_claim_ids and hasattr(self.sql, 'execute_many'):
+                    sql_query = """
+                        UPDATE claims 
+                        SET processing_status = ?, processing_stage = ?, updated_at = GETDATE() 
+                        WHERE claim_id = ?
+                    """
+                    sql_data = [(processing_status, processing_stage, claim_id) for claim_id in sorted_claim_ids]
+                    await self.sql.execute_many(sql_query, sql_data)
+                
+                # If we reach here, the update succeeded
+                return
 
-        except Exception as e:
-            self.logger.warning(f"Failed to update claims status: {e}")
+            except Exception as e:
+                error_msg = str(e).lower()
+                
+                # Check if this is a deadlock error
+                is_deadlock = any(keyword in error_msg for keyword in [
+                    'deadlock detected', 'deadlock', 'lock timeout', 
+                    'concurrent update', 'serialization failure'
+                ])
+                
+                if is_deadlock and attempt < max_retries:
+                    # Calculate exponential backoff with jitter
+                    delay = base_delay * (2 ** attempt) + (time.time() % 0.1)  # Add jitter
+                    self.logger.warning(
+                        f"Deadlock detected on attempt {attempt + 1}, retrying in {delay:.3f}s: {e}"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    # Final attempt failed or non-deadlock error
+                    if is_deadlock:
+                        self.logger.error(f"Failed to update claims status after {max_retries + 1} attempts due to deadlock: {e}")
+                    else:
+                        self.logger.warning(f"Failed to update claims status: {e}")
+                    return
 
     def _truncate_failed_claims_data(self, failed_claims_data: List[tuple]) -> List[tuple]:
         """Truncate failed claims data to fit database column constraints."""
