@@ -569,10 +569,18 @@ class ClaimsPipeline:
             )
             self.model = ABTestModel(model_a, model_b, self.cfg.model.ab_test_ratio)
         else:
-            self.model = FilterModel(self.cfg.model.path, self.cfg.model.version)
+            try:
+                self.model = FilterModel(self.cfg.model.path, self.cfg.model.version)
+                self.logger.info(f"✓ ML model loaded: {self.cfg.model.path}")
+            except FileNotFoundError:
+                self.logger.warning(f"ML model not found: {self.cfg.model.path}")
+                self.logger.info("System will use rules-based processing until ML model is available")
+                self.model = None
 
-        if self.features.enable_model_monitor:
+        if self.model and self.features.enable_model_monitor:
             self.model_monitor = ModelMonitor(self.cfg.model.version)
+        else:
+            self.model_monitor = None
 
         # Initialize rules engine
         self.rules_engine = RulesEngine([])
