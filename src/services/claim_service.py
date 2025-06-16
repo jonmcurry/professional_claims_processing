@@ -234,7 +234,7 @@ class ClaimService:
                         WHERE c.priority > $3
                         ORDER BY c.priority DESC LIMIT $1 OFFSET $2
                     """
-                    rows = await self.pg.fetch(query, batch_size, offset, 1, use_replica=True)
+                    rows = await self.pg.fetch(query, batch_size, offset, '1', use_replica=True)
                 else:
                     query = """
                         SELECT c.*, li.line_number, li.procedure_code AS li_procedure_code, 
