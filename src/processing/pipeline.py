@@ -1898,11 +1898,19 @@ class ClaimsPipeline:
                 # Update PostgreSQL
                 if sorted_claim_ids:
                     pg_query = """
-                        UPDATE claims 
-                        SET processing_status = $1, processing_stage = $2, updated_at = CURRENT_TIMESTAMP 
-                        WHERE claim_id = ANY($3)
+                        UPDATE claims AS c
+                        SET processing_status = $1,
+                            processing_stage = $2,
+                            updated_at = CURRENT_TIMESTAMP
+                        FROM (
+                            SELECT UNNEST($3::text[]) AS claim_id
+                            ORDER BY claim_id
+                        ) AS s
+                        WHERE c.claim_id = s.claim_id
                     """
-                    await self.pg.execute(pg_query, processing_status, processing_stage, sorted_claim_ids)
+                    await self.pg.execute(
+                        pg_query, processing_status, processing_stage, sorted_claim_ids
+                    )
 
                 # Update SQL Server (if claims exist there)
                 if sorted_claim_ids and hasattr(self.sql, 'execute_many'):
