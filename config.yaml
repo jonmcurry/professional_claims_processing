@@ -8,9 +8,12 @@ postgresql:
   database: "staging_process"
   replica_host: null
   replica_port: null
-  min_pool_size: 25
-  max_pool_size: 150
+  min_pool_size: 10
+  max_pool_size: 50
   threshold_ms: 1000
+  connection_timeout: 30.0
+  command_timeout: 60.0
+  pool_acquire_timeout: 15.0
   # Circuit breaker configuration
   circuit_breaker:
     failure_threshold: 10
