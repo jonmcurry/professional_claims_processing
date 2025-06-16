@@ -920,6 +920,77 @@ class PostgresDatabase(BaseDatabase):
                 await self.circuit_breaker.record_failure()
         except Exception:
             await self.circuit_breaker.record_failure()
+    
+    async def health_check(self) -> bool:
+        """Enhanced health check with detailed diagnostics for PostgreSQL."""
+        if not await self.circuit_breaker.allow():
+            return False
+
+        try:
+            # Check if pool exists and is healthy
+            if not self.pool:
+                await self.connect()
+            
+            # Test multiple connections from the pool
+            healthy_connections = 0
+            total_connections = min(3, self.pool._queue.qsize() if self.pool else 0)
+            
+            if total_connections == 0:
+                # If no connections in queue, test by getting a new one
+                try:
+                    async with self.pool.acquire(timeout=2.0) as conn:
+                        result = await conn.fetchval("SELECT 1")
+                        if result == 1:
+                            healthy_connections = 1
+                            total_connections = 1
+                except Exception:
+                    pass
+            else:
+                # Test existing connections
+                for i in range(min(3, total_connections)):
+                    try:
+                        async with self.pool.acquire(timeout=1.0) as conn:
+                            result = await conn.fetchval("SELECT 1")
+                            if result == 1:
+                                healthy_connections += 1
+                    except Exception:
+                        pass
+            
+            # Health check passes if majority of tested connections work
+            is_healthy = (
+                healthy_connections >= (total_connections // 2 + 1)
+                if total_connections > 0
+                else False
+            )
+            
+            if is_healthy:
+                await self.circuit_breaker.record_success()
+            else:
+                await self.circuit_breaker.record_failure()
+            
+            # Update health metrics if metrics are available
+            try:
+                from ..monitoring.metrics import metrics
+                metrics.set("postgres_healthy_connections", float(healthy_connections))
+                metrics.set(
+                    "postgres_health_check_ratio",
+                    float(healthy_connections) / float(total_connections)
+                    if total_connections > 0
+                    else 0.0,
+                )
+            except (ImportError, AttributeError):
+                pass  # Metrics not available or not configured
+            
+            return is_healthy
+            
+        except Exception as e:
+            await self.circuit_breaker.record_failure()
+            # Use logger if available, otherwise print
+            if hasattr(self, 'logger'):
+                self.logger.error(f"PostgreSQL health check failed: {e}")
+            else:
+                print(f"PostgreSQL health check failed: {e}")
+            return False
 
     def report_pool_status(self) -> None:
         """Report connection pool metrics."""

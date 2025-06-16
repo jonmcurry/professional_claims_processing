@@ -127,7 +127,7 @@ logging:
     "system": "INFO"
   rotate_mb: 50
   backup_count: 10
-  sentry_dsn: "null"
+  sentry_dsn: null
 
 features:
   enable_cache: true

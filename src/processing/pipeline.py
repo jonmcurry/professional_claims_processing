@@ -424,18 +424,78 @@ class ClaimsPipeline:
         connection_start = time.perf_counter()
         await asyncio.gather(self.pg.connect(), self.sql.connect())
 
-        # Aggressive connection pool pre-warming with health checks
+        # Enhanced warmup with proper health checks
+        async def pg_health_check():
+            """PostgreSQL health check wrapper."""
+            try:
+                if hasattr(self.pg, 'health_check'):
+                    return await self.pg.health_check()
+                else:
+                    # Fallback health check if method doesn't exist
+                    result = await self.pg.fetch("SELECT 1 as health_check")
+                    return len(result) > 0 and result[0].get('health_check') == 1
+            except Exception as e:
+                self.logger.error(f"PostgreSQL health check failed: {e}")
+                return False
+
+        async def sql_health_check():
+            """SQL Server health check wrapper."""
+            try:
+                return await self.sql.health_check()
+            except Exception as e:
+                self.logger.error(f"SQL Server health check failed: {e}")
+                return False
+
+        # Aggressive connection pool pre-warming with enhanced health checks
         warmup_tasks = [
             self.pg.fetch("SELECT 1 as warmup_test"),
             self.sql.execute("SELECT 1"),
-            # Additional warmup queries
-            self.pg.health_check(),
-            self.sql.health_check(),
+            # Enhanced health checks with error handling
+            pg_health_check(),
+            sql_health_check(),
         ]
-        await asyncio.gather(*warmup_tasks)
+        
+        warmup_results = await asyncio.gather(*warmup_tasks, return_exceptions=True)
+        
+        # Process health check results
+        pg_warmup_ok = not isinstance(warmup_results[0], Exception)
+        sql_warmup_ok = not isinstance(warmup_results[1], Exception)
+        pg_health_ok = warmup_results[2] if not isinstance(warmup_results[2], Exception) else False
+        sql_health_ok = warmup_results[3] if not isinstance(warmup_results[3], Exception) else False
+        
+        # Log health check results
+        self.logger.info(
+            f"Database warmup complete - PG warmup: {pg_warmup_ok}, "
+            f"SQL warmup: {sql_warmup_ok}, PG health: {pg_health_ok}, SQL health: {sql_health_ok}"
+        )
+        
+        # Handle unhealthy connections
+        if not pg_health_ok:
+            self.logger.warning("PostgreSQL health check failed, attempting reconnection...")
+            try:
+                await self.pg.connect()
+                # Verify reconnection
+                await self.pg.fetch("SELECT 1")
+                self.logger.info("PostgreSQL reconnection successful")
+            except Exception as e:
+                self.logger.error(f"PostgreSQL reconnection failed: {e}")
+                # Continue anyway, but log the issue
+        
+        if not sql_health_ok:
+            self.logger.warning("SQL Server health check failed, attempting reconnection...")
+            try:
+                await self.sql.connect()
+                # Verify reconnection
+                await self.sql.execute("SELECT 1")
+                self.logger.info("SQL Server reconnection successful")
+            except Exception as e:
+                self.logger.error(f"SQL Server reconnection failed: {e}")
+                # Continue anyway, but log the issue
 
         connection_time = time.perf_counter() - connection_start
         self._preparation_stats["connection_time"] = connection_time
+        self._preparation_stats["pg_health_ok"] = pg_health_ok
+        self._preparation_stats["sql_health_ok"] = sql_health_ok
 
         # Phase 2: Prepared Statement Setup
         preparation_start = time.perf_counter()
@@ -459,18 +519,18 @@ class ClaimsPipeline:
             self.pg.prepare_named(
                 "claims_fetch_optimized",
                 """SELECT c.*, li.line_number, li.procedure_code AS li_procedure_code, 
-                         li.units AS li_units, li.charge_amount AS li_charge_amount, 
-                         li.service_from_date AS li_service_from_date, 
-                         li.service_to_date AS li_service_to_date 
-                   FROM claims c LEFT JOIN claims_line_items li ON c.claim_id = li.claim_id 
-                   ORDER BY c.priority DESC LIMIT $1 OFFSET $2""",
+                        li.units AS li_units, li.charge_amount AS li_charge_amount, 
+                        li.service_from_date AS li_service_from_date, 
+                        li.service_to_date AS li_service_to_date 
+                FROM claims c LEFT JOIN claims_line_items li ON c.claim_id = li.claim_id 
+                ORDER BY c.priority DESC LIMIT $1 OFFSET $2""",
             ),
             self.pg.prepare_named(
                 "rvu_bulk_fetch",
                 """SELECT procedure_code, description, total_rvu, work_rvu, 
-                         practice_expense_rvu, malpractice_rvu, conversion_factor
-                   FROM rvu_data 
-                   WHERE procedure_code = ANY($1) AND status = 'active'""",
+                        practice_expense_rvu, malpractice_rvu, conversion_factor
+                FROM rvu_data 
+                WHERE procedure_code = ANY($1) AND status = 'active'""",
             ),
             self.pg.prepare_named(
                 "checkpoint_insert_optimized",
@@ -478,10 +538,25 @@ class ClaimsPipeline:
             ),
         ]
 
-        await asyncio.gather(*preparation_tasks, return_exceptions=True)
+        preparation_results = await asyncio.gather(*preparation_tasks, return_exceptions=True)
+        
+        # Log preparation results
+        preparation_success = sum(1 for r in preparation_results if not isinstance(r, Exception))
+        preparation_total = len(preparation_results)
+        self.logger.info(f"Prepared statements: {preparation_success}/{preparation_total} successful")
+        
+        # Log any preparation failures
+        for i, result in enumerate(preparation_results):
+            if isinstance(result, Exception):
+                task_names = [
+                    "claims_insert_optimized", "failed_claims_insert_batch", 
+                    "claims_fetch_optimized", "rvu_bulk_fetch", "checkpoint_insert_optimized"
+                ]
+                self.logger.error(f"Failed to prepare {task_names[i]}: {result}")
 
         preparation_time = time.perf_counter() - preparation_start
         self._preparation_stats["preparation_time"] = preparation_time
+        self._preparation_stats["preparation_success_rate"] = preparation_success / preparation_total
 
         # Phase 3: Component Initialization
         component_start = time.perf_counter()
@@ -584,6 +659,8 @@ class ClaimsPipeline:
         metrics.set("pipeline_startup_time", self._startup_time)
         metrics.set("pipeline_startup_optimized", 1.0)
         metrics.set("dynamic_concurrency_enabled", 1.0)
+        metrics.set("pg_health_status", 1.0 if pg_health_ok else 0.0)
+        metrics.set("sql_health_status", 1.0 if sql_health_ok else 0.0)
 
         self.logger.info(
             "Optimized pipeline startup complete with dynamic concurrency",
@@ -596,6 +673,10 @@ class ClaimsPipeline:
                     "ml": self.semaphore_manager.ml_limit,
                     "batch": self.semaphore_manager.batch_limit,
                     "database": self.semaphore_manager.database_limit,
+                },
+                "database_health": {
+                    "postgresql": pg_health_ok,
+                    "sql_server": sql_health_ok,
                 },
             },
         )
