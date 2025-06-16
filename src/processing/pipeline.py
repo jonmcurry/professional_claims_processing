@@ -1198,6 +1198,16 @@ class ClaimsPipeline:
                     },
                 )
 
+                # Phase 8b: Update Claims Status  
+                # Update final status for successful and failed claims
+                if valid_claims:
+                    valid_claim_ids = [c.get("claim_id", "") for c in valid_claims if c.get("claim_id")]
+                    await self._update_claims_status_bulk(valid_claim_ids, "completed", "completed")
+                
+                if failed_claims_data:
+                    failed_claim_ids = [f[0] for f in failed_claims_data if f[0]]  # claim_id is first element
+                    await self._update_claims_status_bulk(failed_claim_ids, "failed", "failed")
+
                 # Phase 9: Bulk Checkpointing and Audit
                 checkpoint_start = time.perf_counter()
 
