@@ -138,6 +138,9 @@ class PostgresConfig:
     min_pool_size: int = 25
     max_pool_size: int = 150
     threshold_ms: int = 1000
+    connection_timeout: float = 30.0
+    command_timeout: float = 60.0
+    pool_acquire_timeout: float = 15.0
     retries: int = 3
     retry_delay: float = 0.5
     retry_max_delay: float | None = None
