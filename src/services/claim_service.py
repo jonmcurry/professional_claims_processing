@@ -98,6 +98,34 @@ class ClaimService:
             logger.setLevel(logging.INFO)
         return logger
 
+    def _map_priority_to_int(self, priority_value: Any) -> int:
+        """
+        Map text-based priority values to integers.
+        
+        Args:
+            priority_value: The priority value (can be string or int)
+            
+        Returns:
+            int: Numeric priority value (higher number = higher priority)
+        """
+        if isinstance(priority_value, int):
+            return priority_value
+            
+        if isinstance(priority_value, str):
+            priority_map = {
+                'high': 3,
+                'normal': 2,
+                'low': 1,
+                # Also handle uppercase variants
+                'HIGH': 3,
+                'NORMAL': 2,
+                'LOW': 1
+            }
+            return priority_map.get(priority_value.lower(), 2)  # Default to normal priority
+        
+        # Default for any other type
+        return 2
+
     async def _handle_postgres_circuit_breaker_error(self, operation_name: str = "unknown") -> bool:
         """
         Handle PostgreSQL circuit breaker open error by waiting for recovery.
@@ -213,7 +241,7 @@ class ClaimService:
                 if priority:
                     rows = await self.pg.fetch_prepared(
                         "fetch_claims_priority", 
-                        batch_size, offset, 1,  # priority > 1
+                        batch_size, offset, '1',  # priority > '1'
                         use_replica=True
                     )
                 else:
@@ -362,7 +390,7 @@ class ClaimService:
             claim_list = list(claims.values())
             priorities = []
             for claim in claim_list:
-                pr = int(claim.get("priority", 0) or 0)
+                pr = self._map_priority_to_int(claim.get("priority", 2))
                 priorities.append((claim, pr))
 
             # Bulk priority queue operations
@@ -594,7 +622,7 @@ class ClaimService:
         )
 
         # Add to retry queue for potential reprocessing
-        priority = int(claim.get("priority", 0) or 0)
+        priority = self._map_priority_to_int(claim.get("priority", 2))
         self.retry_queue.push(claim, priority)
 
         # Record audit event
