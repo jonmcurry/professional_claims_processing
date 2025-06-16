@@ -1799,15 +1799,20 @@ class ClaimsPipeline:
                     """
                     await self.pg.execute(pg_query, processing_status, processing_stage, sorted_claim_ids)
 
-                # Update SQL Server
+                # Update SQL Server (if claims exist there)
                 if sorted_claim_ids and hasattr(self.sql, 'execute_many'):
-                    sql_query = """
-                        UPDATE claims 
-                        SET processing_status = ?, processing_stage = ?, updated_at = GETDATE() 
-                        WHERE claim_id = ?
-                    """
-                    sql_data = [(processing_status, processing_stage, claim_id) for claim_id in sorted_claim_ids]
-                    await self.sql.execute_many(sql_query, sql_data)
+                    try:
+                        sql_query = """
+                            UPDATE claims 
+                            SET processing_status = ?, processing_stage = ?, updated_at = GETDATE() 
+                            WHERE claim_id = ?
+                        """
+                        sql_data = [(processing_status, processing_stage, claim_id) for claim_id in sorted_claim_ids]
+                        await self.sql.execute_many(sql_query, sql_data)
+                    except Exception as sql_error:
+                        # Log SQL Server update failure but don't fail the entire operation
+                        # since PostgreSQL is the primary source for processing status
+                        self.logger.warning(f"SQL Server status update failed (non-critical): {sql_error}")
                 
                 # If we reach here, the update succeeded
                 return
