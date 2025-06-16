@@ -273,12 +273,132 @@ async def setup_sql_server_reference_data(sql_db: SQLServerDatabase, logger):
         await setup_organizations(sql_db, logger)
         await setup_regions(sql_db, logger)
         await setup_facilities_with_hierarchy(sql_db, logger)
+        await setup_financial_classes_sql_server(sql_db, logger)  # Add this line
         await setup_rvu_data_sql_server_enhanced(sql_db, logger)
         logger.info("SUCCESS: SQL Server reference data setup completed")
     except Exception as e:
         logger.error(f"ERROR: SQL Server reference data setup failed: {e}")
         raise
 
+async def setup_financial_classes_sql_server(sql_db: SQLServerDatabase, logger):
+    """Setup financial classes using existing facility_financial_classes table"""
+    logger.info("Setting up financial classes...")
+    
+    # First ensure core_standard_payers table has data
+    try:
+        payer_count_result = await sql_db.fetch("SELECT COUNT(*) as count FROM core_standard_payers")
+        payer_count = payer_count_result[0]['count'] if payer_count_result else 0
+        
+        if payer_count == 0:
+            logger.info("Creating sample payers...")
+            payers = [
+                (1, 'Medicare', 'MC'),
+                (2, 'Medicaid', 'MD'),
+                (3, 'Commercial', 'CM'),
+                (4, 'Blue Cross', 'BC'),
+                (5, 'United Health', 'UH'),
+                (6, 'Aetna', 'AE'),
+                (7, 'Cigna', 'CG'),
+                (8, 'Self Pay', 'SP')
+            ]
+            
+            for payer_id, payer_name, payer_code in payers:
+                try:
+                    insert_sql = """
+                        IF NOT EXISTS (SELECT 1 FROM core_standard_payers WHERE payer_id = ?)
+                        BEGIN
+                            INSERT INTO core_standard_payers (payer_id, payer_name, payer_code)
+                            VALUES (?, ?, ?)
+                        END
+                    """
+                    await sql_db.execute(insert_sql, payer_id, payer_id, payer_name, payer_code)
+                except Exception as e:
+                    logger.debug(f"Payer insert note for {payer_name}: {e}")
+            
+            logger.info("Created sample payers")
+    
+    except Exception as e:
+        logger.warning(f"Payer setup warning: {e}")
+    
+    # Check if facility_financial_classes has data
+    try:
+        fc_count_result = await sql_db.fetch("SELECT COUNT(*) as count FROM facility_financial_classes")
+        fc_count = fc_count_result[0]['count'] if fc_count_result else 0
+        
+        if fc_count == 0:
+            logger.info("Creating financial classes for facilities...")
+            
+            # Get all active facilities
+            facilities_result = await sql_db.fetch("SELECT facility_id FROM facilities WHERE active = 1")
+            
+            if not facilities_result:
+                logger.warning("No active facilities found - creating test facility")
+                # Create a test facility if none exist
+                test_facility_sql = """
+                    IF NOT EXISTS (SELECT 1 FROM facilities WHERE facility_id = 'TEST001')
+                    BEGIN
+                        INSERT INTO facilities (
+                            facility_id, facility_name, facility_type, address,
+                            city, state, zip_code, phone, active, region_id
+                        ) VALUES (
+                            'TEST001', 'Test Medical Center', 'Hospital', '123 Test Street',
+                            'Test City', 'CA', '90210', '555-0123', 1, 1
+                        )
+                    END
+                """
+                await sql_db.execute(test_facility_sql)
+                facilities_result = [{'facility_id': 'TEST001'}]
+            
+            # Define financial classes
+            financial_classes = [
+                ('COM', 'Commercial Insurance', 3, 0.8500, 'HIGH'),
+                ('MED', 'Medicare', 1, 0.6200, 'HIGH'),
+                ('MCR', 'Medicaid', 2, 0.5500, 'NORMAL'),
+                ('PPO', 'PPO Insurance', 4, 0.9000, 'HIGH'),
+                ('HMO', 'HMO Insurance', 5, 0.7500, 'NORMAL'),
+                ('WRK', 'Workers Compensation', 3, 0.9500, 'HIGH'),
+                ('OTH', 'Other Insurance', 6, 0.7000, 'LOW'),
+                ('SELF', 'Self Pay', 8, 1.0000, 'LOW')
+            ]
+            
+            inserted_count = 0
+            
+            # Create financial classes for each facility
+            for facility in facilities_result:
+                facility_id = facility['facility_id']
+                
+                for class_id, class_name, payer_id, rate, priority in financial_classes:
+                    try:
+                        insert_sql = """
+                            IF NOT EXISTS (
+                                SELECT 1 FROM facility_financial_classes 
+                                WHERE facility_id = ? AND financial_class_id = ?
+                            )
+                            BEGIN
+                                INSERT INTO facility_financial_classes (
+                                    facility_id, financial_class_id, financial_class_name, 
+                                    payer_id, reimbursement_rate, processing_priority,
+                                    auto_posting_enabled, active, effective_date, created_at
+                                ) VALUES (?, ?, ?, ?, ?, ?, 1, 1, GETDATE(), GETDATE())
+                            END
+                        """
+                        await sql_db.execute(
+                            insert_sql,
+                            facility_id, class_id,  # For EXISTS check
+                            facility_id, class_id, class_name, payer_id, rate, priority  # For INSERT
+                        )
+                        inserted_count += 1
+                    except Exception as e:
+                        logger.debug(f"Financial class insert note for {facility_id}-{class_id}: {e}")
+            
+            logger.info(f"Created {inserted_count} financial class records")
+        else:
+            logger.info(f"Financial classes already exist ({fc_count} records)")
+    
+    except Exception as e:
+        logger.warning(f"Financial class setup warning: {e}")
+    
+    logger.info("Financial classes setup completed")
 
 async def setup_organizations(sql_db: SQLServerDatabase, logger):
     """Setup organizations table"""

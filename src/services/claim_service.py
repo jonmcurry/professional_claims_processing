@@ -409,16 +409,18 @@ class ClaimService:
 
         # Use prepared statements for optimal performance
         try:
-            # Parallel execution of validation queries
+            # Parallel execution of validation queries with correct table names
             facilities_task = self.sql.fetch_prepared("get_facilities_batch")
             classes_task = self.sql.fetch_prepared("get_financial_classes_batch")
 
             fac_rows, class_rows = await asyncio.gather(facilities_task, classes_task)
 
-        except Exception:
+        except Exception as e:
+            print(f"Warning: Prepared statements failed, using fallback queries: {e}")
             # Fallback to regular queries if prepared statements fail
+            # Updated to use your actual schema table names
             fac_task = self.sql.fetch(
-                "SELECT DISTINCT facility_id FROM facilities WHERE facility_id IS NOT NULL"
+                "SELECT DISTINCT facility_id FROM facilities WHERE facility_id IS NOT NULL AND active = 1"
             )
             class_task = self.sql.fetch(
                 "SELECT DISTINCT financial_class_id FROM facility_financial_classes WHERE financial_class_id IS NOT NULL AND active = 1"

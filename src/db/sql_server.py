@@ -1241,3 +1241,100 @@ class SQLServerDatabase(BaseDatabase):
                 "adaptive_batch_sizing": True,
             },
         }
+
+    async def fetch_prepared(
+        self, 
+        statement_name: str, 
+        *params: Any, 
+        traceparent: str | None = None
+    ) -> Iterable[dict]:
+        """Fetch using a prepared statement or fallback to regular query."""
+        
+        # Check if we have this prepared statement
+        if statement_name in self._prepared:
+            query = self._prepared[statement_name]
+            return await self.fetch_optimized_with_memory_management(
+                query, *params, is_prepared=True, traceparent=traceparent
+            )
+        
+        # Fallback: Try to get the query from predefined statements
+        # Updated to match your actual schema (facility_financial_classes)
+        predefined_queries = {
+            "get_facilities_batch": """
+                SELECT DISTINCT facility_id 
+                FROM facilities 
+                WHERE facility_id IS NOT NULL AND active = 1
+            """,
+            "get_financial_classes_batch": """
+                SELECT DISTINCT financial_class_id 
+                FROM facility_financial_classes 
+                WHERE financial_class_id IS NOT NULL AND active = 1
+            """,
+            "bulk_validate_facilities": """
+                SELECT facility_id, 1 as is_valid
+                FROM facilities 
+                WHERE facility_id = ? AND active = 1
+            """,
+            "bulk_validate_financial_classes": """
+                SELECT financial_class_id, 1 as is_valid
+                FROM facility_financial_classes 
+                WHERE financial_class_id = ? AND active = 1
+            """
+        }
+        
+        if statement_name in predefined_queries:
+            query = predefined_queries[statement_name]
+            # Prepare it for future use
+            await self.prepare_statement(statement_name, query)
+            return await self.fetch_optimized_with_memory_management(
+                query, *params, is_prepared=True, traceparent=traceparent
+            )
+        
+        # If no predefined query found, raise an error
+        raise ValueError(f"Prepared statement '{statement_name}' not found and no predefined query available")
+
+
+    # Also add these bulk validation methods that the code expects:
+
+    async def bulk_validate_facilities(self, facility_ids: List[str]) -> Dict[str, bool]:
+        """Bulk validate facility IDs."""
+        if not facility_ids:
+            return {}
+        
+        # Use IN clause for bulk validation
+        placeholders = ','.join('?' * len(facility_ids))
+        query = f"""
+            SELECT facility_id 
+            FROM facilities 
+            WHERE facility_id IN ({placeholders}) AND active = 1
+        """
+        
+        try:
+            rows = await self.fetch(query, *facility_ids)
+            valid_ids = {row.get("facility_id") for row in rows}
+            return {fid: fid in valid_ids for fid in facility_ids}
+        except Exception as e:
+            print(f"Warning: Bulk facility validation failed: {e}")
+            return {fid: False for fid in facility_ids}
+
+
+    async def bulk_validate_financial_classes(self, class_ids: List[str]) -> Dict[str, bool]:
+        """Bulk validate financial class IDs using existing facility_financial_classes table."""
+        if not class_ids:
+            return {}
+        
+        # Use IN clause for bulk validation with your existing table
+        placeholders = ','.join('?' * len(class_ids))
+        query = f"""
+            SELECT financial_class_id 
+            FROM facility_financial_classes 
+            WHERE financial_class_id IN ({placeholders}) AND active = 1
+        """
+        
+        try:
+            rows = await self.fetch(query, *class_ids)
+            valid_ids = {row.get("financial_class_id") for row in rows}
+            return {cid: cid in valid_ids for cid in class_ids}
+        except Exception as e:
+            print(f"Warning: Bulk financial class validation failed: {e}")
+            return {cid: False for cid in class_ids}
