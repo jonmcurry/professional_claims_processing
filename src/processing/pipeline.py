@@ -1684,60 +1684,88 @@ class ClaimsPipeline:
         return enriched_claims
 
     async def _insert_claims_bulk(self, claims_data: List[Dict[str, Any]]) -> int:
-        """Bulk insert claims with memory management."""
+        """Bulk insert claims with proper schema handling for both databases."""
         if not claims_data:
             return 0
 
-        # Prepare data for bulk insert using memory-pooled containers
-        insert_data = []
+        import uuid
+        from datetime import datetime
+
+        # Prepare data for bulk insert with proper column mapping
+        sql_insert_data = []
+        pg_insert_data = []
+        
         for claim in claims_data:
+            claim_id = claim.get("claim_id") or str(uuid.uuid4())
             patient_acct = claim.get("patient_account_number")
             facility_id = claim.get("facility_id")
-            procedure_code = claim.get("procedure_code")
-
+            service_to_date = claim.get("service_to_date") or datetime.now().date()
+            
             # Apply encryption if configured
             if self.encryption_key and patient_acct:
                 from ..security.compliance import encrypt_text
-
                 patient_acct = encrypt_text(str(patient_acct), self.encryption_key)
 
-            if patient_acct and facility_id:
-                insert_data.append((patient_acct, facility_id, procedure_code))
+            if patient_acct and facility_id and claim_id:
+                # SQL Server insert data (must include claim_id as PRIMARY KEY)
+                sql_insert_data.append((
+                    claim_id,
+                    facility_id, 
+                    patient_acct,
+                    claim.get("processing_status", "pending"),
+                    claim.get("processing_stage", "received"),
+                    datetime.now(),
+                    datetime.now()
+                ))
+                
+                # PostgreSQL insert data (must include service_to_date for composite key)
+                pg_insert_data.append((
+                    claim_id,
+                    facility_id,
+                    patient_acct, 
+                    service_to_date,
+                    claim.get("processing_status", "pending"),
+                    claim.get("processing_stage", "received"),
+                    datetime.now(),
+                    datetime.now()
+                ))
 
-        if insert_data:
+        total_inserted = 0
+
+        # Try SQL Server first (primary database)
+        if sql_insert_data:
             try:
-                # Use TVP for SQL Server bulk insert
-                return await self.sql.bulk_insert_tvp(
-                    "claims",
-                    ["patient_account_number", "facility_id", "procedure_code"],
-                    insert_data,
-                )
+                sql_columns = [
+                    "claim_id", "facility_id", "patient_account_number", 
+                    "processing_status", "processing_stage", "created_at", "updated_at"
+                ]
+                sql_result = await self.sql.bulk_insert_tvp("claims", sql_columns, sql_insert_data)
+                total_inserted += sql_result
+                self.logger.info(f"Successfully inserted {sql_result} claims into SQL Server")
             except Exception as e:
+                self.logger.warning(f"SQL Server insert failed: {e}")
+                # Continue to try PostgreSQL fallback
+
+        # Try PostgreSQL (staging database) 
+        if pg_insert_data:
+            try:
+                pg_columns = [
+                    "claim_id", "facility_id", "patient_account_number", "service_to_date",
+                    "processing_status", "processing_stage", "created_at", "updated_at"
+                ]
+                pg_result = await self.pg.copy_records("claims", pg_columns, pg_insert_data)
+                total_inserted += pg_result
+                self.logger.info(f"Successfully inserted {pg_result} claims into PostgreSQL")
+            except Exception as fallback_e:
                 self.logger.exception(
-                    f"TVP bulk insert failed: {e}",
+                    f"PostgreSQL fallback insert failed: {fallback_e}",
                     extra={
                         "processing_stage": "insert_claims_bulk",
                         "correlation_id": trace_id_var.get(""),
                     },
                 )
-                # Fallback to PostgreSQL COPY
-                try:
-                    return await self.pg.copy_records(
-                        "claims",
-                        ["patient_account_number", "facility_id", "procedure_code"],
-                        insert_data,
-                    )
-                except Exception as fallback_e:
-                    self.logger.exception(
-                        f"All bulk insert methods failed: {fallback_e}",
-                        extra={
-                            "processing_stage": "insert_claims_bulk",
-                            "correlation_id": trace_id_var.get(""),
-                        },
-                    )
-                    return 0
 
-        return 0
+        return total_inserted
 
     async def _update_claims_status_bulk(self, claim_ids: List[str], processing_status: str, processing_stage: str) -> None:
         """Update processing status and stage for multiple claims with deadlock retry logic."""
