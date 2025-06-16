@@ -1234,6 +1234,33 @@ class ClaimsPipeline:
                 if failed_claims_data:
                     failed_claim_ids = [f[0] for f in failed_claims_data if f[0]]  # claim_id is first element
                     await self._update_claims_status_bulk(failed_claim_ids, "failed", "failed")
+                
+                # CRITICAL FIX: Ensure ALL claims that were processed get proper status
+                # Log current state for debugging
+                self.logger.info(f"Status update check: claims={len(claims) if claims else 0}, valid={len(valid_claims)}, failed_data={len(failed_claims_data)}")
+                
+                # If we processed claims but neither valid nor failed data exists, 
+                # it means claims failed during processing stages other than validation/rules
+                if claims and not valid_claims and not failed_claims_data:
+                    # All claims failed during fetch/enrichment/ML stages
+                    all_claim_ids = [c.get("claim_id", "") for c in claims if c.get("claim_id")]
+                    if all_claim_ids:
+                        self.logger.warning(f"Marking {len(all_claim_ids)} claims as failed - failed during processing stages")
+                        await self._update_claims_status_bulk(all_claim_ids, "failed", "processing_error")
+                elif claims:
+                    # Check for any claims that weren't captured in valid or failed lists
+                    processed_claim_ids = set()
+                    if valid_claims:
+                        processed_claim_ids.update(c.get("claim_id", "") for c in valid_claims)
+                    if failed_claims_data:
+                        processed_claim_ids.update(f[0] for f in failed_claims_data if f[0])
+                    
+                    all_claim_ids = [c.get("claim_id", "") for c in claims if c.get("claim_id")]
+                    missing_claim_ids = [cid for cid in all_claim_ids if cid and cid not in processed_claim_ids]
+                    
+                    if missing_claim_ids:
+                        self.logger.warning(f"Found {len(missing_claim_ids)} claims not in processed lists - marking as failed")
+                        await self._update_claims_status_bulk(missing_claim_ids, "failed", "processing_error")
 
                 # Phase 9: Bulk Checkpointing and Audit
                 checkpoint_start = time.perf_counter()
@@ -2295,6 +2322,32 @@ class ClaimsPipeline:
             if failed_claims_data:
                 failed_claim_ids = [row[0] for row in failed_claims_data if row[0]]  # claim_id is first element
                 await self._update_claims_status_bulk(failed_claim_ids, "failed", "failed")
+            
+            # CRITICAL FIX: Ensure ALL stream claims get proper status updates
+            # Log current state for debugging  
+            self.logger.info(f"Stream status update check: claims={len(claims) if claims else 0}, valid={len(valid_claims)}, failed_data={len(failed_claims_data)}")
+            
+            # Handle claims that failed during processing stages other than validation/rules
+            if claims and not valid_claims and not failed_claims_data:
+                # All claims failed during fetch/enrichment/ML stages
+                all_claim_ids = [c.get("claim_id", "") for c in claims if c.get("claim_id")]
+                if all_claim_ids:
+                    self.logger.warning(f"Stream: Marking {len(all_claim_ids)} claims as failed - failed during processing stages")
+                    await self._update_claims_status_bulk(all_claim_ids, "failed", "processing_error")
+            elif claims:
+                # Check for any claims that weren't captured in valid or failed lists
+                processed_claim_ids = set()
+                if valid_claims:
+                    processed_claim_ids.update(c.get("claim_id", "") for c in valid_claims)
+                if failed_claims_data:
+                    processed_claim_ids.update(row[0] for row in failed_claims_data if row[0])
+                
+                all_claim_ids = [c.get("claim_id", "") for c in claims if c.get("claim_id")]
+                missing_claim_ids = [cid for cid in all_claim_ids if cid and cid not in processed_claim_ids]
+                
+                if missing_claim_ids:
+                    self.logger.warning(f"Stream: Found {len(missing_claim_ids)} claims not in processed lists - marking as failed")
+                    await self._update_claims_status_bulk(missing_claim_ids, "failed", "processing_error")
 
             # Update status
             processing_status["processed"] += len(valid_claims)
