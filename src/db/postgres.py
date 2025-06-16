@@ -268,6 +268,7 @@ class PostgresDatabase(BaseDatabase):
             jitter=self.cfg.retry_jitter,
         )
 
+    # Update the fetch_optimized_with_memory_management method to use safer connection handling
     async def fetch_optimized_with_memory_management(
         self,
         query: str,
@@ -275,105 +276,104 @@ class PostgresDatabase(BaseDatabase):
         use_replica: bool = True,
         traceparent: str | None = None,
     ) -> Iterable[dict]:
-        """Optimized fetch with comprehensive memory management."""
+        """Optimized fetch with comprehensive memory management and improved connection handling."""
         self._operation_count += 1
 
         # Periodic memory check
         if self._operation_count % self._memory_check_frequency == 0:
-            await self._periodic_memory_check()
+            await self._check_database_memory()
 
         if not await self.circuit_breaker.allow():
-            raise CircuitBreakerOpenError("Postgres circuit open")
+            raise CircuitBreakerOpenError("PostgreSQL circuit breaker open")
 
-        await self._ensure_pool()
+        # Choose pool based on use_replica flag and availability
+        pool = self.replica_pool if use_replica and self.replica_pool else self.pool
         
-        # Select pool based on use_replica setting
-        pool = (
-            self.replica_pool if use_replica and self.replica_pool 
-            else self.pool
-        )
-        assert pool
+        if not pool:
+            await self.circuit_breaker.record_failure()
+            raise ConnectionError("Database pool not available")
 
-        query = self._with_traceparent(query, traceparent)
-
-        # Check cache first with memory management
-        cache_key = f"query:{query}:{str(params)}"
-        cached = await self._get_from_cache_with_memory_check(cache_key)
-        if cached is not None:
-            metrics.inc("postgres_cache_hits")
-            return cached
-
-        # Use memory pool for result containers
-        result_container = self._memory_pool.acquire("pg_results", list)
-
-        try:
-            initial_memory = self._get_process_memory()
-            start = time.perf_counter()
-            
-            async with pool.acquire() as conn:
-                try:
-                    # Execute query and fetch results
-                    records = await conn.fetch(query, *params)
-                    
-                    # Convert records to dictionaries with memory management
-                    result_container.clear()
-                    for row in records:
-                        row_dict = self._memory_pool.acquire("pg_row_dict", dict)
-                        row_dict.clear()
-                        row_dict.update(dict(row))
-                        result_container.append(row_dict)
-
-                    duration = (time.perf_counter() - start) * 1000
-                    metrics.inc("postgres_query_ms", duration)
-                    metrics.inc("postgres_query_count")
-                    latencies.record("postgres_query", duration)
-                    record_query(query, duration)
-                    
-                    if duration > self.cfg.threshold_ms:
-                        logger.warning(
-                            "slow_query",
-                            extra={"query": query, "duration_ms": duration},
+        start = time.perf_counter()
+        
+        # Enhanced connection acquisition with retry logic
+        max_retries = 2
+        last_exception = None
+        
+        for attempt in range(max_retries):
+            try:
+                # Use timeout and proper connection state management
+                async with asyncio.wait_for(pool.acquire(), timeout=10.0) as conn:
+                    try:
+                        # Ensure connection is ready
+                        await conn.execute("SELECT 1")
+                        
+                        # Execute the actual query with timeout
+                        query_with_trace = self._with_traceparent(query, traceparent)
+                        rows = await asyncio.wait_for(
+                            conn.fetch(query_with_trace, *params), 
+                            timeout=30.0
                         )
-                    
-                    await self.circuit_breaker.record_success()
-
-                    # Check memory growth
-                    final_memory = self._get_process_memory()
-                    memory_growth = final_memory - initial_memory
-
-                    if memory_growth > 50:  # More than 50MB growth
-                        print(
-                            f"Warning: PostgreSQL query used {memory_growth:.1f}MB memory"
-                        )
-                        metrics.inc("postgres_high_memory_queries")
-
-                    # Cache results with memory management
-                    await self._cache_with_memory_management(cache_key, result_container.copy())
-                    metrics.inc("postgres_cache_misses")
-
-                    return result_container
-
-                except Exception as e:
-                    await self.circuit_breaker.record_failure()
-                    
-                    # Handle memory-related exceptions
-                    if "memory" in str(e).lower() or "out of" in str(e).lower():
-                        print(f"Memory-related database error: {e}")
-                        metrics.inc("database_memory_errors")
-                        # Trigger cleanup and retry with smaller batch
-                        await self._emergency_memory_cleanup()
-
-                        # Retry with limited results
-                        limited_query = self._add_memory_protection_to_query(query, limit=1000)
-                        return await self.fetch_optimized_with_memory_management(
-                            limited_query, *params, use_replica=use_replica, traceparent=traceparent
-                        )
-
-                    raise QueryError(str(e)) from e
-
-        finally:
-            # Return container to pool
-            self._memory_pool.release("pg_results", result_container)
+                        
+                        # Convert to dict format
+                        result = [dict(row) for row in rows]
+                        
+                        # Record success metrics
+                        duration = (time.perf_counter() - start) * 1000
+                        metrics.inc("postgres_query_ms", duration)
+                        metrics.inc("postgres_query_count")
+                        
+                        if duration > self.cfg.threshold_ms:
+                            logger.warning(
+                                "slow_query",
+                                extra={"query": query[:100], "duration_ms": duration},
+                            )
+                        
+                        await self.circuit_breaker.record_success()
+                        return result
+                        
+                    except asyncio.TimeoutError as e:
+                        last_exception = e
+                        print(f"Query timeout on attempt {attempt + 1}: {e}")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(0.5)
+                            continue
+                        raise
+                        
+                    except Exception as e:
+                        last_exception = e
+                        # Check if it's a connection-level error worth retrying
+                        if "operation is in progress" in str(e).lower() or "connection" in str(e).lower():
+                            print(f"Connection error on attempt {attempt + 1}, retrying: {e}")
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(0.5)
+                                continue
+                        raise
+                        
+            except asyncio.TimeoutError as e:
+                last_exception = e
+                print(f"Connection acquisition timeout on attempt {attempt + 1}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1.0)
+                    continue
+                
+            except Exception as e:
+                last_exception = e
+                print(f"Connection error on attempt {attempt + 1}: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(0.5)
+                    continue
+                break
+        
+        # If we get here, all retries failed
+        await self.circuit_breaker.record_failure()
+        
+        if last_exception:
+            if "operation is in progress" in str(last_exception).lower():
+                raise ConnectionError(f"Database connection conflict after {max_retries} retries: {last_exception}")
+            else:
+                raise QueryError(f"Query failed after {max_retries} retries: {last_exception}")
+        else:
+            raise ConnectionError(f"Connection acquisition failed after {max_retries} retries")
 
     async def _get_from_cache_with_memory_check(self, cache_key: str) -> Optional[Any]:
         """Get from cache with memory management check."""
@@ -1003,3 +1003,118 @@ class PostgresDatabase(BaseDatabase):
             prepared_statements=len(self._prepared),
             cache_memory=self._current_cache_memory,
         )
+    
+    async def fetch_prepared(
+        self, 
+        statement_name: str, 
+        *params: Any, 
+        use_replica: bool = True,
+        traceparent: str | None = None
+    ) -> Iterable[dict]:
+        """Fetch using a prepared statement or fallback to regular query."""
+        self._operation_count += 1
+
+        # Periodic memory check
+        if self._operation_count % self._memory_check_frequency == 0:
+            await self._check_database_memory()
+
+        if not await self.circuit_breaker.allow():
+            raise CircuitBreakerOpenError("PostgreSQL circuit breaker open")
+
+        # Check if we have this prepared statement
+        if statement_name in self._prepared:
+            query = self._prepared[statement_name]
+            return await self.fetch_optimized_with_memory_management(
+                query, *params, use_replica=use_replica, traceparent=traceparent
+            )
+        
+        # Check for predefined common queries
+        predefined_queries = {
+            "fetch_claims_batch": """
+                SELECT c.*, li.line_number, li.procedure_code AS li_procedure_code, 
+                    li.units AS li_units, li.charge_amount AS li_charge_amount, 
+                    li.service_from_date AS li_service_from_date, 
+                    li.service_to_date AS li_service_to_date 
+                FROM claims c LEFT JOIN claims_line_items li ON c.claim_id = li.claim_id 
+                ORDER BY c.priority DESC LIMIT $1 OFFSET $2
+            """,
+            "fetch_claims_priority": """
+                SELECT c.*, li.line_number, li.procedure_code AS li_procedure_code, 
+                    li.units AS li_units, li.charge_amount AS li_charge_amount, 
+                    li.service_from_date AS li_service_from_date, 
+                    li.service_to_date AS li_service_to_date 
+                FROM claims c LEFT JOIN claims_line_items li ON c.claim_id = li.claim_id 
+                WHERE c.priority > $3
+                ORDER BY c.priority DESC LIMIT $1 OFFSET $2
+            """,
+            "get_rvu_single": """
+                SELECT procedure_code, description, total_rvu, work_rvu, 
+                    practice_expense_rvu, malpractice_rvu, conversion_factor
+                FROM rvu_data 
+                WHERE procedure_code = $1 AND status = 'active'
+            """,
+            "get_rvu_bulk_any": """
+                SELECT procedure_code, description, total_rvu, work_rvu, 
+                    practice_expense_rvu, malpractice_rvu, conversion_factor
+                FROM rvu_data 
+                WHERE procedure_code = ANY($1) AND status = 'active'
+            """,
+            "rvu_bulk_fetch": """
+                SELECT procedure_code, description, total_rvu, work_rvu, 
+                    practice_expense_rvu, malpractice_rvu, conversion_factor
+                FROM rvu_data 
+                WHERE procedure_code = ANY($1) AND status = 'active'
+            """
+        }
+        
+        if statement_name in predefined_queries:
+            query = predefined_queries[statement_name]
+            # Prepare it for future use
+            await self.prepare_named(statement_name, query)
+            return await self.fetch_optimized_with_memory_management(
+                query, *params, use_replica=use_replica, traceparent=traceparent
+            )
+        
+        # If no predefined query found, raise an error instead of failing silently
+        raise ValueError(f"Prepared statement '{statement_name}' not found and no predefined query available")
+
+
+    # Also add this connection management improvement to prevent "operation in progress" errors
+    async def _acquire_connection_safely(self, use_replica: bool = False) -> "asyncpg.Connection":
+        """Safely acquire a connection with proper error handling."""
+        pool = self.replica_pool if use_replica and self.replica_pool else self.pool
+        
+        if not pool:
+            raise ConnectionError("Database pool not initialized")
+        
+        max_retries = 3
+        retry_delay = 0.1
+        
+        for attempt in range(max_retries):
+            try:
+                # Use timeout to prevent hanging
+                async with asyncio.wait_for(pool.acquire(), timeout=5.0) as conn:
+                    # Ensure connection is in a clean state
+                    try:
+                        await conn.execute("SELECT 1")
+                        return conn
+                    except Exception as e:
+                        # Connection might be in a bad state, continue to retry
+                        print(f"Connection validation failed on attempt {attempt + 1}: {e}")
+                        continue
+                        
+            except asyncio.TimeoutError:
+                print(f"Connection acquisition timeout on attempt {attempt + 1}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay * (2 ** attempt))
+                    continue
+                raise ConnectionError("Unable to acquire database connection: timeout")
+                
+            except Exception as e:
+                print(f"Connection acquisition error on attempt {attempt + 1}: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay * (2 ** attempt))
+                    continue
+                raise ConnectionError(f"Unable to acquire database connection: {e}")
+        
+        raise ConnectionError("Failed to acquire connection after all retries")
