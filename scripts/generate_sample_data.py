@@ -3,6 +3,7 @@
 Sample Claims Data Generator
 Generates 100,000 realistic healthcare claims and loads them into PostgreSQL staging database.
 UPDATED: facility_id as VARCHAR(20) string to match both PostgreSQL and SQL Server schemas
+ADDED: Business rules creation after data generation
 """
 
 import asyncio
@@ -475,6 +476,106 @@ async def create_batch_metadata(db: PostgresDatabase, total_claims: int) -> str:
     return batch_id
 
 
+async def create_business_rules(db: PostgresDatabase) -> int:
+    """Create business rules for validating claims data"""
+    logger = logging.getLogger(__name__)
+    logger.info("Creating business rules...")
+    
+    rules_created = 0
+    
+    try:
+        # Check if rules already exist to avoid duplicates
+        existing_rules = await db.fetch(
+            "SELECT rule_name FROM business_rules WHERE rule_name IN ($1, $2)",
+            'Office Visit Charge Range Validation',
+            'Line Item Date Range Validation'
+        )
+        
+        existing_rule_names = {row['rule_name'] for row in existing_rules}
+        
+        # Rule 1: Office Visit Charge Range Validation
+        if 'Office Visit Charge Range Validation' not in existing_rule_names:
+            await db.execute(
+                """
+                INSERT INTO business_rules (
+                    rule_name,
+                    rule_type,
+                    rule_logic,
+                    severity_level,
+                    is_active,
+                    applies_to_facilities,
+                    applies_to_financial_classes,
+                    created_by
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                """,
+                'Office Visit Charge Range Validation',
+                'charge_validation',
+                json.dumps({
+                    "condition": "procedure_code LIKE '99%'",
+                    "validation": {
+                        "field": "charge_amount",
+                        "min_value": 50.00,
+                        "max_value": 1000.00
+                    },
+                    "error_message": "Office visit charges must be between $50 and $1000",
+                    "error_code": "CHARGE_RANGE_INVALID"
+                }),
+                'warning',
+                True,
+                json.dumps(["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]),
+                json.dumps(["COM", "MED", "MCR", "PPO", "HMO"]),
+                'data_generator'
+            )
+            rules_created += 1
+            logger.info("Created Office Visit Charge Range Validation rule")
+        else:
+            logger.info("Office Visit Charge Range Validation rule already exists")
+        
+        # Rule 2: Line Item Date Range Validation
+        if 'Line Item Date Range Validation' not in existing_rule_names:
+            await db.execute(
+                """
+                INSERT INTO business_rules (
+                    rule_name,
+                    rule_type,
+                    rule_logic,
+                    severity_level,
+                    is_active,
+                    applies_to_facilities,
+                    applies_to_financial_classes,
+                    created_by
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                """,
+                'Line Item Date Range Validation',
+                'date_validation',
+                json.dumps({
+                    "condition": "always",
+                    "validation": {
+                        "rule": "line_item_service_date BETWEEN claim_service_from_date AND claim_service_to_date",
+                        "fields": ["service_from_date", "service_to_date"]
+                    },
+                    "error_message": "Line item service dates must fall within the claim service period",
+                    "error_code": "DATE_RANGE_INVALID"
+                }),
+                'error',
+                True,
+                None,
+                None,
+                'data_generator'
+            )
+            rules_created += 1
+            logger.info("Created Line Item Date Range Validation rule")
+        else:
+            logger.info("Line Item Date Range Validation rule already exists")
+        
+        logger.info(f"Business rules processing complete. Created {rules_created} new rules.")
+        return rules_created
+        
+    except Exception as e:
+        logger.error(f"Error creating business rules: {e}")
+        raise
+
+
 async def generate_and_load_sample_data(
     total_claims: int = 100000, batch_size: int = 1000
 ):
@@ -526,6 +627,10 @@ async def generate_and_load_sample_data(
             logger.info(
                 f"Batch {batch_num + 1} completed. Total loaded: {total_loaded:,}/{total_claims:,}"
             )
+
+        # Create business rules for validation
+        await create_business_rules(db)
+        logger.info("Business rules created successfully")
 
         logger.info(
             f"Successfully generated and loaded {total_loaded:,} sample claims!"
